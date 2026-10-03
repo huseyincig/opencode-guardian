@@ -1,4 +1,4 @@
-# OpenCode Guardian
+# 🛡️ OpenCode Guardian
 
 [![npm version](https://img.shields.io/npm/v/opencode-guardian?color=cb3837&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
@@ -16,7 +16,7 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ---
 
-## Verification
+## 📊 Verification
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
@@ -24,7 +24,7 @@ Guardian passed the reported automated, sandbox and host acceptance checks. The 
 
 ---
 
-## Key Highlights
+## ✨ Key Highlights
 
 - **Dual-Mode Architecture:** Seamlessly supports both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) with unified runtime adapters.
 - **Compact TUI Sidebar:** Modern 2-column key-value widget matching the clean aesthetic of CortexKit and OMO-Slim. Expands with a single click.
@@ -37,11 +37,11 @@ Guardian passed the reported automated, sandbox and host acceptance checks. The 
 
 ---
 
-## Installation
+## 📦 Installation
 
 Add `opencode-guardian` to your OpenCode configuration (`opencode.json` in your project or `~/.config/opencode/opencode.json`):
 
-### OpenCode v1 (1.x)
+### 🚀 OpenCode v1 (1.x)
 
 Use the v1 `plugin` key in your project's `opencode.json` or `~/.config/opencode/opencode.json`:
 
@@ -53,7 +53,7 @@ Use the v1 `plugin` key in your project's `opencode.json` or `~/.config/opencode
 
 For local development with v1, use `"plugin": ["file:///path/to/opencode-guardian"]`.
 
-### OpenCode v2 (2.x)
+### ⚡ OpenCode v2 (2.x)
 
 Use the v2 **`plugins`** key in `opencode.json` or `opencode.jsonc`:
 
@@ -69,11 +69,11 @@ Refer to the [v1 plugin documentation](https://opencode.ai/docs/plugins/) and [v
 
 ---
 
-## TUI Sidebar Interface
+## 🖥️ TUI Sidebar Interface
 
 OpenCode Guardian includes a dedicated TUI extension that mounts into OpenCode's sidebar. It displays live status, intervention counters, and update notices.
 
-### Collapsed View (Default)
+### 🔽 Collapsed View (Default)
 
 ```text
 ▶ Guardian                 v0.5.0 (↑)
@@ -85,7 +85,7 @@ Interventions                 0w · 0r
 - **Status:** Real-time health (`● Active`, `● 1 warn`, or `● 1 blocked`).
 - **Interventions:** Compact summary of warnings (`w`) and automatic remediations (`r`).
 
-### Expanded View (Click to Toggle)
+### 🔼 Expanded View (Click to Toggle)
 
 ```text
 ▼ Guardian                 v0.5.0 (↑)
@@ -104,7 +104,7 @@ Update                         v0.5.1
 
 ---
 
-## The 14 Guardrail Rules
+## 📋 The 14 Guardrail Rules
 
 OpenCode Guardian evaluates assistant turns against 14 deterministic rules. Rules can be configured as `error`, `warn`, or `off`; remediation is bounded and post-turn findings cannot undo an already-executed command:
 
@@ -127,7 +127,7 @@ OpenCode Guardian evaluates assistant turns against 14 deterministic rules. Rule
 
 ---
 
-## Configuration (`opencode-guardian.json`)
+## ⚙️ Configuration (`opencode-guardian.json`)
 
 Guardian works out of the box with zero configuration. You can customize rules and thresholds by placing `opencode-guardian.json` in your project root, `.opencode/`, or `~/.config/opencode/`:
 
@@ -165,14 +165,14 @@ Guardian works out of the box with zero configuration. You can customize rules a
 }
 ```
 
-### Severity Options:
+### 🎛️ Severity Options:
 - `"error"`: High-confidence violation triggers an automatic remediation prompt (bounded by `remediationBudget`).
 - `"warn"`: Recorded in telemetry and displayed in TUI, but does not interrupt agent flow.
 - `"off"`: Completely disables the rule.
 
 ---
 
-## Task Contracts & Multilingual Support
+## 🌐 Task Contracts & Multilingual Support
 
 When a user submits an instruction, Guardian extracts a deterministic task contract before model execution. Supported intent patterns include:
 - **Languages Supported:** English, Turkish, Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, and Indonesian.
@@ -186,7 +186,7 @@ Please refactor the authentication service and verify all tests pass.
 
 ---
 
-## Preflight Shell Protection (Opt-In)
+## 🔒 Preflight Shell Protection (Opt-In)
 
 By default, Guardian analyzes operations after tool execution. If you want **pre-execution blocking** that intercepts dangerous shell commands *before* they are sent to the terminal, enable preflight:
 
@@ -231,14 +231,14 @@ allowance; real-looking API tokens and remote credentials are still blocked.
 
 ---
 
-## Telemetry & CLI Status
+## 📈 Telemetry & CLI Status
 
 Guardian maintains a private, redacted log of local events:
 - **Project Log:** `<project>/.opencode/guardian-events.jsonl` (mode `0600`).
 - **Global Fallback:** `~/.local/state/opencode-guardian/guardian-events.jsonl`.
 - **Privacy:** Contains only rule codes and SHA-256 session fingerprints. **Never** stores commands, file contents, secrets, or prompts.
 
-### Command Line Interface
+### 💻 Command Line Interface
 
 Check Guardian's status at any time from your terminal:
 
@@ -260,7 +260,7 @@ Event log: /path/to/project/.opencode/guardian-events.jsonl
 
 ---
 
-## Architecture & Turn Lifecycle
+## 🔄 Architecture & Turn Lifecycle
 
 ```mermaid
 flowchart TD
@@ -309,7 +309,7 @@ OpenCode Guardian's architecture and security models are grounded in peer-review
 
 ---
 
-## Verification & Testing
+## 🧪 Verification & Testing
 
 Run the checks locally:
 
@@ -329,6 +329,6 @@ Technical documentation: [Test results](docs/verification-report.md) · [Securit
 
 ---
 
-## License
+## 📄 License
 
 MIT © [Hüseyin Hadi Çığ](https://github.com/huseyincig)

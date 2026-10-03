@@ -23,6 +23,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: node scripts/check-docs.mjs
       - run: npm test
       - run: node sandbox/smoke-test.mjs
       - run: node sandbox/comprehensive-test.mjs

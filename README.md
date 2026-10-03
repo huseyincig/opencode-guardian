@@ -1,4 +1,4 @@
-# opencode-guardian 🛡️
+# OpenCode Guardian
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version: 0.5.0](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://www.npmjs.com/package/opencode-guardian)
@@ -6,9 +6,30 @@
 [![TypeScript: 5.x](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![CI](https://github.com/huseyincig/opencode-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/huseyincig/opencode-guardian/actions/workflows/ci.yml)
 
+[Install](#installation) · [Capabilities](#key-highlights) · [Verified quality](#verified-quality) · [Architecture](#architecture--turn-lifecycle) · [Documentation](docs/README.md)
+
 A high-performance, deterministic quality, safety, and verification plugin for **OpenCode** AI coding agents.
 
 OpenCode Guardian continuously supervises agent turns: guiding model execution before calls, correlating tool results at session idle, intercepting destructive shell actions, and enforcing that agents verify their work with genuine post-change evidence before declaring tasks complete.
+
+---
+
+## Verified quality
+
+![Audited verification summary: 374 automated tests, 18 sandbox scenarios, and four acceptance criteria passed for each OpenCode host](docs/assets/verification-overview.svg)
+
+**Audited baseline:** [`b86b08e`](https://github.com/huseyincig/opencode-guardian/commit/b86b08e53ae6d9a0101db198bfe394ebdd19ebdb) · 03 October 2026. The graphic records a **historical snapshot**; the [CI badge](https://github.com/huseyincig/opencode-guardian/actions/workflows/ci.yml) reflects ongoing runs.
+
+| Verification | Result | Evidence |
+| :--- | ---: | :--- |
+| Unit and regression | **374 / 374** | `npm test` |
+| Isolated sandbox scenarios | **18 / 18** | `sandbox/comprehensive-test.mjs` |
+| V1 acceptance criteria | **4 / 4** | Host QA, SDK-model integration, security fixture, and TUI/lifecycle checks |
+| V2 acceptance criteria | **4 / 4** | Live host remediation, preflight interception, TUI, and lifecycle checks |
+| Production dependency audit | **0 reported advisories** | `npm audit --omit=dev` |
+
+**Security evidence:** Disposable test files retained identical SHA-256 hashes before and after blocked deletion attempts. The complete [verification report](docs/verification-report.md) separates live-host observations from simulated tests and documents the **12 remaining high-severity development-dependency advisories**. Strict preflight remains opt-in; results are scoped to the audited commit.
+
 
 ---
 
@@ -296,21 +317,31 @@ OpenCode Guardian's architecture and security models are grounded in peer-review
 
 ## Verification & Testing
 
-OpenCode Guardian is backed by a comprehensive automated test suite:
+The automated suite runs across both host adapters, guardrail rules, preflight regressions, the V1 completion watcher, and V2 event/hook lifecycle behavior. The pinned acceptance report also records real-host results and cryptographic fixture checks.
 
 ```bash
-# Run unit and regression tests (the suite count is reported by the runner)
-npm test
-
-# Run TypeScript typechecks
+npm ci
 npm run typecheck
-
-# Run end-to-end scenario test suite (18 scenarios)
+npm test
+node sandbox/smoke-test.mjs
 node sandbox/comprehensive-test.mjs
-
-# Verify package contents
+npm audit --omit=dev
+node scripts/check-dev-audit.mjs
+node scripts/check-docs.mjs
 npm pack --dry-run
 ```
+
+The baseline above reported **374/374 automated tests**, **18/18 sandbox scenarios**, and a complete 72-file package. The development-only advisory exception is tracked separately; a clean production audit does not imply zero development advisories.
+
+### Documentation
+
+| Guide | What you will find |
+| :--- | :--- |
+| [Verification & Live Acceptance Report](docs/verification-report.md) | Test methodology, V1/V2 results, before/after SHA-256 evidence, and known limitations |
+| [Security Benchmark](docs/security-benchmark.md) | Synthetic shell-risk benchmark and coverage |
+| [Task Contract & Adapter Architecture](docs/task-contract-v1-v2.md) | Hook mapping, V1 watcher, and remediation lifecycle |
+| [OWASP Agentic Top 10 Mapping](docs/owasp-agentic-top10-2026.md) | Threat coverage, limitations, and safeguards |
+| [Documentation index](docs/README.md) | All project guides in one place |
 
 ---
 

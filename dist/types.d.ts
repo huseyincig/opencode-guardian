@@ -16,6 +16,7 @@ export interface GuardConfig {
     /** Optional strict tool hook; disabled unless explicitly enabled. */
     preflight?: {
         enabled?: boolean;
+        shellTools?: string[];
     };
     /** Passive startup update notice; enabled unless explicitly disabled. */
     updateNotice?: {

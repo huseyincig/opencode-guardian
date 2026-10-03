@@ -213,3 +213,58 @@ test("decoded shell pipelines remain opaque behind sudo wrappers", () => {
   }
   assert.equal(evaluatePreflight("bash", { command: "printf YWJj | base64 -d" }), undefined);
 });
+
+test("configured custom shell tools are inspected but unrelated tools remain untouched", () => {
+  const custom = ["mcp.remote.exec_task"];
+  assert.equal(evaluatePreflight("mcp.remote.exec_task", { command: "rm fixture" }), undefined);
+  assert.equal(evaluatePreflight("mcp.remote.exec_task", { command: "rm fixture" }, custom),
+    "destructive-command");
+  assert.equal(evaluatePreflight("mcp.remote.exec_task", {}, custom),
+    "uninspectable-shell-input");
+  assert.equal(evaluatePreflight("mcp.remote.read", { command: "rm fixture" }, custom), undefined);
+  assert.throws(() => enforcePreflight("mcp.remote.exec_task", { command: "rm fixture" }, custom),
+    (error) => error.reason === "destructive-command");
+});
+
+test("V1 configured custom tool alias is blocked at the host hook", async (t) => {
+  const directory = tempConfig(t, {
+    enabled: true, preflight: { enabled: true, shellTools: ["mcp.remote.exec_task"] },
+  });
+  const hooks = await Guardian.server({ directory, client });
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "mcp.remote.exec_task", sessionID: "custom-v1" },
+      { args: { command: "rm fixture" } }
+    ),
+    (error) => error.reason === "destructive-command"
+  );
+});
+
+test("V2 configured custom tool alias is blocked and disposed on unload", async (t) => {
+  const directory = tempConfig(t, {
+    enabled: true, preflight: { enabled: true, shellTools: ["mcp.remote.exec_task"] },
+  });
+  let before;
+  const host = v2Context(directory, {
+    async hook(name, handler) {
+      assert.equal(name, "execute.before");
+      before = handler;
+      return { dispose() {} };
+    },
+  });
+  const cleanup = await Guardian.setup(host.context);
+  try {
+    assert.throws(
+      () => before({ tool: "mcp.remote.exec_task", sessionID: "custom-v2",
+        input: { command: "rm fixture" } }),
+      (error) => error.reason === "destructive-command"
+    );
+  } finally { await cleanup(); }
+});
+
+test("invalid preflight shellTools configuration fails visibly", async (t) => {
+  for (const shellTools of ["mcp.remote.exec_task", ["", "mcp.remote.exec_task"], [42]]) {
+    const directory = tempConfig(t, { enabled: true, preflight: { enabled: true, shellTools } });
+    await assert.rejects(Guardian.server({ directory, client }), /preflight\.shellTools/);
+  }
+});

@@ -18,12 +18,6 @@ export const SECRET_PATTERNS: { regex: RegExp; name: string }[] = [
   { regex: /\bAuthorization\s*[:=]\s*["']?Bearer\s+([A-Za-z0-9._~-]{24,})["']?/i, name: "Bearer Authorization Token" },
 ];
 
-function isSafeFile(filePath?: string): boolean {
-  if (!filePath) return false;
-  const lower = filePath.toLowerCase();
-  return lower.endsWith(".example") || lower.endsWith(".template") || lower.endsWith(".sample") || lower.includes(".env.example");
-}
-
 function extractFilePathFromPatch(patch: unknown): string | undefined {
   if (typeof patch !== "string") return undefined;
   const match = patch.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
@@ -58,7 +52,7 @@ export const noSecretsRule: GuardRule = {
     const seen = new Set<string>();
 
     const checkCode = (code: string, filePath?: string, source = "file") => {
-      if (!code || typeof code !== "string" || isSafeFile(filePath)) return;
+      if (!code || typeof code !== "string") return;
 
       for (const pattern of SECRET_PATTERNS) {
         if (seen.has(pattern.name)) continue;

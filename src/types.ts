@@ -17,7 +17,7 @@ export interface GuardConfig {
   /** Separate, bounded continuation budget for explicit iterative tasks (0..5). */
   iterationBudget?: number;
   /** Optional strict tool hook; disabled unless explicitly enabled. */
-  preflight?: { enabled?: boolean };
+  preflight?: { enabled?: boolean; shellTools?: string[] };
   /** Passive startup update notice; enabled unless explicitly disabled. */
   updateNotice?: { enabled?: boolean };
   rules?: {

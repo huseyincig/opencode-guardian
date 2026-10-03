@@ -131,3 +131,24 @@ test("Guardian sidebar is compact by default and contains expandable details", a
   assert.match(runtime, /\(↑\)/);
   assert.doesNotMatch(runtime, /@opentui\/solid\/jsx-runtime/);
 });
+
+test("dual-mode SDK entrypoints and Node 24 package contract", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { readFile } = await import("node:fs/promises");
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.engines.node, ">=24.0.0");
+  const v1 = readFileSync(new URL(import.meta.resolve("@opencode-ai/plugin/tui")), "utf8");
+  const v2 = readFileSync(new URL(import.meta.resolve("@opencode/plugin/tui")), "utf8");
+  assert.equal(typeof v1, "string");
+  assert.equal(typeof v2, "string");
+  assert.equal(typeof TuiPlugin.tui, "function");
+  assert.equal(typeof TuiPlugin.setup, "function");
+});
+
+
+test("V2 accent never relies on the possibly transparent action background", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/tui.tsx", import.meta.url), "utf8");
+  assert.match(source, /accent: context\.theme\.status\?\.success\?\.base \?\? context\.theme\.text\.base/);
+  assert.doesNotMatch(source, /accent: context\.theme\.background\.action\.primary\.base/);
+});

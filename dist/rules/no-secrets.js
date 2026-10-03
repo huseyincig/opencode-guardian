@@ -15,12 +15,6 @@ export const SECRET_PATTERNS = [
     { regex: /\b(?:_authToken|npmAuthToken)\s*=\s*["']?([A-Za-z0-9._~-]{20,})["']?/i, name: "npm Registry Auth Token" },
     { regex: /\bAuthorization\s*[:=]\s*["']?Bearer\s+([A-Za-z0-9._~-]{24,})["']?/i, name: "Bearer Authorization Token" },
 ];
-function isSafeFile(filePath) {
-    if (!filePath)
-        return false;
-    const lower = filePath.toLowerCase();
-    return lower.endsWith(".example") || lower.endsWith(".template") || lower.endsWith(".sample") || lower.includes(".env.example");
-}
 function extractFilePathFromPatch(patch) {
     if (typeof patch !== "string")
         return undefined;
@@ -50,7 +44,7 @@ export const noSecretsRule = {
         const findings = [];
         const seen = new Set();
         const checkCode = (code, filePath, source = "file") => {
-            if (!code || typeof code !== "string" || isSafeFile(filePath))
+            if (!code || typeof code !== "string")
                 return;
             for (const pattern of SECRET_PATTERNS) {
                 if (seen.has(pattern.name))

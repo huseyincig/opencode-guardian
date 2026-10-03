@@ -21,7 +21,7 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 - **Evidence-Based Task Contracts:** Analyzes human requests across 13 languages to extract required verifications (tests, builds, source reviews) and prevents premature task exits without proof.
 - **14 Deterministic Rules:** Blocks shortcuts, empty stubs, unverified claims, masked errors, test weakening, leaked secrets, undeclared dependencies, and repetitive execution loops.
 - **Zero Configuration:** Works instantly out of the box with production-tested defaults. Fully configurable via `opencode-guardian.json`.
-- **Zero Runtime Dependencies:** Standalone precompiled JavaScript (`dist/`) requiring no external server dependencies.
+- **Server Runtime:** Precompiled JavaScript (`dist/`) has no mandatory third-party server dependencies. The optional TUI uses the host's OpenTUI/Solid runtime (declared as optional peers).
 
 ---
 
@@ -29,25 +29,31 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 Add `opencode-guardian` to your OpenCode configuration (`opencode.json` in your project or `~/.config/opencode/opencode.json`):
 
-### OpenCode v1 & v2
+### OpenCode v1 (1.x)
+
+Use the v1 `plugin` key in your project's `opencode.json` or `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": [
-    "opencode-guardian@latest"
-  ]
+  "plugin": ["opencode-guardian@latest"]
 }
 ```
 
-### Local / Development
+For local development with v1, use `"plugin": ["file:///path/to/opencode-guardian"]`.
+
+### OpenCode v2 (2.x beta)
+
+Use the v2 **`plugins`** key in `opencode.json` or `opencode.jsonc`:
 
 ```json
 {
-  "plugin": [
-    "file:///path/to/opencode-guardian"
-  ]
+  "plugins": ["opencode-guardian@latest"]
 }
 ```
+
+For local development with v2, use `"plugins": ["file:///path/to/opencode-guardian"]`. The package exposes separate server and TUI entrypoints; the host must load the corresponding runtime.
+
+Refer to the [v1 plugin documentation](https://opencode.ai/docs/plugins/) and [v2 plugin documentation](https://opencode.ai/v2/docs/build/plugins/) for version-specific loading behavior.
 
 ---
 
@@ -88,7 +94,7 @@ Update                         v0.5.1
 
 ## The 14 Guardrail Rules
 
-OpenCode Guardian evaluates every assistant turn against 14 deterministic rules:
+OpenCode Guardian evaluates assistant turns against 14 deterministic rules. Rules can be configured as `error`, `warn`, or `off`; remediation is bounded and post-turn findings cannot undo an already-executed command:
 
 | Category | Rule ID | Default | What It Enforces |
 | :--- | :--- | :---: | :--- |
@@ -115,7 +121,6 @@ Guardian works out of the box with zero configuration. You can customize rules a
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
   "enabled": true,
   "remediationBudget": 1,
   "iterationBudget": 3,
@@ -182,7 +187,23 @@ By default, Guardian analyzes operations after tool execution. If you want **pre
 ```
 
 - Intercepts destructive commands (`rm -rf /`, `git reset --hard`, `DROP DATABASE`, `mkfs`, fork bombs, encoded base64 pipelines).
-- Operates at the host hook level (`tool.execute.before` in v1, `ctx.tool.hook("execute.before")` in v2).
+- Operates at the host hook level (`tool.execute.before` in v1, `ctx.tool.hook("execute.before")` in v2). Only recognized shell tools are inspected; custom tools and runtime-generated payloads also require host permissions and sandboxing.
+
+For an MCP/custom tool that really executes shell commands but does not have a recognized tool name, explicitly opt it in:
+
+```json
+{
+  "preflight": {
+    "enabled": true,
+    "shellTools": ["mcp.remote.exec_task"]
+  }
+}
+```
+
+The listed tool must expose one unambiguous string `command`, `cmd`, or `script` argument. Unknown/malformed input is rejected **for recognized or explicitly listed shell tools**. Guardian cannot inspect arbitrary custom tool internals, script files loaded at execution, or dynamically decoded commands; retain OpenCode permissions and OS isolation.
+
+**V2 project scope:** `ctx.location.directory` is where a plugin instance loads, not necessarily the location of each session. Guardian resolves session directories for post-turn inspection and local event logs, while strict preflight registration and configuration are determined at plugin setup. For distinct per-project preflight policies, load a separate plugin instance for each project.
+
 
 ---
 
@@ -253,7 +274,7 @@ OpenCode Guardian's architecture and security models are grounded in peer-review
 
 2. **The GuardFall Vulnerability Research (Adversa AI, June 2026):**
    - **Vulnerability Context:** Discovered by Adversa AI in June 2026, the *GuardFall* research revealed systemic flaws across 10 out of 11 popular coding agents where string-matching blocklists failed to detect obfuscated shell commands (such as quote removal `r''m`, variable expansion `$IFS`, paired backtick substitution, and encoded Base64 pipelines).
-   - **Guardian Defense:** OpenCode Guardian incorporates dedicated AST-aware pattern recognition ([`src/shell-risk.ts`](src/shell-risk.ts)) and regression suites ([`tests/guardfall-regression.test.mjs`](tests/guardfall-regression.test.mjs)) to neutralize GuardFall-style bypasses in both advisory inspection and strict preflight.
+   - **Guardian Defense:** OpenCode Guardian incorporates dedicated conservative shell-pattern analysis ([`src/shell-risk.ts`](src/shell-risk.ts)) and regression suites ([`tests/guardfall-regression.test.mjs`](tests/guardfall-regression.test.mjs)) to recognize documented GuardFall-style patterns during post-turn inspection and opt-in strict preflight. This is not a complete shell interpreter or a general permission boundary.
 
 3. **OWASP Top 10 for Agentic Applications (2026):**
    - OpenCode Guardian is architected to address critical vulnerabilities defined in the OWASP Agentic Top 10 framework, including **ASI01** (Agent Goal Hijacking), **ASI02** (Tool Misuse), **ASI03** (Identity & Privilege Abuse), **ASI05** (Unexpected Code Execution), and **ASI08** (Cascading Failures).
@@ -266,7 +287,7 @@ OpenCode Guardian's architecture and security models are grounded in peer-review
 OpenCode Guardian is backed by a comprehensive automated test suite:
 
 ```bash
-# Run unit and regression tests (346 tests)
+# Run unit and regression tests (the suite count is reported by the runner)
 npm test
 
 # Run TypeScript typechecks

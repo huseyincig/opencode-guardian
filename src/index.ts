@@ -191,9 +191,12 @@ async function handleSessionIdle(
 }
 
 /** Records only recognized shell calls and a rule code, never raw commands. */
-function inspectPreflight(tool: string, args: unknown, sessionID?: string, directory?: string): void {
-  if (!isShellExecutionTool(tool)) return;
-  const finding = evaluatePreflight(tool, args);
+function inspectPreflight(
+  tool: string, args: unknown, sessionID?: string, directory?: string,
+  additionalTools: readonly string[] = []
+): void {
+  if (!isShellExecutionTool(tool, additionalTools)) return;
+  const finding = evaluatePreflight(tool, args, additionalTools);
   recordGuardianEvent({
     kind: finding ? "preflight-blocked" : "preflight-allowed",
     session: sessionFingerprint(sessionID),
@@ -225,7 +228,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
     ...(strictPreflight ? {
       "tool.execute.before": async (
         input: { tool: string; sessionID?: string }, output: { args: unknown }
-      ) => inspectPreflight(input.tool, output.args, input.sessionID, directory),
+      ) => inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools),
     } : {}),
     "chat.message": async (input, output) => {
       const text = output.parts
@@ -373,7 +376,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     }
     try {
       const registration = await context.tool.hook("execute.before", (event) => {
-        inspectPreflight(event.tool, event.input, event.sessionID, directory);
+        inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools);
       });
       if (!registration || typeof registration.dispose !== "function") {
         throw new Error("V2 tool hook did not return a valid registration.");
@@ -428,8 +431,12 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   }
 
   const eventLoop = async () => {
-    try {
-      for await (const event of events) {
+    let activeEvents = events;
+    // A terminated stream must never disable session inspection silently.
+    // Retry a bounded number of times and keep strict tool hooks registered.
+    for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt++) {
+      try {
+        for await (const event of activeEvents) {
         const eventData = event as {
           type?: string;
           data?: { sessionID?: string; info?: { id?: string } };
@@ -481,10 +488,46 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           },
           engine
         );
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) {
+        }
+        if (controller.signal.aborted) return;
+        throw new Error("V2 event stream ended before plugin teardown.");
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        recordGuardianEvent({ kind: "inspection-error" }, directory);
         console.error("[opencode-guardian] V2 event subscription error:", error);
+      }
+
+      if (attempt === 2) {
+        console.error("[opencode-guardian] V2 idle inspection stopped after three stream failures; reload the plugin to restore it.");
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          controller.signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          controller.signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 200 * (attempt + 1));
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      if (controller.signal.aborted) return;
+      try {
+        const next = context.event.subscribe({ signal: controller.signal });
+        if (!next || typeof next[Symbol.asyncIterator] !== "function") {
+          throw new Error("V2 event resubscription did not return an async iterable.");
+        }
+        activeEvents = next;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          recordGuardianEvent({ kind: "inspection-error" }, directory);
+          console.error("[opencode-guardian] V2 event resubscription failed; reload the plugin:", error);
+        }
+        return;
       }
     }
   };

@@ -210,7 +210,7 @@ const v2Plugin: Plugin.Definition = {
     return context.ui.slot({
       append: "sidebar.content",
       render: () => <GuardianSidebar directory={directory} colors={{
-        accent: context.theme.background.action.primary.base,
+        accent: context.theme.status?.success?.base ?? context.theme.text.base,
         onAccent: context.theme.text.action.primary.base,
         text: context.theme.text.base,
         muted: context.theme.text.muted,

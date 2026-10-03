@@ -165,10 +165,10 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
     }
 }
 /** Records only recognized shell calls and a rule code, never raw commands. */
-function inspectPreflight(tool, args, sessionID, directory) {
-    if (!isShellExecutionTool(tool))
+function inspectPreflight(tool, args, sessionID, directory, additionalTools = []) {
+    if (!isShellExecutionTool(tool, additionalTools))
         return;
-    const finding = evaluatePreflight(tool, args);
+    const finding = evaluatePreflight(tool, args, additionalTools);
     recordGuardianEvent({
         kind: finding ? "preflight-blocked" : "preflight-allowed",
         session: sessionFingerprint(sessionID),
@@ -197,7 +197,7 @@ const server = async ({ client, directory }) => {
     recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: strictPreflight ? "active" : "disabled" }, directory);
     return {
         ...(strictPreflight ? {
-            "tool.execute.before": async (input, output) => inspectPreflight(input.tool, output.args, input.sessionID, directory),
+            "tool.execute.before": async (input, output) => inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools),
         } : {}),
         "chat.message": async (input, output) => {
             const text = output.parts
@@ -326,7 +326,7 @@ const setup = async (context) => {
         }
         try {
             const registration = await context.tool.hook("execute.before", (event) => {
-                inspectPreflight(event.tool, event.input, event.sessionID, directory);
+                inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools);
             });
             if (!registration || typeof registration.dispose !== "function") {
                 throw new Error("V2 tool hook did not return a valid registration.");
@@ -381,54 +381,98 @@ const setup = async (context) => {
         }
     }
     const eventLoop = async () => {
-        try {
-            for await (const event of events) {
-                const eventData = event;
-                if (eventData.type === "session.deleted") {
-                    const deletedSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
-                    if (deletedSessionID) {
-                        engine.forgetSession(deletedSessionID);
-                        contracts.delete(deletedSessionID);
+        let activeEvents = events;
+        // A terminated stream must never disable session inspection silently.
+        // Retry a bounded number of times and keep strict tool hooks registered.
+        for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt++) {
+            try {
+                for await (const event of activeEvents) {
+                    const eventData = event;
+                    if (eventData.type === "session.deleted") {
+                        const deletedSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
+                        if (deletedSessionID) {
+                            engine.forgetSession(deletedSessionID);
+                            contracts.delete(deletedSessionID);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                if (eventData.type !== "session.idle")
-                    continue;
-                const sessionID = eventData.data?.sessionID;
-                if (!sessionID)
-                    continue;
-                let sessionDirectory = directory;
-                try {
-                    if (typeof context.session.get === "function") {
-                        const session = await context.session.get({ sessionID });
-                        sessionDirectory = session.location?.directory ?? directory;
+                    if (eventData.type !== "session.idle")
+                        continue;
+                    const sessionID = eventData.data?.sessionID;
+                    if (!sessionID)
+                        continue;
+                    let sessionDirectory = directory;
+                    try {
+                        if (typeof context.session.get === "function") {
+                            const session = await context.session.get({ sessionID });
+                            sessionDirectory = session.location?.directory ?? directory;
+                        }
                     }
+                    catch {
+                        // A transient/partial host must not disable the existing idle path.
+                    }
+                    await handleSessionIdle(sessionID, sessionDirectory, async () => {
+                        const messages = await context.session.context({ sessionID });
+                        const normalized = normalizeV2Messages(messages);
+                        const contract = extractTaskContract(normalized);
+                        if (contract)
+                            contracts.set(sessionID, contract);
+                        return normalized;
+                    }, async (text) => {
+                        await context.session.synthetic({
+                            sessionID,
+                            text,
+                            description: "OpenCode Guardian remediation",
+                            metadata: { "opencode-guardian": true },
+                            delivery: "queue",
+                            resume: true,
+                        });
+                    }, engine);
                 }
-                catch {
-                    // A transient/partial host must not disable the existing idle path.
-                }
-                await handleSessionIdle(sessionID, sessionDirectory, async () => {
-                    const messages = await context.session.context({ sessionID });
-                    const normalized = normalizeV2Messages(messages);
-                    const contract = extractTaskContract(normalized);
-                    if (contract)
-                        contracts.set(sessionID, contract);
-                    return normalized;
-                }, async (text) => {
-                    await context.session.synthetic({
-                        sessionID,
-                        text,
-                        description: "OpenCode Guardian remediation",
-                        metadata: { "opencode-guardian": true },
-                        delivery: "queue",
-                        resume: true,
-                    });
-                }, engine);
+                if (controller.signal.aborted)
+                    return;
+                throw new Error("V2 event stream ended before plugin teardown.");
             }
-        }
-        catch (error) {
-            if (!controller.signal.aborted) {
+            catch (error) {
+                if (controller.signal.aborted)
+                    return;
+                recordGuardianEvent({ kind: "inspection-error" }, directory);
                 console.error("[opencode-guardian] V2 event subscription error:", error);
+            }
+            if (attempt === 2) {
+                console.error("[opencode-guardian] V2 idle inspection stopped after three stream failures; reload the plugin to restore it.");
+                return;
+            }
+            await new Promise((resolve) => {
+                const onAbort = () => {
+                    clearTimeout(timer);
+                    controller.signal.removeEventListener("abort", onAbort);
+                    resolve();
+                };
+                const timer = setTimeout(() => {
+                    controller.signal.removeEventListener("abort", onAbort);
+                    resolve();
+                }, 200 * (attempt + 1));
+                if (controller.signal.aborted)
+                    onAbort();
+                else
+                    controller.signal.addEventListener("abort", onAbort, { once: true });
+            });
+            if (controller.signal.aborted)
+                return;
+            try {
+                const next = context.event.subscribe({ signal: controller.signal });
+                if (!next || typeof next[Symbol.asyncIterator] !== "function") {
+                    throw new Error("V2 event resubscription did not return an async iterable.");
+                }
+                activeEvents = next;
+            }
+            catch (error) {
+                if (!controller.signal.aborted) {
+                    recordGuardianEvent({ kind: "inspection-error" }, directory);
+                    console.error("[opencode-guardian] V2 event resubscription failed; reload the plugin:", error);
+                }
+                return;
             }
         }
     };

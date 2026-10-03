@@ -65,6 +65,53 @@ export class GuardianConfigError extends Error {
         this.configPath = configPath;
     }
 }
+function validateConfig(value) {
+    const fail = (name) => { throw new Error("invalid configuration field: " + name); };
+    if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+        fail("enabled");
+    for (const name of ["remediationBudget", "iterationBudget"]) {
+        if (value[name] !== undefined &&
+            (typeof value[name] !== "number" || !Number.isInteger(value[name]) ||
+                value[name] < 0 || value[name] > 5))
+            fail(name);
+    }
+    for (const name of ["preflight", "updateNotice"]) {
+        const item = value[name];
+        if (item !== undefined && (!item || typeof item !== "object" ||
+            Array.isArray(item) || (item.enabled !== undefined &&
+            typeof item.enabled !== "boolean")))
+            fail(name);
+    }
+    const shellTools = value.preflight?.shellTools;
+    if (shellTools !== undefined &&
+        (!Array.isArray(shellTools) ||
+            !shellTools.every((tool) => typeof tool === "string" && tool.trim().length > 0))) {
+        fail("preflight.shellTools");
+    }
+    if (value.rules !== undefined) {
+        if (!value.rules || typeof value.rules !== "object" || Array.isArray(value.rules))
+            fail("rules");
+        for (const [name, setting] of Object.entries(value.rules)) {
+            if (typeof setting === "string") {
+                if (!["error", "warn", "off"].includes(setting))
+                    fail("rules." + name);
+            }
+            else if (setting && typeof setting === "object" && !Array.isArray(setting)) {
+                const rule = setting;
+                if (rule.severity !== undefined && !["error", "warn", "off"].includes(rule.severity))
+                    fail("rules." + name + ".severity");
+                for (const field of ["customPhrases", "exceptions"]) {
+                    if (rule[field] !== undefined && (!Array.isArray(rule[field]) ||
+                        !rule[field].every(item => typeof item === "string")))
+                        fail("rules." + name + "." + field);
+                }
+            }
+            else
+                fail("rules." + name);
+        }
+    }
+    return value;
+}
 export function loadConfig(directory) {
     const candidatePaths = [
         directory ? path.resolve(directory, "opencode-guardian.json") : null,
@@ -83,7 +130,7 @@ export function loadConfig(directory) {
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
                 throw new Error("configuration root must be a JSON object");
             }
-            return parsed;
+            return validateConfig(parsed);
         }
         catch (error) {
             throw new GuardianConfigError(configPath, error);

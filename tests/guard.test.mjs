@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GuardEngine, REMEDIATION_MARKER, BUILTIN_RULES } from "../dist/engine.js";
+import { GuardEngine, REMEDIATION_MARKER, BUILTIN_RULES, loadConfig, GuardianConfigError } from "../dist/engine.js";
 import { noEvasionRule } from "../dist/rules/no-evasion.js";
 import { noShortcutsRule } from "../dist/rules/no-shortcuts.js";
 import { noStubsRule } from "../dist/rules/no-stubs.js";
@@ -277,32 +277,32 @@ test("security/no-secrets rule detects hardcoded OpenAI and GitHub tokens", () =
   assert.ok(result.remediationPrompt.includes("Hardcoded secret or credential detected"));
 });
 
-test("security/no-secrets rule ignores .env.example files", () => {
-  const context = {
-    sessionID: "test-sess",
-    directory: "/tmp",
-    messages: [],
-    ruleConfig: {},
-    currentTurn: [
-      {
-        info: { id: "msg-1", role: "assistant" },
-        parts: [
-          {
-            type: "tool",
-            state: {
-              input: {
-                filePath: ".env.example",
-                content: "GITHUB_TOKEN=ghp_" + "111122223333444455556666777788889999",
-              },
-            },
-          },
-        ],
-      },
-    ],
-  };
+test("security/no-secrets scans real-looking credentials in template and example files", () => {
+  const fakeToken = "ghp_" + "1".repeat(36);
+  for (const filePath of [".env.example", "settings.template", "auth.sample", "src/config.env.example"]) {
+    const context = {
+      sessionID: "sample-credentials", directory: "/tmp", messages: [], ruleConfig: {},
+      currentTurn: [{ info: { id: "msg-1", role: "assistant" }, parts: [{
+        type: "tool", state: { input: { filePath, content: "GITHUB_TOKEN=" + fakeToken } },
+      }] }],
+    };
+    const result = noSecretsRule.inspect(context);
+    assert.equal(result.decision, "block", filePath);
+    assert.equal(result.findings.length, 1, filePath);
+  }
+});
 
-  const result = noSecretsRule.inspect(context);
-  assert.equal(result.decision, "pass");
+test("security/no-secrets permits explicit placeholder values in example files", () => {
+  const context = {
+    sessionID: "sample-placeholders", directory: "/tmp", messages: [], ruleConfig: {},
+    currentTurn: [{ info: { id: "msg-1", role: "assistant" }, parts: [{
+      type: "tool", state: { input: {
+        filePath: ".env.example",
+        content: "GITHUB_TOKEN=<YOUR_TOKEN>\nDATABASE_URL=postgres://user:${DB_PASSWORD}@localhost:5432/app",
+      } },
+    }] }],
+  };
+  assert.equal(noSecretsRule.inspect(context).decision, "pass");
 });
 
 // --- 7. manifest/no-ghost-deps ---
@@ -4013,4 +4013,27 @@ test("loadConfig throws GuardianConfigError when config file is malformed rather
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("configuration rejects incorrect security field types", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-config-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "opencode-guardian.json");
+  for (const invalid of [
+    { enabled: "false" },
+    { preflight: { enabled: "false" } },
+    { updateNotice: { enabled: 0 } },
+    { remediationBudget: "1" },
+    { iterationBudget: -1 },
+    { rules: { "security/no-secrets": "allow" } },
+    { rules: { "security/no-secrets": { customPhrases: [1] } } },
+  ]) {
+    fs.writeFileSync(file, JSON.stringify(invalid));
+    assert.throws(() => loadConfig(dir), GuardianConfigError);
+  }
+  fs.writeFileSync(file, JSON.stringify({
+    enabled: false, preflight: { enabled: true },
+    remediationBudget: 1, rules: { "security/no-secrets": "warn" },
+  }));
+  assert.equal(loadConfig(dir).enabled, false);
 });

@@ -12,16 +12,24 @@ const SHELL_TOOLS = new Set([
   "powershell", "pwsh", "cmd",
 ]);
 
-export function isShellExecutionTool(tool: string): boolean {
-  const last = tool.toLowerCase().split(/[.:/]/).at(-1) ?? "";
-  return SHELL_TOOLS.has(last);
+export function isShellExecutionTool(
+  tool: string,
+  additionalTools: readonly string[] = []
+): boolean {
+  const normalized = tool.toLowerCase();
+  const last = normalized.split(/[.:/]/).at(-1) ?? "";
+  return SHELL_TOOLS.has(last) || additionalTools.some((entry) => {
+    const candidate = entry.trim().toLowerCase();
+    return candidate === normalized || candidate === last;
+  });
 }
 
 export function evaluatePreflight(
   tool: string,
-  input: unknown
+  input: unknown,
+  additionalTools: readonly string[] = []
 ): PreflightFinding | undefined {
-  if (!isShellExecutionTool(tool)) return undefined;
+  if (!isShellExecutionTool(tool, additionalTools)) return undefined;
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return "uninspectable-shell-input";
   }
@@ -62,7 +70,11 @@ export class GuardianPreflightError extends Error {
  * Opt-in strict guard: reject recognized risks before a host executes a tool.
  * This does not parse arbitrary shell syntax or replace OS/host permissions.
  */
-export function enforcePreflight(tool: string, input: unknown): void {
-  const finding = evaluatePreflight(tool, input);
+export function enforcePreflight(
+  tool: string,
+  input: unknown,
+  additionalTools: readonly string[] = []
+): void {
+  const finding = evaluatePreflight(tool, input, additionalTools);
   if (finding) throw new GuardianPreflightError(finding);
 }

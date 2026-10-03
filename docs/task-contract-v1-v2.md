@@ -46,3 +46,10 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 - **Graceful Fallbacks:** Missing optional hooks in transition environments fail open without breaking the core inspection pipeline.
 - **Fail-Fast Security:** When strict preflight (`preflight.enabled: true`) is explicitly configured, setup requires valid tool hook registration and will fail visibly if the host cannot provide pre-execution guarantees.
 - **Configuration Integrity:** Explicit configuration files (`opencode-guardian.json`, `.opencode/opencode-guardian.json`) must be valid JSON objects. Corrupt or malformed files throw a visible `GuardianConfigError` rather than silently degrading to insecure defaults.
+
+
+## V2 Instance and Session Scope
+
+V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian uses `ctx.session.get({ sessionID })` when available to route post-turn inspection and local telemetry to the session directory. The rule engine and strict preflight hook are configured at plugin setup from the instance directory; a session in a different project does not dynamically enable a new pre-execution hook. Use independent plugin instances for projects requiring different strict policies.
+
+When an event subscription unexpectedly ends or fails, Guardian records an inspection error and makes up to three bounded stream attempts. Teardown aborts pending reconnects. Failure to restore the stream is logged visibly; this is not a substitute for monitoring host health.

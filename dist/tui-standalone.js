@@ -352,7 +352,7 @@ const v2Plugin = {
         directory: directory,
         get colors() {
           return {
-            accent: context.theme.background.action.primary.base,
+            accent: context.theme.status?.success?.base ?? context.theme.text.base,
             onAccent: context.theme.text.action.primary.base,
             text: context.theme.text.base,
             muted: context.theme.text.muted,

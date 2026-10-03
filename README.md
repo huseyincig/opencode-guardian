@@ -1,10 +1,14 @@
 # OpenCode Guardian
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version: 0.5.0](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://www.npmjs.com/package/opencode-guardian)
-[![OpenCode: v1 & v2](https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20Dual--Mode-emerald.svg)](https://opencode.ai)
+[![npm version](https://img.shields.io/npm/v/opencode-guardian?color=cb3837&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
+[![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
+[![OpenCode: v1 & v2](https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20Dual--Mode-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
+[![Tests](https://img.shields.io/badge/tests-374%20passed-success?logo=githubactions&logoColor=white)](docs/verification-report.md)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Installation](#installation) · [Rules](#the-14-guardrail-rules) · [Configuration](#configuration-opencode-guardianjson) · [Testing](#verification--testing)
+[Installation](#installation) · [Rules](#the-14-guardrail-rules) · [Configuration](#configuration-opencode-guardianjson) · [TUI Interface](#tui-sidebar-interface) · [Architecture](#architecture--turn-lifecycle) · [Verification](#verification--testing)
 
 A high-performance, deterministic quality, safety, and verification plugin for **OpenCode** AI coding agents.
 
@@ -260,24 +264,27 @@ Event log: /path/to/project/.opencode/guardian-events.jsonl
 
 ```mermaid
 flowchart TD
-    User([User Prompt]) --> PreHook[V1 chat.message / V2 prompt hook]
+    User([User Prompt]) --> PreHook[V1 chat.message / V2 Prompt Hook]
     PreHook --> Contract[Extract Task Contract & Guidance]
     Contract --> Agent[Agent Model Execution & Tool Calls]
-    
-    subgraph Preflight [Optional Preflight Interception]
-        Agent -->|Shell Tool Request| PreflightCheck{Strict Preflight Enabled?}
-        PreflightCheck -->|Yes & Risky| BlockPreflight[Block Before Execution]
-        PreflightCheck -->|No or Safe| ExecTool[Execute Tool Command]
-    end
-    
-    ExecTool --> IdleEvent[Session Idle Event]
-    IdleEvent --> Collector[EvidenceCollector: Normalize Events, Diffs & Exit Codes]
+
+    Agent --> ToolCall{Tool Call Type?}
+    ToolCall -->|Non-Shell Tool| ExecTool[Execute Host Tool]
+    ToolCall -->|Shell Tool Request| PreflightCheck{Strict Preflight Active?}
+
+    PreflightCheck -->|Yes & Risky Command| BlockPreflight[Block Before Execution]
+    PreflightCheck -->|No or Safe Command| ExecTool
+
+    ExecTool --> TurnEnd[Turn Complete: Native Idle / V1TurnWatcher]
+    BlockPreflight --> TurnEnd
+
+    TurnEnd --> Collector[EvidenceCollector: Normalize Diffs & Exit Codes]
     Collector --> Evaluator[Evaluate 14 Guardrail Rules]
-    
+
     Evaluator --> Decision{Violations Detected?}
     Decision -->|No| Pass([Pass Turn Cleanly])
     Decision -->|Yes| Budget{Remediation Budget > 0?}
-    Budget -->|Yes| Remediate[Inject Synthetic Remediation Prompt]
+    Budget -->|Yes| Remediate[Inject Remediation Prompt]
     Budget -->|Exhausted| Pass
     Remediate --> Agent
 ```

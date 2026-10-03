@@ -12,11 +12,11 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 | :--- | :--- | :--- |
 | **Capture User Prompt** | `chat.message` hook | `ctx.session.hook("prompt", ...)` |
 | **Inject Task Guidance** | `experimental.chat.system.transform` | `ctx.session.hook("context", ...)` |
-| **Inspect Messages on Idle** | `client.session.messages(...)` | `ctx.session.context({ sessionID })` |
+| **Inspect Completed Turn** | Native idle event, or bounded session.status() and completed-message fallback | ctx.event.subscribe() and session.context() |
 | **Dispatch Remediation** | `client.session.promptAsync(...)` | `ctx.session.synthetic({ sessionID, text, ... })` |
-| **Lifecycle Events** | `event` callback (`session.idle`) | `ctx.event.subscribe({ signal })` async iterable |
+| **Lifecycle Events** | Native event callback when delivered; otherwise prompt-scoped status probing | ctx.event.subscribe({ signal }) async iterable |
 | **Resolve Project Directory** | Plugin load directory argument | `ctx.session.get().location.directory` / `ctx.location.directory` |
-| **Plugin Teardown** | Host engine unloads hooks | AbortController signal + disposer handles |
+| **Plugin Teardown** | V1 dispose() cancels outstanding completion probes | AbortController signal and disposer handles |
 | **Pre-Execution Shell Check** | `tool.execute.before` | `ctx.tool.hook("execute.before")` |
 | **TUI Sidebar Extension** | `tui(api)` → `api.slots.register({ sidebar_content })` | `setup(ctx)` → `ctx.ui.slot({ append: "sidebar.content" })` |
 
@@ -29,7 +29,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
    - Identifies actionable requests, repeated review loops, source verification obligations, and individual verification commands (`test`, `build`, `typecheck`, `lint`, `audit`).
 2. **Context Guidance:**
    - Injects structured guidance before the agent calls the model, preventing it from prioritizing earlier deferrals or hallucinating completion.
-3. **Evidence Collection at `session.idle`:**
+3. **Evidence Collection after `session.idle`:**
    - Gathers recorded tool invocations into a unified `EvidenceCollector` snapshot.
    - Validates chronological order: verifications run *before* the latest file edit are marked stale.
    - Substantive source inspections (file reads, line-bearing search/diff matches) are distinguished from superficial filename listings. Note that observable inspection of modified files confirms post-change re-inspection but cannot prove exhaustive whole-repository coverage (`reviewProvesFullCoverage: false`).
@@ -53,3 +53,36 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian uses `ctx.session.get({ sessionID })` when available to route post-turn inspection and local telemetry to the session directory. The rule engine and strict preflight hook are configured at plugin setup from the instance directory; a session in a different project does not dynamically enable a new pre-execution hook. Use independent plugin instances for projects requiring different strict policies.
 
 When an event subscription unexpectedly ends or fails, Guardian records an inspection error and makes up to three bounded stream attempts. Teardown aborts pending reconnects. Failure to restore the stream is logged visibly; this is not a substitute for monitoring host health.
+
+
+## V1 1.x Idle-Event Compatibility
+
+Some V1 builds (reported with 1.18.34) discard session.idle in the
+location-filtered plugin event bus. Guardian prefers a native idle event when
+delivered. For each newly prompted session, an optional compatibility watcher
+uses the V1 SDK session.status() and session.messages() APIs; it does not scan
+unrelated sessions or treat tool completion as turn completion.
+
+The session must be idle (or absent from the SDK active-status map), the
+latest assistant message must have time.completed, and the same completed
+message must remain stable across two polls. The default interval is 750 ms,
+bounded to 2,400 checks (approximately 30 minutes).
+
+A native idle event, session deletion, or V1 dispose() cancels the watcher.
+Repeated SDK failures and expiration produce visible inspection errors. When
+session.status() is unavailable, native idle events remain the only trigger.
+Actual host behavior must be verified on each targeted V1 release. Post-turn
+findings cannot undo already-executed commands.
+
+## Strict Command Resolution and Example Credentials
+
+Literal backtick substitutions that construct a destructive executable name
+are classified before execution. Unknown executable names generated through
+dynamic substitution are denied in strict preflight. Passive documentation
+examples and echo output remain permitted. The shell-pattern detector is not
+a full shell interpreter.
+
+All example and template files remain subject to secret scanning. A narrowly
+defined local database example password is tolerated only in an example file
+and only on localhost or a reserved example host. Real-looking API tokens,
+strong passwords, and remote credentials are never exempted by filename.

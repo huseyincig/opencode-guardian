@@ -1,4 +1,5 @@
 import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "./evidence.js";
+import { hasDynamicCommandName } from "./shell-risk.js";
 
 export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input";
 
@@ -45,6 +46,7 @@ export function evaluatePreflight(
   const commands = values as string[];
   if (commands.some((command) => isDestructiveCommand(command) || isSimpleFileRemoval(command))) return "destructive-command";
   if (commands.some(isOpaqueShellExecution)) return "opaque-shell-execution";
+  if (commands.some(hasDynamicCommandName)) return "uninspectable-shell-input";
   // Different shell command aliases give no reliable way to know which the
   // host will execute. Do not pick only the first, apparently safe value.
   if (new Set(commands).size > 1) return "uninspectable-shell-input";

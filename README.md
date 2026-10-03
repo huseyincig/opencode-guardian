@@ -202,6 +202,18 @@ For an MCP/custom tool that really executes shell commands but does not have a r
 
 The listed tool must expose one unambiguous string `command`, `cmd`, or `script` argument. Unknown/malformed input is rejected **for recognized or explicitly listed shell tools**. Guardian cannot inspect arbitrary custom tool internals, script files loaded at execution, or dynamically decoded commands; retain OpenCode permissions and OS isolation.
 
+**V1 idle compatibility:** For OpenCode V1 builds that drop session.idle,
+Guardian probes only newly prompted sessions using the SDK status and
+message endpoints. It requires a stable, completed assistant response;
+native idle events and teardown cancel the probe. Repeated API failures
+or a bounded timeout are logged. When the status API is unavailable,
+native idle events remain the only trigger. The fallback introduces
+approximately two 750 ms polls and cannot undo an already-executed command.
+
+**Secret scanning:** Example files are still inspected. Obvious sample
+passwords on localhost or reserved example database hosts have a narrow
+allowance; real-looking API tokens and remote credentials are still blocked.
+
 **V2 project scope:** `ctx.location.directory` is where a plugin instance loads, not necessarily the location of each session. Guardian resolves session directories for post-turn inspection and local event logs, while strict preflight registration and configuration are determined at plugin setup. For distinct per-project preflight policies, load a separate plugin instance for each project.
 
 

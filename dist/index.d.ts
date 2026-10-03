@@ -26,6 +26,7 @@ export * from "./prose.js";
 export * from "./preflight.js";
 export * from "./telemetry.js";
 export * from "./version-notice.js";
+export * from "./v1-turn-watcher.js";
 /**
  * Converts OpenCode v2 session.context() records into the stable internal
  * message shape consumed by the rules and engine.

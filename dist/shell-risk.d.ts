@@ -22,3 +22,7 @@ export declare function hasFindDeletion(command: string): boolean;
  * signal only: it does not prove that the decoded payload is destructive.
  */
 export declare function isOpaqueShellExecution(command: string): boolean;
+/** An unresolved command substitution in executable position is opaque.
+ * The strict preflight can reject it without treating ordinary echo output
+ * or quoted documentation as a destructive action. */
+export declare function hasDynamicCommandName(command: string, depth?: number): boolean;

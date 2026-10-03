@@ -1,4 +1,5 @@
 import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "./evidence.js";
+import { hasDynamicCommandName } from "./shell-risk.js";
 /**
  * Only inspect tools known to execute shell commands. Other tools are handled
  * by OpenCode's own permissions and the existing post-turn Guardian rules.
@@ -35,6 +36,8 @@ export function evaluatePreflight(tool, input, additionalTools = []) {
         return "destructive-command";
     if (commands.some(isOpaqueShellExecution))
         return "opaque-shell-execution";
+    if (commands.some(hasDynamicCommandName))
+        return "uninspectable-shell-input";
     // Different shell command aliases give no reliable way to know which the
     // host will execute. Do not pick only the first, apparently safe value.
     if (new Set(commands).size > 1)

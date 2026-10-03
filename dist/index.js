@@ -3,6 +3,7 @@ import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool } from "./preflight.js";
 import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 import { announceGuardianUpdate } from "./version-notice.js";
+import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -28,6 +29,7 @@ export * from "./prose.js";
 export * from "./preflight.js";
 export * from "./telemetry.js";
 export * from "./version-notice.js";
+export * from "./v1-turn-watcher.js";
 function stringifyV2ToolContent(content) {
     if (!Array.isArray(content))
         return "";
@@ -194,8 +196,49 @@ const server = async ({ client, directory }) => {
     let promptSequence = 0;
     let updateChecked = false;
     const strictPreflight = config.preflight?.enabled === true;
+    // Only active, newly prompted V1 sessions are probed. No global session
+    // scanning and no inspection before the SDK confirms a completed response.
+    const watcher = typeof client.session.status === "function"
+        ? createV1TurnWatcher({
+            status: async (sessionID) => {
+                const response = await client.session.status({ query: { directory } });
+                if (response.error || !response.data || typeof response.data !== "object") {
+                    throw new Error("V1 session.status() did not return a status map.");
+                }
+                return response.data[sessionID]?.type;
+            },
+            messages: async (sessionID) => {
+                const response = await client.session.messages({
+                    path: { id: sessionID }, query: { directory },
+                });
+                if (response.error || !Array.isArray(response.data)) {
+                    throw new Error("V1 session.messages() did not return messages.");
+                }
+                return response.data;
+            },
+            onIdle: async (sessionID, messages) => {
+                const contract = extractTaskContract(messages);
+                if (contract)
+                    contracts.set(sessionID, contract);
+                await handleSessionIdle(sessionID, directory, async () => messages, async (text) => {
+                    await client.session.promptAsync({
+                        path: { id: sessionID }, query: { directory },
+                        body: { parts: [{ type: "text", text }] },
+                    });
+                }, engine);
+            },
+            onError: (sessionID, error) => {
+                recordGuardianEvent({ kind: "inspection-error", session: sessionFingerprint(sessionID) }, directory);
+                console.error("[opencode-guardian] V1 idle compatibility probe failed:", error);
+            },
+        })
+        : undefined;
     recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: strictPreflight ? "active" : "disabled" }, directory);
     return {
+        dispose: async () => {
+            watcher?.stopAll();
+            contracts.clear();
+        },
         ...(strictPreflight ? {
             "tool.execute.before": async (input, output) => inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools),
         } : {}),
@@ -203,15 +246,17 @@ const server = async ({ client, directory }) => {
             const text = output.parts
                 .map((part) => part.type === "text" ? part.text : "")
                 .join("\n");
-            if (!text || text.trimStart().startsWith("[opencode-guardian remediation]")) {
+            if (!text)
                 return;
+            if (!text.trimStart().startsWith("[opencode-guardian remediation]")) {
+                const contract = extractTaskContract([{
+                        info: { id: input.messageID ?? ("v1-prompt-" + (++promptSequence)), role: "user" },
+                        parts: [{ type: "text", text }],
+                    }]);
+                if (contract)
+                    contracts.set(input.sessionID, contract);
             }
-            const contract = extractTaskContract([{
-                    info: { id: input.messageID ?? `v1-prompt-${++promptSequence}`, role: "user" },
-                    parts: [{ type: "text", text }],
-                }]);
-            if (contract)
-                contracts.set(input.sessionID, contract);
+            watcher?.watch(input.sessionID);
         },
         "experimental.chat.system.transform": async (input, output) => {
             if (!input.sessionID)
@@ -240,6 +285,7 @@ const server = async ({ client, directory }) => {
                     eventData.data?.sessionID ??
                     eventData.data?.info?.id;
                 if (deletedSessionID) {
+                    watcher?.stop(deletedSessionID);
                     engine.forgetSession(deletedSessionID);
                     contracts.delete(deletedSessionID);
                 }
@@ -250,6 +296,7 @@ const server = async ({ client, directory }) => {
             const sessionID = eventData.properties?.sessionID ?? eventData.data?.sessionID;
             if (!sessionID)
                 return;
+            watcher?.stop(sessionID);
             await handleSessionIdle(sessionID, directory, async () => {
                 const res = await client.session.messages({
                     path: { id: sessionID },

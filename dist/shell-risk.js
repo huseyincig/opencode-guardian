@@ -74,7 +74,10 @@ export function shellCommandVariants(command) {
             .replace(/\$\{IFS\}|\$IFS(?=[^A-Za-z0-9_]|$)/g, " ")
             // Only resolve a known literal command name, not arbitrary substitutions.
             .replace(/\$\(\s*(?:echo|printf(?:\s+%s)?)\s+(?:(["'])rm\1|rm)\s*\)/gi, "rm");
-        return canonical === stage ? [stage] : [stage, canonical];
+        // A literal backtick substitution in command position supplies the
+        // executable name. This is unlike a passive \`echo \`...\`\` example.
+        const expanded = canonical.replace(/^(\s*(?:sudo\s+)?)(?:\x60(?:echo\s+|printf(?:\s+%s)?\s+)(?:['"]?rm['"]?)\x60)(?=\s|$)/i, "$1rm");
+        return [...new Set([stage, canonical, expanded])];
     }));
 }
 /** Only active $(...) expressions; text inside single quotes is inert. */
@@ -190,4 +193,15 @@ export function hasFindDeletion(command) {
 export function isOpaqueShellExecution(command) {
     return splitShellStages(command).some((stages) => stages.some((stage, index) => /^\s*(?:sudo\s+)?(?:env\s+)?(?:openssl\s+)?base64\s+(?:-[dD]\b|--decode\b)/i.test(stage) &&
         /^\s*(?:sudo\s+)?(?:env\s+)?(?:sh|bash|zsh|dash)(?=\s|$)/i.test(stages[index + 1] ?? "")));
+}
+/** An unresolved command substitution in executable position is opaque.
+ * The strict preflight can reject it without treating ordinary echo output
+ * or quoted documentation as a destructive action. */
+export function hasDynamicCommandName(command, depth = 0) {
+    for (const stage of splitShellStages(command).flat()) {
+        if (/^\s*(?:sudo\s+)?(?:"|)(?:\x60|\$\(|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)/.test(stage)) {
+            return true;
+        }
+    }
+    return depth < 4 && literalShellScripts(command).some((script) => hasDynamicCommandName(script, depth + 1));
 }

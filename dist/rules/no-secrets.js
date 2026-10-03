@@ -37,6 +37,20 @@ function isExplicitTemplateValue(secretValue, capturedPassword) {
         /^\$[A-Z_][A-Z0-9_]*$/i.test(value) ||
         /<(?:YOUR_[A-Z0-9_]+|PASSWORD|TOKEN|API_KEY)>/i.test(value));
 }
+/** Documented, local-only example credentials are not real deployment secrets.
+ * Never exempt token-shaped strings or remote service credentials by filename. */
+function isDocumentedLocalPasswordSample(filePath, value, password) {
+    if (!filePath || !password)
+        return false;
+    if (!/(?:^|[\/])(?:[^\/]+\.)?(?:env\.)?(?:example|sample|template|dist)$/i.test(filePath)) {
+        return false;
+    }
+    if (!/^(?:pass|password|example|sample|dummy|test|changeme|your_password_here)$/i.test(password)) {
+        return false;
+    }
+    // A plausible password on a real database host must still be reported.
+    return /@(?:localhost|127\.0\.0\.1|\[::1\]|(?:db\.)?example\.(?:com|org|net))(?::[0-9]+)?\//i.test(value);
+}
 export const noSecretsRule = {
     id: "security/no-secrets",
     description: "Detects hardcoded secrets, API keys, credentials, and connection strings in code modifications.",
@@ -49,14 +63,30 @@ export const noSecretsRule = {
             for (const pattern of SECRET_PATTERNS) {
                 if (seen.has(pattern.name))
                     continue;
-                pattern.regex.lastIndex = 0;
-                const match = pattern.regex.exec(code);
+                // A permitted example value must not hide a later real credential
+                // matched by the same pattern in the same file.
+                let remaining = code;
+                let match = null;
+                while (remaining.length > 0) {
+                    pattern.regex.lastIndex = 0;
+                    const next = pattern.regex.exec(remaining);
+                    if (!next)
+                        break;
+                    const value = next[0];
+                    const password = next[1];
+                    const isSample = password !== undefined
+                        ? isExplicitTemplateValue(password) ||
+                            isDocumentedLocalPasswordSample(filePath, value, password)
+                        : isExplicitTemplateValue(value);
+                    if (!isSample) {
+                        match = next;
+                        break;
+                    }
+                    remaining = remaining.slice(next.index + value.length);
+                }
                 if (!match)
                     continue;
                 const secretValue = match[0];
-                const capturedPassword = match[1];
-                if (isExplicitTemplateValue(secretValue, capturedPassword))
-                    continue;
                 seen.add(pattern.name);
                 const masked = maskSecret(secretValue);
                 findings.push({

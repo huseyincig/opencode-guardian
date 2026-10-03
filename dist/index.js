@@ -149,8 +149,14 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             recordGuardianEvent({ kind: "post-warning", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId) }, directory);
         }
         if (result.decision === "block" && result.combinedRemediationPrompt) {
-            await sendPrompt(result.combinedRemediationPrompt);
-            recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId) }, directory);
+            try {
+                await sendPrompt(result.combinedRemediationPrompt);
+                recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId) }, directory);
+            }
+            catch (promptError) {
+                result.rollback?.();
+                throw promptError;
+            }
         }
     }
     catch (error) {

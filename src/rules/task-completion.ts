@@ -40,9 +40,14 @@ export const taskCompletionRule: GuardRule = {
       return { ruleId: this.id, decision: "pass", findings };
     }
     // Transparent incomplete work and real blockers should be reported to the
-    // user instead of being turned into synthetic retries.
+    // user instead of being turned into synthetic retries. However, claiming
+    // completion while simultaneously admitting incomplete work or blockers
+    // is a contradictory evasion that cannot bypass completion evaluation.
     const internationalReport = classifyInternationalAgentReport(prose);
-    if (CLEAR_BLOCKER.test(prose) || internationalReport === "blocked") {
+    const hasClearBlocker = CLEAR_BLOCKER.test(prose) || internationalReport === "blocked";
+    const proseWithoutBlockers = hasClearBlocker ? prose.replace(CLEAR_BLOCKER, " ") : prose;
+    const isClosing = CLOSING.test(proseWithoutBlockers) || internationalReport === "completed";
+    if (!isClosing && hasClearBlocker) {
       return { ruleId: this.id, decision: "pass", findings };
     }
 
@@ -62,9 +67,10 @@ export const taskCompletionRule: GuardRule = {
       blocking.push(finding);
     }
 
-    if (CLOSING.test(prose) || internationalReport === "completed") {
+    if (isClosing) {
       for (const verification of policy.verifications) {
         if (verification.status === "passed") continue;
+        const isContradictory = hasClearBlocker || verification.status === "failed";
         const finding: RuleFinding = {
           ruleId: this.id,
           pattern: `${verification.kind} verification not confirmed`,
@@ -72,11 +78,13 @@ export const taskCompletionRule: GuardRule = {
           description:
             verification.status === "failed"
               ? `The task is reported as complete although the latest requested ${verification.kind} check failed.`
-              : `The user requested ${verification.kind} verification, but a successful result after the last change is not visible.`,
-          confidence: verification.status === "failed" ? "high" : "medium",
+              : hasClearBlocker
+                ? `The task is reported as complete while contradictory unfinished/blocker statements were made and ${verification.kind} check was not confirmed.`
+                : `The user requested ${verification.kind} verification, but a successful result after the last change is not visible.`,
+          confidence: isContradictory ? "high" : "medium",
         };
         findings.push(finding);
-        if (verification.status === "failed") blocking.push(finding);
+        if (isContradictory) blocking.push(finding);
       }
     }
 

@@ -47,6 +47,18 @@ export class SessionStateStore {
     state.fingerprints.add(fingerprint);
   }
 
+  rollbackRemediation(
+    sessionID: string,
+    turnKey: string,
+    fingerprint: string
+  ): void {
+    const state = this.sessions.get(sessionID);
+    if (state && state.turnKey === turnKey) {
+      state.remediationCount = Math.max(0, state.remediationCount - 1);
+      state.fingerprints.delete(fingerprint);
+    }
+  }
+
   canContinue(
     sessionID: string,
     turnKey: string,
@@ -68,6 +80,18 @@ export class SessionStateStore {
     const state = this.beginTurn(sessionID, turnKey);
     state.continuationCount += 1;
     state.continuationKeys.add(progressKey);
+  }
+
+  rollbackContinuation(
+    sessionID: string,
+    turnKey: string,
+    progressKey: string
+  ): void {
+    const state = this.sessions.get(sessionID);
+    if (state && state.turnKey === turnKey) {
+      state.continuationCount = Math.max(0, state.continuationCount - 1);
+      state.continuationKeys.delete(progressKey);
+    }
   }
 
   forget(sessionID: string): void {

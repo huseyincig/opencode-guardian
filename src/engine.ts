@@ -69,6 +69,16 @@ const DEFAULT_CONFIG: GuardConfig = {
   },
 };
 
+export class GuardianConfigError extends Error {
+  readonly configPath: string;
+  constructor(configPath: string, cause?: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`[opencode-guardian] Invalid configuration in ${configPath}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
+    this.name = "GuardianConfigError";
+    this.configPath = configPath;
+  }
+}
+
 export function loadConfig(directory?: string): GuardConfig {
   const candidatePaths = [
     directory ? path.resolve(directory, "opencode-guardian.json") : null,
@@ -90,10 +100,7 @@ export function loadConfig(directory?: string): GuardConfig {
       }
       return parsed as GuardConfig;
     } catch (error) {
-      console.error(
-        `[opencode-guardian] Invalid config at ${configPath}; trying fallback:`,
-        error
-      );
+      throw new GuardianConfigError(configPath, error);
     }
   }
 
@@ -125,11 +132,6 @@ export function extractCurrentTurn(messages: SessionMessage[]): {
   currentTurn: SessionMessage[];
   turnKey: string;
 } {
-  const firstAgent = messages.find(
-    (m) => typeof m.info?.agent === "string" && m.info.agent.length > 0
-  )?.info.agent;
-  const isSubagent = Boolean(firstAgent && firstAgent !== "orchestrator");
-
   const lastUserMessage = messages.findLast(
     (message) =>
       message.info.role === "user" &&
@@ -150,6 +152,13 @@ export function extractCurrentTurn(messages: SessionMessage[]): {
 
   const currentTurn =
     lastHumanUserIndex < 0 ? messages : messages.slice(lastHumanUserIndex);
+
+  const activeAgent = currentTurn.findLast(
+    (m) => typeof m.info?.agent === "string" && m.info.agent.length > 0
+  )?.info.agent ?? messages.findLast(
+    (m) => typeof m.info?.agent === "string" && m.info.agent.length > 0
+  )?.info.agent;
+  const isSubagent = Boolean(activeAgent && activeAgent !== "orchestrator");
 
   return {
     isSubagent,
@@ -203,6 +212,7 @@ export interface EngineExecutionResult {
   decision: "pass" | "block";
   results: RuleResult[];
   combinedRemediationPrompt?: string;
+  rollback?: () => void;
 }
 
 export class GuardEngine {
@@ -232,6 +242,10 @@ export class GuardEngine {
   public forgetSession(sessionID: string): void {
     this.inspectedMessages.delete(sessionID);
     this.sessionState.forget(sessionID);
+  }
+
+  public rollbackInspection(sessionID: string): void {
+    this.inspectedMessages.delete(sessionID);
   }
 
   public async inspect(
@@ -368,6 +382,10 @@ export class GuardEngine {
           results,
           combinedRemediationPrompt:
             `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+          rollback: () => {
+            this.inspectedMessages.delete(sessionID);
+            this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
+          },
         };
       }
 
@@ -405,6 +423,10 @@ export class GuardEngine {
         results,
         combinedRemediationPrompt:
           `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+        rollback: () => {
+          this.inspectedMessages.delete(sessionID);
+          this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint);
+        },
       };
     }
 

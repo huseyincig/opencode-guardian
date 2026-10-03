@@ -56,6 +56,15 @@ const DEFAULT_CONFIG = {
         "task/instruction-fidelity": "error",
     },
 };
+export class GuardianConfigError extends Error {
+    configPath;
+    constructor(configPath, cause) {
+        const detail = cause instanceof Error ? cause.message : String(cause);
+        super(`[opencode-guardian] Invalid configuration in ${configPath}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
+        this.name = "GuardianConfigError";
+        this.configPath = configPath;
+    }
+}
 export function loadConfig(directory) {
     const candidatePaths = [
         directory ? path.resolve(directory, "opencode-guardian.json") : null,
@@ -77,7 +86,7 @@ export function loadConfig(directory) {
             return parsed;
         }
         catch (error) {
-            console.error(`[opencode-guardian] Invalid config at ${configPath}; trying fallback:`, error);
+            throw new GuardianConfigError(configPath, error);
         }
     }
     return DEFAULT_CONFIG;
@@ -94,8 +103,6 @@ function isGuardianRemediationMessage(message) {
         part.text.trimStart().startsWith(REMEDIATION_MARKER)));
 }
 export function extractCurrentTurn(messages) {
-    const firstAgent = messages.find((m) => typeof m.info?.agent === "string" && m.info.agent.length > 0)?.info.agent;
-    const isSubagent = Boolean(firstAgent && firstAgent !== "orchestrator");
     const lastUserMessage = messages.findLast((message) => message.info.role === "user" &&
         (!isSyntheticUserMessage(message) || isGuardianRemediationMessage(message)));
     const isRemediationResponse = Boolean(lastUserMessage && isGuardianRemediationMessage(lastUserMessage));
@@ -104,6 +111,8 @@ export function extractCurrentTurn(messages) {
         !isSyntheticUserMessage(m));
     const lastHumanUser = lastHumanUserIndex >= 0 ? messages[lastHumanUserIndex] : undefined;
     const currentTurn = lastHumanUserIndex < 0 ? messages : messages.slice(lastHumanUserIndex);
+    const activeAgent = currentTurn.findLast((m) => typeof m.info?.agent === "string" && m.info.agent.length > 0)?.info.agent ?? messages.findLast((m) => typeof m.info?.agent === "string" && m.info.agent.length > 0)?.info.agent;
+    const isSubagent = Boolean(activeAgent && activeAgent !== "orchestrator");
     return {
         isSubagent,
         isRemediationResponse,
@@ -161,6 +170,9 @@ export class GuardEngine {
     forgetSession(sessionID) {
         this.inspectedMessages.delete(sessionID);
         this.sessionState.forget(sessionID);
+    }
+    rollbackInspection(sessionID) {
+        this.inspectedMessages.delete(sessionID);
     }
     async inspect(sessionID, directory, messages) {
         if (this.config.enabled === false || messages.length === 0) {
@@ -263,6 +275,10 @@ export class GuardEngine {
                     decision: "block",
                     results,
                     combinedRemediationPrompt: `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+                    rollback: () => {
+                        this.inspectedMessages.delete(sessionID);
+                        this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
+                    },
                 };
             }
             const configuredBudget = typeof this.config.remediationBudget === "number" &&
@@ -288,6 +304,10 @@ export class GuardEngine {
                 decision: "block",
                 results,
                 combinedRemediationPrompt: `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+                rollback: () => {
+                    this.inspectedMessages.delete(sessionID);
+                    this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint);
+                },
             };
         }
         return {

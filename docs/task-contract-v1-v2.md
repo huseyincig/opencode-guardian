@@ -32,7 +32,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 3. **Evidence Collection at `session.idle`:**
    - Gathers recorded tool invocations into a unified `EvidenceCollector` snapshot.
    - Validates chronological order: verifications run *before* the latest file edit are marked stale.
-   - Substantive source inspections (file reads, line-bearing search/diff matches) are distinguished from superficial filename listings.
+   - Substantive source inspections (file reads, line-bearing search/diff matches) are distinguished from superficial filename listings. Note that observable inspection of modified files confirms post-change re-inspection but cannot prove exhaustive whole-repository coverage (`reviewProvesFullCoverage: false`).
 4. **Completion Evaluation:**
    - If an explicit iterative review task terminates without observing the required post-change verification, an automated remediation is triggered.
    - Continues up to `iterationBudget` (default `3`, max `5`), requiring observable progress on each turn.
@@ -45,3 +45,4 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 
 - **Graceful Fallbacks:** Missing optional hooks in transition environments fail open without breaking the core inspection pipeline.
 - **Fail-Fast Security:** When strict preflight (`preflight.enabled: true`) is explicitly configured, setup requires valid tool hook registration and will fail visibly if the host cannot provide pre-execution guarantees.
+- **Configuration Integrity:** Explicit configuration files (`opencode-guardian.json`, `.opencode/opencode-guardian.json`) must be valid JSON objects. Corrupt or malformed files throw a visible `GuardianConfigError` rather than silently degrading to insecure defaults.

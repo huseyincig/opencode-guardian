@@ -28,6 +28,13 @@ export class SessionStateStore {
         state.remediationCount += 1;
         state.fingerprints.add(fingerprint);
     }
+    rollbackRemediation(sessionID, turnKey, fingerprint) {
+        const state = this.sessions.get(sessionID);
+        if (state && state.turnKey === turnKey) {
+            state.remediationCount = Math.max(0, state.remediationCount - 1);
+            state.fingerprints.delete(fingerprint);
+        }
+    }
     canContinue(sessionID, turnKey, progressKey, budget) {
         const state = this.beginTurn(sessionID, turnKey);
         return (state.continuationCount < budget &&
@@ -37,6 +44,13 @@ export class SessionStateStore {
         const state = this.beginTurn(sessionID, turnKey);
         state.continuationCount += 1;
         state.continuationKeys.add(progressKey);
+    }
+    rollbackContinuation(sessionID, turnKey, progressKey) {
+        const state = this.sessions.get(sessionID);
+        if (state && state.turnKey === turnKey) {
+            state.continuationCount = Math.max(0, state.continuationCount - 1);
+            state.continuationKeys.delete(progressKey);
+        }
     }
     forget(sessionID) {
         this.sessions.delete(sessionID);

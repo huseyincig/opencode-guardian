@@ -3950,3 +3950,67 @@ test("iterationBudget zero retains completion findings without sending synthetic
     "block"
   );
 });
+
+test("task/completion-gate blocks claiming completion while admitting incomplete checks (B-08)", () => {
+  const result = taskCompletionRule.inspect(taskCtx(
+    "Fix the bug and run tests.",
+    [completedTool("write", { filePath: "src/feature.ts", content: "export const fixed = true;" }),
+      { type: "text", text: "The work is completed. Note that module B tests are not complete." }]
+  ));
+  assert.equal(result.decision, "block");
+  assert.ok(result.findings.some((finding) => finding.confidence === "high" && finding.pattern.includes("test verification")));
+});
+
+test("engine rollback allows re-inspecting the same assistant message after delivery failure (B-09)", async () => {
+  const engine = new GuardEngine({ enabled: true });
+  const messages = [
+    { info: { id: "user-1", role: "user" }, parts: [{ type: "text", text: "Fix the checkout page" }] },
+    {
+      info: { id: "asst-1", role: "assistant" },
+      parts: [
+        {
+          type: "text",
+          text: "I finished the changes. The test failure is unrelated to this change and already broken on main.",
+        },
+      ],
+    },
+  ];
+
+  const firstResult = await engine.inspect("retry-session", process.cwd(), messages);
+  assert.equal(firstResult.decision, "block");
+  assert.ok(typeof firstResult.rollback === "function");
+
+  // Simulate delivery failure: promptAsync failed, rollback called
+  firstResult.rollback();
+
+  // Next inspection attempt on the same message must NOT return pass/empty
+  const retryResult = await engine.inspect("retry-session", process.cwd(), messages);
+  assert.equal(retryResult.decision, "block");
+  assert.equal(retryResult.results.find((r) => r.ruleId === "discipline/no-evasion")?.decision, "block");
+});
+
+test("extractCurrentTurn resolves active agent from current turn, not stale session history (B-10)", async () => {
+  const { extractCurrentTurn } = await import("../dist/engine.js");
+  const messages = [
+    { info: { id: "msg-1", role: "user" }, parts: [{ type: "text", text: "Old prompt" }] },
+    { info: { id: "msg-2", role: "assistant", agent: "worker" }, parts: [{ type: "text", text: "Subagent reply" }] },
+    { info: { id: "msg-3", role: "user" }, parts: [{ type: "text", text: "Current prompt" }] },
+    { info: { id: "msg-4", role: "assistant", agent: "orchestrator" }, parts: [{ type: "text", text: "Main reply" }] },
+  ];
+  const turn = extractCurrentTurn(messages);
+  assert.equal(turn.isSubagent, false);
+});
+
+test("loadConfig throws GuardianConfigError when config file is malformed rather than falling back (B-11)", async () => {
+  const { loadConfig, GuardianConfigError } = await import("../dist/engine.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-malformed-cfg-"));
+  try {
+    fs.writeFileSync(path.join(tmpDir, "opencode-guardian.json"), '{"enabled": true, rules: }');
+    assert.throws(
+      () => loadConfig(tmpDir),
+      (err) => err instanceof GuardianConfigError && err.configPath.includes("opencode-guardian.json")
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

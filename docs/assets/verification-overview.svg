@@ -1,66 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
-  <title id="title">OpenCode Guardian verification snapshot</title>
-  <desc id="desc">For the October 3, 2026 audit of commit b86b08e: 374 of 374 automated tests, 18 of 18 sandbox scenarios, 4 of 4 V1 acceptance criteria and 4 of 4 V2 acceptance criteria reported passing. Production dependency audit reported zero vulnerabilities; 12 high advisories remained in development dependencies.</desc>
-  <defs>
-    <linearGradient id="back" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1224"/><stop offset="1" stop-color="#111e34"/></linearGradient>
-    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2940"/><stop offset="1" stop-color="#16243a"/></linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#55e8c3"/><stop offset=".52" stop-color="#7ad4ff"/><stop offset="1" stop-color="#b19bff"/></linearGradient>
-    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0V30" stroke="#8299bf" stroke-opacity=".065" fill="none"/></pattern>
-  </defs>
-  <rect width="1200" height="520" rx="22" fill="url(#back)"/>
-  <rect width="1200" height="520" rx="22" fill="url(#grid)"/>
-  <rect x="1" y="1" width="1198" height="518" rx="21" fill="none" stroke="#344862" stroke-opacity=".75"/>
-  <path d="M42 45l15-8 15 8v13c0 12-9 21-15 24-6-3-15-12-15-24V45Z" fill="#55e8c3" fill-opacity=".12" stroke="#55e8c3" stroke-width="2"/>
-  <path d="m49 57 6 6 12-13" fill="none" stroke="#55e8c3" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="87" y="59" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="2.7" fill="#d9e8fc">OPENCODE GUARDIAN</text>
-  <text x="87" y="81" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="1.8" fill="#8da3c0">VERIFICATION SNAPSHOT</text>
-  <rect x="906" y="43" width="252" height="38" rx="19" fill="#1b3042" stroke="#436775"/>
-  <circle cx="928" cy="62" r="5" fill="#55e8c3"/>
-  <text x="944" y="67" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="600" fill="#cbf8e9">AUDIT REPORTED PASS</text>
-  <text x="42" y="137" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="35" font-weight="750" letter-spacing="-1" fill="#f3f7ff">Quality you can verify.</text>
-  <text x="43" y="163" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" fill="#9bb0cb">Evidence-based checks across both OpenCode host integrations.</text>
-  <rect x="42" y="187" width="255" height="193" rx="16" fill="url(#card)" stroke="#354a67"/>
-  <rect x="59" y="205" width="32" height="4" rx="2" fill="#55e8c3"/>
-  <text x="61" y="239" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="11.7" font-weight="700" letter-spacing="1.45" fill="#adc0d8">AUTOMATED TESTS</text>
-  <text x="59" y="310" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="64" font-weight="750" letter-spacing="-3.5" fill="#f3f7ff">374</text>
-  <text x="174" y="309" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="550" fill="#55e8c3">/ 374</text>
-  <rect x="60" y="328" width="219" height="5" rx="2.5" fill="#3b4f66"/>
-  <rect x="60" y="328" width="219" height="5" rx="2.5" fill="#55e8c3"/>
-  <text x="60" y="355" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" fill="#a8bed9">Unit + regression · no failures</text>
-  <rect x="329" y="187" width="255" height="193" rx="16" fill="url(#card)" stroke="#354a67"/>
-  <rect x="346" y="205" width="32" height="4" rx="2" fill="#7ad4ff"/>
-  <text x="348" y="239" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="11.7" font-weight="700" letter-spacing="1.45" fill="#adc0d8">SANDBOX SCENARIOS</text>
-  <text x="346" y="310" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="64" font-weight="750" letter-spacing="-3.5" fill="#f3f7ff">18</text>
-  <text x="426" y="309" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="550" fill="#7ad4ff">/ 18</text>
-  <rect x="347" y="328" width="219" height="5" rx="2.5" fill="#3b4f66"/>
-  <rect x="347" y="328" width="219" height="5" rx="2.5" fill="#7ad4ff"/>
-  <text x="347" y="355" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" fill="#a8bed9">Isolated end-to-end exercises</text>
-  <rect x="616" y="187" width="255" height="193" rx="16" fill="url(#card)" stroke="#354a67"/>
-  <rect x="633" y="205" width="32" height="4" rx="2" fill="#b19bff"/>
-  <text x="635" y="239" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="11.7" font-weight="700" letter-spacing="1.45" fill="#adc0d8">V1 ACCEPTANCE</text>
-  <text x="633" y="310" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="64" font-weight="750" letter-spacing="-3.5" fill="#f3f7ff">4</text>
-  <text x="713" y="309" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="550" fill="#b19bff">/ 4</text>
-  <rect x="634" y="328" width="219" height="5" rx="2.5" fill="#3b4f66"/>
-  <rect x="634" y="328" width="219" height="5" rx="2.5" fill="#b19bff"/>
-  <text x="634" y="355" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" fill="#a8bed9">Host QA + SDK-shaped checks</text>
-  <rect x="903" y="187" width="255" height="193" rx="16" fill="url(#card)" stroke="#354a67"/>
-  <rect x="920" y="205" width="32" height="4" rx="2" fill="#55e8c3"/>
-  <text x="922" y="239" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="11.7" font-weight="700" letter-spacing="1.45" fill="#adc0d8">V2 ACCEPTANCE</text>
-  <text x="920" y="310" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="64" font-weight="750" letter-spacing="-3.5" fill="#f3f7ff">4</text>
-  <text x="1000" y="309" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="550" fill="#55e8c3">/ 4</text>
-  <rect x="921" y="328" width="219" height="5" rx="2.5" fill="#3b4f66"/>
-  <rect x="921" y="328" width="219" height="5" rx="2.5" fill="#55e8c3"/>
-  <text x="921" y="355" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" fill="#a8bed9">Live host acceptance report</text>
-  <rect x="42" y="399" width="1116" height="1" fill="#344860"/>
-  <text x="43" y="428" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" font-weight="700" letter-spacing="1.1" fill="#bed0e7">DEPENDENCY AUDIT</text>
-  <circle cx="238" cy="424" r="5" fill="#55e8c3"/>
-  <text x="253" y="429" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#d6e6f9">Production: 0 reported vulnerabilities</text>
-  <circle cx="613" cy="424" r="5" fill="#e7bb77"/>
-  <text x="628" y="429" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#e6d4b4">Development: 12 high upstream advisories</text>
-  <text x="43" y="468" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" fill="#8299b8">AUDIT BASELINE</text>
-  <text x="162" y="468" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#dce9fc">03 OCT 2026</text>
-  <text x="296" y="468" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" fill="#8299b8">COMMIT</text>
-  <text x="357" y="468" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#dce9fc">b86b08e</text>
-  <text x="1157" y="468" text-anchor="end" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12.5" fill="#8299b8">Historical snapshot · see detailed report</text>
-  <rect x="42" y="493" width="1116" height="3" rx="1.5" fill="url(#accent)"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="318" viewBox="0 0 1200 318" role="img" aria-labelledby="title description">
+<title id="title">OpenCode Guardian test results</title>
+<desc id="description">374 of 374 automated tests passed, 18 of 18 sandbox scenarios passed, and four of four acceptance criteria reported passing for each OpenCode host. See the detailed report for evidence and limitations.</desc>
+<rect width="1200" height="318" rx="14" fill="#111619"/>
+<rect x=".5" y=".5" width="1199" height="317" rx="13.5" stroke="#353e42" fill="none"/>
+<path d="M36 37l12-6 12 6v11c0 9-7 15-12 18-5-3-12-9-12-18z" fill="none" stroke="#72d9ad" stroke-width="2"/>
+<path d="m42 48 5 5 8-9" fill="none" stroke="#72d9ad" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="76" y="46" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#f2f5f4">OPENCODE GUARDIAN</text>
+<text x="76" y="68" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Test results</text>
+<path d="M36 91H1164" stroke="#353e42"/>
+<text x="40" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">AUTOMATED TESTS</text>
+<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">374<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 374</tspan></text>
+<text x="40" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
+<text x="40" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Unit and regression</text>
+<path d="M310 117v165" stroke="#353e42"/>
+<text x="330" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">SANDBOX SCENARIOS</text>
+<text x="330" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">18<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 18</tspan></text>
+<text x="330" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
+<text x="330" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Isolated end-to-end</text>
+<path d="M600 117v165" stroke="#353e42"/>
+<text x="620" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">OPENCODE V1</text>
+<text x="620" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">4<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 4</tspan></text>
+<text x="620" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
+<text x="620" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Acceptance criteria</text>
+<path d="M890 117v165" stroke="#353e42"/>
+<text x="910" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">OPENCODE V2</text>
+<text x="910" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">4<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 4</tspan></text>
+<text x="910" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
+<text x="910" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Acceptance criteria</text>
 </svg>

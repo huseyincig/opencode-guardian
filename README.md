@@ -62,7 +62,7 @@ Use the v1 `plugin` key in your project's `opencode.json` or `~/.config/opencode
 
 For local development with v1, use `"plugin": ["file:///path/to/opencode-guardian"]`.
 
-### OpenCode v2 (2.x beta)
+### OpenCode v2 (2.x)
 
 Use the v2 **`plugins`** key in `opencode.json` or `opencode.jsonc`:
 

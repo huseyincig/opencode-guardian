@@ -232,6 +232,12 @@ function isRecursiveForceRemove(command: string): boolean {
   });
 }
 
+// Git global -C/-c options are legal before every subcommand.
+const GIT_RESET_INVOCATION =
+  /^\s*(?:sudo\s+)?git(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i;
+const GIT_FORCE_PUSH_INVOCATION =
+  /^\s*(?:sudo\s+)?git(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b[^\n;&|]*(?:--force(?:-with-lease)?(?:=[^\s;&|]+)?|\s-f(?:\s|$))/i;
+
 const GIT_CLEAN_INVOCATION =
   /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+clean\b/i;
 
@@ -262,11 +268,25 @@ function isDestructiveGitClean(command: string): boolean {
   });
 }
 
+// Recognize common literal filesystem formatting commands without flagging
+// quoted examples or inspection-only --help/--version invocations.
+function isFilesystemFormatCommand(command: string): boolean {
+  const match = /^\s*(?:sudo\s+)?(?:\/(?:usr\/)?sbin\/)?mkfs(?:\.[a-z0-9_-]+)?(?=\s|$)/i.exec(command);
+  if (!match) return false;
+  return !/^\s*(?:--help|--version|-h|-V)(?:\s|$)/i.test(command.slice(match[0].length));
+}
+
+// A known literal Bash function fork bomb, including a named function.
+// This is deliberately not a general shell evaluation or fork-bomb detector.
+const LITERAL_FORK_BOMB =
+  /^\s*([:a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*\}\s*;\s*\1(?=\s*(?:;|&&|$))/i;
+
 function isLegacyDestructiveCommand(command: string): boolean {
   return (
-    /^\s*(?:sudo\s+)?git\s+reset\s+--hard\b/i.test(command) ||
+    GIT_RESET_INVOCATION.test(command) ||
     isDestructiveGitClean(command) ||
-    /^\s*(?:sudo\s+)?git\s+push\b[^\n;&|]*(?:--force(?:-with-lease)?|\s-f(?:\s|$))/i.test(command) ||
+    GIT_FORCE_PUSH_INVOCATION.test(command) ||
+    isFilesystemFormatCommand(command) ||
     isRecursiveForceRemove(command) ||
     /\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b/i.test(command) ||
     /\bterraform\s+destroy\b/i.test(command) ||
@@ -282,6 +302,7 @@ function isLegacyDestructiveCommand(command: string): boolean {
  * Post-execution classification cannot serve as a pre-execution safety gate.
  */
 export function isDestructiveCommand(command: string, depth = 0): boolean {
+  if (LITERAL_FORK_BOMB.test(command)) return true;
   if (shellCommandVariants(command).some(
     (candidate) => isLegacyDestructiveCommand(candidate) || hasFindDeletion(candidate)
   )) return true;
@@ -315,7 +336,7 @@ export function isSimpleFileRemoval(command: string, depth = 0): boolean {
 function isLikelyShellFileDeletion(command: string, depth = 0): boolean {
   if (shellCommandVariants(command).some((candidate) =>
     /^\s*(?:sudo\s+)?(?:rm|unlink|trash)(?=\s|$)(?!\s+--(?:help|version)\b)/i.test(candidate) ||
-    /^\s*(?:sudo\s+)?git\s+reset\s+--hard\b/i.test(candidate) ||
+    GIT_RESET_INVOCATION.test(candidate) ||
     isDestructiveGitClean(candidate) ||
     hasFindDeletion(candidate)
   )) return true;

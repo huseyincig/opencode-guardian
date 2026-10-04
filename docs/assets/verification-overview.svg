@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="318" viewBox="0 0 1200 318" role="img" aria-labelledby="title description">
 <title id="title">OpenCode Guardian test results</title>
-<desc id="description">374 of 374 automated tests passed, 18 of 18 sandbox scenarios passed, and four of four acceptance criteria reported passing for each OpenCode host. See the detailed report for evidence and limitations.</desc>
+<desc id="description">397 of 397 automated tests passed for v0.5.1 and 18 of 18 sandbox scenarios passed; the 4 of 4 acceptance criteria for each OpenCode host were reported for v0.5.0 and were not repeated for v0.5.1. See the detailed report for limitations.</desc>
 <rect width="1200" height="318" rx="14" fill="#111619"/>
 <rect x=".5" y=".5" width="1199" height="317" rx="13.5" stroke="#353e42" fill="none"/>
 <path d="M36 37l12-6 12 6v11c0 9-7 15-12 18-5-3-12-9-12-18z" fill="none" stroke="#72d9ad" stroke-width="2"/>
@@ -9,7 +9,7 @@
 <text x="76" y="68" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Test results</text>
 <path d="M36 91H1164" stroke="#353e42"/>
 <text x="40" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">AUTOMATED TESTS</text>
-<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">374<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 374</tspan></text>
+<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">397<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 397</tspan></text>
 <text x="40" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
 <text x="40" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Unit and regression</text>
 <path d="M310 117v165" stroke="#353e42"/>
@@ -21,10 +21,10 @@
 <text x="620" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">OPENCODE V1</text>
 <text x="620" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">4<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 4</tspan></text>
 <text x="620" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
-<text x="620" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Acceptance criteria</text>
+<text x="620" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">v0.5.0 host checks</text>
 <path d="M890 117v165" stroke="#353e42"/>
 <text x="910" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">OPENCODE V2</text>
 <text x="910" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">4<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 4</tspan></text>
 <text x="910" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
-<text x="910" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Acceptance criteria</text>
+<text x="910" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">v0.5.0 host checks</text>
 </svg>

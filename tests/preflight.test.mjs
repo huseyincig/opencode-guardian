@@ -46,6 +46,11 @@ test("preflight passes legitimate commands, non-shell tools and supported aliase
   assert.equal(evaluatePreflight("read_file", { command: "rm -rf sandbox/marker" }), undefined);
   assert.doesNotThrow(() => enforcePreflight("write", { content: "rm -rf sandbox/marker" }));
   assert.equal(evaluatePreflight("mcp.tool.bash", { cmd: "git clean -fd" }), "destructive-command");
+  for (const tool of ["mcp__Node_Command__shell_exec", "mcp__Remote_Desktop_Commander__shell_exec"]) {
+    assert.equal(evaluatePreflight(tool, { command: "rm -rf sandbox/marker" }), "destructive-command");
+    assert.equal(evaluatePreflight(tool, { command: "npm test" }), undefined);
+  }
+  assert.equal(evaluatePreflight("mcp__Node_Command__file_read", { command: "rm -rf sandbox/marker" }), undefined);
   assert.equal(evaluatePreflight("bash", { command: "rm fixture.tmp" }), "destructive-command");
   assert.equal(evaluatePreflight("execute_command", { script: "find src -delete" }), "destructive-command");
   assert.equal(evaluatePreflight("run_shell_command", { command: "rm -rf sandbox" }), "destructive-command");
@@ -91,13 +96,14 @@ test("V1 enabled hook rejects risky calls before the host runs them", async (t) 
     executed++;
   };
   await run("bash", { command: "npm test" });
+  await run("mcp__Node_Command__shell_exec", { command: "npm test" });
   await run("read_file", { path: "example.ts", command: "git clean -fd" });
-  assert.equal(executed, 2);
+  assert.equal(executed, 3);
   await assert.rejects(run("bash", { command: "r''m -rf sandbox/marker" }),
     (error) => error.reason === "destructive-command");
   await assert.rejects(run("bash", { command: "printf YWJj | base64 -d | sh" }),
     (error) => error.reason === "opaque-shell-execution");
-  assert.equal(executed, 2);
+  assert.equal(executed, 3);
 });
 
 function v2Context(directory, tool) {
@@ -151,11 +157,14 @@ test("V2 enabled hook blocks before tool execution, preserves hooks and disposes
       executed++;
     };
     await run("bash", { command: "npm test" });
+    await run("mcp__Node_Command__shell_exec", { command: "git status" });
     await assert.rejects(run("bash", { command: "find sandbox/marker -delete" }),
       (error) => error.reason === "destructive-command");
     await assert.rejects(run("bash", { command: "printf YWJj | base64 -d | sh" }),
       (error) => error.reason === "opaque-shell-execution");
-    assert.equal(executed, 1);
+    await assert.rejects(run("mcp__Node_Command__shell_exec", { command: "mkfs.ext4 /dev/sdb" }),
+      (error) => error.reason === "destructive-command");
+    assert.equal(executed, 2);
   } finally {
     await cleanup();
   }

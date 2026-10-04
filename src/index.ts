@@ -6,6 +6,7 @@ import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool } from "./preflight.js";
 import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
+import { auditReasons } from "./audit.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 
@@ -33,6 +34,7 @@ export * from "./rules/instruction-fidelity.js";
 export * from "./prose.js";
 export * from "./preflight.js";
 export * from "./telemetry.js";
+export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
 
@@ -174,13 +176,13 @@ async function handleSessionIdle(
     const result = await engine.inspect(sessionID, directory, messages);
     const findings = result.results.filter((item) => item.findings.length > 0);
     if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
-      recordGuardianEvent({ kind: "post-warning", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId) }, directory);
+      recordGuardianEvent({ kind: "post-warning", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
     }
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
       try {
         await sendPrompt(result.combinedRemediationPrompt);
-        recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId) }, directory);
+        recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
       } catch (promptError) {
         result.rollback?.();
         throw promptError;
@@ -188,7 +190,8 @@ async function handleSessionIdle(
     }
   } catch (error) {
     recordGuardianEvent({ kind: "inspection-error", session: sessionFingerprint(sessionID) }, directory);
-    console.error("[opencode-guardian] Inspection error:", error);
+    // Error objects may contain private paths and disrupt the interactive TUI.
+    // The redacted inspection-error event above is the only diagnostic.
   }
 }
 
@@ -250,17 +253,24 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         await handleSessionIdle(
           sessionID, directory, async () => messages,
           async (text) => {
-            await client.session.promptAsync({
+            const response = await client.session.promptAsync({
               path: { id: sessionID }, query: { directory },
               body: { parts: [{ type: "text", text }] },
             });
+            if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
           },
           engine
         );
       },
-      onError: (sessionID, error) => {
-        recordGuardianEvent({ kind: "inspection-error", session: sessionFingerprint(sessionID) }, directory);
-        console.error("[opencode-guardian] V1 idle compatibility probe failed:", error);
+      onError: (sessionID, _error) => {
+        // The V1 host can render console output over its interactive prompt.
+        // Surface probe failures through the redacted local event log / TUI
+        // error counter instead of printing a stack into the terminal.
+        recordGuardianEvent({
+          kind: "inspection-error",
+          session: sessionFingerprint(sessionID),
+          rules: ["v1-completion-probe"],
+        }, directory);
       },
     })
     : undefined;
@@ -343,17 +353,21 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
             path: { id: sessionID },
             query: { directory },
           });
-          const messages = (Array.isArray(res) ? res : (res?.data ?? [])) as SessionMessage[];
+          if (res?.error || !Array.isArray(res?.data)) {
+            throw new Error("V1 session.messages() failed during idle inspection.");
+          }
+          const messages = res.data as SessionMessage[];
           const contract = extractTaskContract(messages);
           if (contract) contracts.set(sessionID, contract);
           return messages;
         },
         async (text: string) => {
-          await client.session.promptAsync({
+          const response = await client.session.promptAsync({
             path: { id: sessionID },
             query: { directory },
             body: { parts: [{ type: "text", text }] },
           });
+          if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
         },
         engine
       );
@@ -475,7 +489,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         Promise.resolve().then(() => registration.dispose())
       ));
       contracts.clear();
-      console.error("[opencode-guardian] V2 task hooks unavailable:", error);
+      recordGuardianEvent({ kind: "inspection-error" }, directory);
     }
   }
 
@@ -543,11 +557,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       } catch (error) {
         if (controller.signal.aborted) return;
         recordGuardianEvent({ kind: "inspection-error" }, directory);
-        console.error("[opencode-guardian] V2 event subscription error:", error);
+        // Record only the redacted error; never write host exceptions to the TUI.
       }
 
       if (attempt === 2) {
-        console.error("[opencode-guardian] V2 idle inspection stopped after three stream failures; reload the plugin to restore it.");
+        // Final inspection-error remains visible in the status panel.
         return;
       }
 
@@ -574,7 +588,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       } catch (error) {
         if (!controller.signal.aborted) {
           recordGuardianEvent({ kind: "inspection-error" }, directory);
-          console.error("[opencode-guardian] V2 event resubscription failed; reload the plugin:", error);
+          // The failure has been recorded without exposing exception data.
         }
         return;
       }

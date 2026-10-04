@@ -82,13 +82,13 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   // cannot authorize a different target or a rewritten shell command.
   if (hasFindDeletion(command)) return request.trim() === command.trim().toLowerCase();
 
-  if (/\bgit\s+push\b/i.test(command)) {
+  if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b/i.test(command)) {
     return /\b(?:force\s+push|zorla\s+push|--force|force-with-lease)\b/iu.test(
       request
     );
   }
 
-  if (/\bgit\s+reset\s+--hard\b/i.test(command)) {
+  if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i.test(command)) {
     return /\b(?:hard\s+reset|reset(?:le|leyin)?|sıfırla|sıfırlayın)\b/iu.test(
       request
     );

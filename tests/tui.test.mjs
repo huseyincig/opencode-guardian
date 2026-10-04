@@ -123,7 +123,9 @@ test("Guardian sidebar is compact by default and contains expandable details", a
   assert.match(source, /status\(\)\.warnings/);
   assert.match(source, /label="Preflight"/);
   assert.match(source, /StatRow/);
-  assert.match(source, /totalBlocked/);
+  assert.match(source, /value=\{status\(\)\.blocked\}/);
+  assert.match(source, /value=\{status\(\)\.remediations\}/);
+  assert.doesNotMatch(source, /totalBlocked/, "remediations are not blocked commands");
   assert.match(source, /○ Idle/);
   assert.match(source, /disposed = true/);
   assert.match(runtime, /opentui:runtime-module:solid-js/);

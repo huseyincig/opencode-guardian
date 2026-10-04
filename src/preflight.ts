@@ -18,7 +18,11 @@ export function isShellExecutionTool(
   additionalTools: readonly string[] = []
 ): boolean {
   const normalized = tool.toLowerCase();
-  const last = normalized.split(/[.:/]/).at(-1) ?? "";
+  // MCP tool IDs use double-underscore separators, e.g.
+  // mcp__Node_Command__shell_exec. Never treat an arbitrary file_* MCP
+  // action as a shell, but recognize a known shell action by its full suffix.
+  const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
+  const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
   return SHELL_TOOLS.has(last) || additionalTools.some((entry) => {
     const candidate = entry.trim().toLowerCase();
     return candidate === normalized || candidate === last;

@@ -11,7 +11,7 @@ const sandboxDir = path.dirname(new URL(import.meta.url).pathname);
 let lastPrompt = null;
 const mockClient = {
   session: {
-    messages: async () => [
+    messages: async () => ({ data: [
       {
         info: { id: "user-1", role: "user" },
         parts: [{ type: "text", text: "Please implement the payment calculation." }],
@@ -33,9 +33,10 @@ const mockClient = {
           },
         ],
       },
-    ],
+    ] }),
     promptAsync: async ({ body }) => {
       lastPrompt = body.parts?.[0]?.text;
+      return { data: {}, error: undefined };
     },
   },
 };

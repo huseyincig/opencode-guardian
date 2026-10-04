@@ -57,7 +57,7 @@ test("V2 idle inspection resubscribes after a transient stream failure", async (
     await eventually(() => inspected === 1);
     assert.equal(subscriptions, 2);
     assert.equal(readGuardianStatus().errors, 1);
-    assert.ok(errors.some((line) => line.includes("event subscription error")));
+    assert.deepEqual(errors, [], "stream exceptions must not corrupt the interactive TUI");
   } finally {
     await cleanup?.();
     console.error = original;
@@ -76,7 +76,8 @@ test("V2 finite event streams report and bound failed resubscriptions", async (t
   let cleanup;
   try {
     cleanup = await Guardian.setup(host);
-    await eventually(() => errors.some((line) => line.includes("stopped after three")), 1700);
+    await eventually(() => readGuardianStatus().errors === 3, 1700);
+    assert.deepEqual(errors, [], "stream errors must be recorded without terminal output");
     assert.equal(subscriptions, 3);
     assert.equal(readGuardianStatus().errors, 3);
   } finally {

@@ -1,6 +1,6 @@
 # OWASP Agentic Top 10 (2026): Guardian Coverage and Safety Limits
 
-Documentation for OpenCode Guardian **v0.5.0**.
+Documentation for OpenCode Guardian **v0.5.1**.
 
 This document maps OpenCode Guardian's architecture and guardrails to the **OWASP Top 10 for Agentic Applications (2026)** framework. It serves as an evidence-linked engineering mapping of current capabilities and explicit non-goals.
 
@@ -33,5 +33,6 @@ Sources:
 The mappings above are continuously validated through automated test suites:
 - [`tests/security-benchmark.test.mjs`](../tests/security-benchmark.test.mjs): 17-case synthetic preflight benchmark.
 - [`tests/guardfall-regression.test.mjs`](../tests/guardfall-regression.test.mjs): Obfuscated shell rewrite regressions.
+- [`tests/full-audit-regressions.test.mjs`](../tests/full-audit-regressions.test.mjs): Recognized MCP shell tools, scoped Git destructive operations, and literal format/fork-bomb signatures.
 - [`tests/owasp-scope-regression.test.mjs`](../tests/owasp-scope-regression.test.mjs): Path scoping and `sudo` privilege escalation tests.
 - [`sandbox/comprehensive-test.mjs`](../sandbox/comprehensive-test.mjs): 18 end-to-end failure mode and recovery scenarios.

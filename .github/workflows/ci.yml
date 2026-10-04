@@ -43,36 +43,12 @@ jobs:
       pull-requests: read
 
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Delete merged PR branches
         uses: actions/github-script@v8
         with:
           script: |
-            const { owner, repo } = context.repo
-            const defaultBranch = context.payload.repository.default_branch
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner,
-              repo,
-              state: 'closed',
-              per_page: 100,
-            })
-
-            for (const pr of pulls) {
-              if (!pr.merged_at) continue
-              if (pr.head.repo?.full_name !== `${owner}/${repo}`) continue
-              if (!pr.head.ref || pr.head.ref === defaultBranch) continue
-
-              try {
-                await github.rest.git.deleteRef({
-                  owner,
-                  repo,
-                  ref: `heads/${pr.head.ref}`,
-                })
-                core.info(`Deleted merged branch ${pr.head.ref}`)
-              } catch (error) {
-                if (error.status === 404 || error.status === 422) {
-                  core.info(`Branch already absent: ${pr.head.ref}`)
-                  continue
-                }
-                throw error
-              }
-            }
+            const cleanup = require('./scripts/cleanup-merged-branches.cjs')
+            await cleanup({ github, context, core })

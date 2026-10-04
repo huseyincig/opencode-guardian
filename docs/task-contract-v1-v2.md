@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.5.0**.
+Documentation for OpenCode Guardian **v0.5.1**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -66,10 +66,10 @@ unrelated sessions or treat tool completion as turn completion.
 The session must be idle (or absent from the SDK active-status map), the
 latest assistant message must have time.completed, and the same completed
 message must remain stable across two polls. The default interval is 750 ms,
-bounded to 2,400 checks (approximately 30 minutes).
+bounded to 2,400 idle checks (approximately 30 minutes); active busy/retry states use a separate orphan-watcher safety limit.
 
 A native idle event, session deletion, or V1 dispose() cancels the watcher.
-Repeated SDK failures and expiration produce visible inspection errors. When
+Repeated SDK failures and expiration produce redacted inspection-error audit events rather than terminal stack traces. A V1 remediation is recorded only after the SDK confirms delivery; rejected responses do not exhaust the retry budget. When
 session.status() is unavailable, native idle events remain the only trigger.
 Actual host behavior must be verified on each targeted V1 release. Post-turn
 findings cannot undo already-executed commands.
@@ -79,7 +79,7 @@ findings cannot undo already-executed commands.
 Literal backtick substitutions that construct a destructive executable name
 are classified before execution. Unknown executable names generated through
 dynamic substitution are denied in strict preflight. Passive documentation
-examples and echo output remain permitted. The shell-pattern detector is not
+examples and echo output remain permitted. Standard MCP shell-tool IDs (such as `mcp__provider__shell_exec`), scoped Git operations, and common literal `mkfs`/fork-bomb signatures are also recognized. The shell-pattern detector is not
 a full shell interpreter.
 
 All example and template files remain subject to secret scanning. A narrowly

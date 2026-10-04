@@ -1,6 +1,6 @@
 # Security Benchmark & Synthetic Preflight Test Suite
 
-Documentation for OpenCode Guardian **v0.5.0**.
+Documentation for OpenCode Guardian **v0.5.1**.
 
 Guardian includes a curated suite of synthetic benchmark tests that evaluate preflight shell-risk detection logic without executing destructive commands or mutating files.
 
@@ -25,4 +25,5 @@ The frozen test suite defined in [`tests/security-benchmark.test.mjs`](../tests/
 - **Additional Regressions:**
   - [`tests/security-gap-regression.test.mjs`](../tests/security-gap-regression.test.mjs): Covers backticks, scoped `rm` authorization, and inert discussion text.
   - [`tests/security-audit-regression.test.mjs`](../tests/security-audit-regression.test.mjs): Verifies that user queries/clarifications do not grant implicit deletion permissions.
+  - [`tests/full-audit-regressions.test.mjs`](../tests/full-audit-regressions.test.mjs): Covers scoped Git operations, recognized MCP shell tools, filesystem formatting signatures, literal fork bombs, and multiple Go dependency blocks.
   - [`sandbox/comprehensive-test.mjs`](../sandbox/comprehensive-test.mjs): Evaluates 18 end-to-end agent failure and recovery scenarios across all 14 rules.

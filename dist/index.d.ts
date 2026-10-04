@@ -25,6 +25,7 @@ export * from "./rules/instruction-fidelity.js";
 export * from "./prose.js";
 export * from "./preflight.js";
 export * from "./telemetry.js";
+export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
 /**

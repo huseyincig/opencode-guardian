@@ -428,9 +428,10 @@ for (const sc of SCENARIOS) {
 
   const mockClient = {
     session: {
-      messages: async () => sc.messages,
+      messages: async () => ({ data: sc.messages, error: undefined }),
       promptAsync: async ({ body }) => {
         promptSent = body.parts?.[0]?.text;
+        return { data: {}, error: undefined };
       },
     },
   };

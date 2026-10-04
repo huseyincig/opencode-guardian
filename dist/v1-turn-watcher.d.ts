@@ -10,7 +10,8 @@ export interface V1TurnWatcher {
  * and only inspect a completed assistant response while the SDK reports
  * idle (or removes the session from its active-status map).
  *
- * Tool completion alone is never interpreted as turn completion.
+ * Tool completion alone is never interpreted as turn completion. A long-running
+ * busy/retry turn must not consume the idle completion timeout.
  */
 export declare function createV1TurnWatcher(options: {
     status: (sessionID: string) => Promise<"idle" | "busy" | "retry" | undefined>;
@@ -19,4 +20,5 @@ export declare function createV1TurnWatcher(options: {
     onError: (sessionID: string, error: unknown) => void;
     intervalMs?: number;
     maxPolls?: number;
+    maxBusyPolls?: number;
 }): V1TurnWatcher;

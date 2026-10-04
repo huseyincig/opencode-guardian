@@ -391,10 +391,13 @@ function loadGoManifest(
     for (const match of text.matchAll(/^\s*require\s+([^\s()]+)\s+v?[^\s]+/gm)) {
       modules.add(match[1]);
     }
-    const block = /require\s*\(([\s\S]*?)\)/m.exec(text)?.[1] ?? "";
-    for (const line of block.split(/\r?\n/)) {
-      const mod = /^\s*([^\s/][^\s]*)\s+v?[^\s]+/.exec(line)?.[1];
-      if (mod) modules.add(mod);
+    // go.mod commonly has separate direct and indirect require blocks.
+    // Inspect every block, not only the first one.
+    for (const block of text.matchAll(/(?:^|\n)\s*require\s*\(([\s\S]*?)\)/g)) {
+      for (const line of block[1].split(/\r?\n/)) {
+        const mod = /^\s*([^\s/][^\s]*)\s+v?[^\s]+/.exec(line)?.[1];
+        if (mod) modules.add(mod);
+      }
     }
 
     return { modules, ownModule, root: manifest.root };

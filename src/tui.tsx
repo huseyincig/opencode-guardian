@@ -78,22 +78,29 @@ function GuardianSidebar(props: { colors: SidebarColors; directory?: string }) {
     return props.colors.muted;
   };
 
-  const totalBlocked = () => status().blocked + status().remediations;
-
   const statusLabel = () => {
-    if (totalBlocked() > 0) return `● ${totalBlocked()} blocked`;
-    if (status().warnings > 0) return `● ${status().warnings} warn`;
-    if (status().errors > 0) return `● ${status().errors} err`;
-    if (!status().lastEvent && status().preflight === "unknown") return "○ Idle";
-    return "● Active";
+    // Historical counters must not masquerade as the latest event.
+    switch (status().lastKind) {
+      case "inspection-error": return "▲ inspection error";
+      case "preflight-blocked": return "● preflight blocked";
+      case "post-remediation": return "● remediation sent";
+      case "post-warning": return "▲ warning";
+      case "preflight-allowed": return "● allowed";
+      case "runtime-started": return "● Active";
+      default: return "○ Idle";
+    }
   };
 
   const statusColor = () => {
-    if (totalBlocked() > 0) return errorColor();
-    if (status().warnings > 0) return warningColor();
-    if (status().errors > 0) return errorColor();
-    if (!status().lastEvent && status().preflight === "unknown") return props.colors.muted;
-    return successColor();
+    switch (status().lastKind) {
+      case "inspection-error":
+      case "preflight-blocked": return errorColor();
+      case "post-warning": return warningColor();
+      case "post-remediation": return props.colors.accent;
+      case "preflight-allowed":
+      case "runtime-started": return successColor();
+      default: return props.colors.muted;
+    }
   };
 
   return (
@@ -147,8 +154,8 @@ function GuardianSidebar(props: { colors: SidebarColors; directory?: string }) {
         />
         <StatRow
           label="Blocked"
-          value={totalBlocked()}
-          valueColor={totalBlocked() > 0 ? errorColor() : props.colors.muted}
+          value={status().blocked}
+          valueColor={status().blocked > 0 ? errorColor() : props.colors.muted}
           muted={props.colors.muted}
           text={props.colors.text}
         />

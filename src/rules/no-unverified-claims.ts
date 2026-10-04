@@ -7,7 +7,7 @@ import type {
   TurnEvidence,
   TurnInspectionContext,
 } from "../types.js";
-import { latestEvidence } from "../evidence.js";
+import { calculateProductFingerprint, latestEvidence } from "../evidence.js";
 import { sanitizeProseForInspection } from "../prose.js";
 
 interface ClaimPattern {
@@ -100,23 +100,34 @@ function latestMutationSequence(
 
 function staleAfterMutation(
   evidence: TurnEvidence | undefined,
-  record: EvidenceRecord | undefined
+  record: EvidenceRecord | undefined,
+  directory?: string
 ): boolean {
-  return Boolean(
-    record &&
-      latestMutationSequence(evidence) > record.sequence
-  );
+  if (!record) return false;
+  if (latestMutationSequence(evidence) > record.sequence) {
+    return true;
+  }
+  if (record.stateFingerprint?.startsWith("sha256:")) {
+    const files = record.snapshotFiles?.length ? record.snapshotFiles : evidence?.mutatedFiles;
+    if (!directory || !files || (Array.isArray(files) ? !files.length : !files.size)) return true;
+    const fp = calculateProductFingerprint(directory, files);
+    if (fp === "unverified-state" || `sha256:${fp}` !== record.stateFingerprint) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function lastRelevantVerification(
-  evidence: TurnEvidence | undefined
+  evidence: TurnEvidence | undefined,
+  directory?: string
 ): EvidenceRecord | undefined {
   if (!evidence) return undefined;
   const relevant = new Set<EvidenceKind>(["test", "build", "typecheck", "lint"]);
   const record = evidence.records
     .filter((candidate) => relevant.has(candidate.kind))
     .sort((a, b) => b.sequence - a.sequence)[0];
-  return staleAfterMutation(evidence, record) ? undefined : record;
+  return staleAfterMutation(evidence, record, directory) ? undefined : record;
 }
 
 function gitStatusSemanticEvidence(
@@ -155,10 +166,11 @@ function gitStatusSemanticEvidence(
 
 function evidenceForClaim(
   pattern: ClaimPattern,
-  evidence: TurnEvidence | undefined
+  evidence: TurnEvidence | undefined,
+  directory?: string
 ): EvidenceRecord | undefined {
   if (pattern.mode === "verification") {
-    const verification = lastRelevantVerification(evidence);
+    const verification = lastRelevantVerification(evidence, directory);
     // A generic "bug fixed" statement cannot safely be contradicted by an
     // unrelated failing lint/test/build. Successful verification supports it;
     // otherwise keep the finding advisory unless strict mode is configured.
@@ -171,14 +183,14 @@ function evidenceForClaim(
     return { ...record, status: "unknown" };
   }
   if (pattern.kind === "git-status") {
-    if (staleAfterMutation(evidence, record)) return undefined;
+    if (staleAfterMutation(evidence, record, directory)) return undefined;
     return gitStatusSemanticEvidence(record);
   }
   if (
     ["test", "build", "typecheck", "lint", "audit", "git-push"].includes(
       pattern.kind
     ) &&
-    staleAfterMutation(evidence, record)
+    staleAfterMutation(evidence, record, directory)
   ) {
     return undefined;
   }
@@ -218,7 +230,7 @@ export const noUnverifiedClaimsRule: GuardRule = {
           const sentence = sentenceAround(text, match.index);
           if (UNCERTAINTY.test(sentence)) continue;
 
-          const evidence = evidenceForClaim(claim, context.evidence);
+          const evidence = evidenceForClaim(claim, context.evidence, context.directory);
           if (evidence?.status === "success") continue;
 
           const finding: RuleFinding = {

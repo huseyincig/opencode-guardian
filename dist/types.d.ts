@@ -81,12 +81,16 @@ export interface EvidenceRecord {
     exitCode?: number;
     errorFingerprint?: string;
     ambiguousOutcome?: boolean;
+    stateFingerprint?: string;
+    snapshotFiles?: string[];
+    filePath?: string;
 }
 export interface TurnEvidence {
     records: EvidenceRecord[];
     successfulVerifications: EvidenceRecord[];
     failures: EvidenceRecord[];
     fileMutations: EvidenceRecord[];
+    mutatedFiles?: Set<string>;
 }
 export interface TurnInspectionContext {
     sessionID: string;

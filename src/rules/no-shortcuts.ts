@@ -199,10 +199,57 @@ function isWithinException(text: string, pos: number, len: number, exceptions: s
   return false;
 }
 
+export function explicitlyAuthorizedStubOrPlaceholder(text?: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  return /(?:\b(?:add|create|use|put|write|leave)\b[^\n.!?]{0,50}\b(?:stub|mock|placeholder|todo|fixme)\b|\b(?:stub|mock|placeholder|todo|fixme|taslak|yer\s+tutucu)\b[^\n.!?]{0,50}\b(?:ekle|oluştur|yaz|kullan|bırak)\b)/iu.test(text);
+}
+
+function extractUserInstruction(context: TurnInspectionContext): string {
+  const messages = context.messages?.length ? context.messages : context.currentTurn;
+  const human = messages?.findLast(
+    (m) =>
+      m.info.role === "user" &&
+      !m.parts?.some((p) => p.synthetic === true) &&
+      !m.parts?.some(
+        (p) =>
+          typeof p.text === "string" &&
+          p.text.trimStart().startsWith("[opencode-guardian remediation]")
+      )
+  );
+  if (!human) return "";
+  return human.parts
+    ?.filter((p) => p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text ?? "")
+    .join("\n") ?? "";
+}
+
 export const noShortcutsRule: GuardRule = {
   id: "quality/no-shortcuts",
   description: "Detects hedging language, shortcut phrases, or deferred work patterns in code and responses.",
   inspect: (context: TurnInspectionContext): RuleResult => {
+    const userInstruction = extractUserInstruction(context);
+    const authorized = explicitlyAuthorizedStubOrPlaceholder(userInstruction);
+    const isAuthorizedMarker = (marker: string, targetFile?: string): boolean => {
+      if (!authorized) return false;
+      if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:todo|fixme|hack|stub|placeholder|mock)\b|\b(?:todo|fixme|hack|taslak)\s+(?:ekleme|bırakma|yazma)\b/iu.test(userInstruction)) return false;
+      const instruction = userInstruction.toLowerCase();
+      // A request for mocks does not permit arbitrary TODOs in production.
+      const wantsCodePlaceholder = /\b(?:stub|placeholder|todo|fixme|hack|taslak|yer\s*tutucu)\b/iu.test(instruction);
+      if (!wantsCodePlaceholder) return false;
+      if (/TODO|FIXME|HACK/i.test(marker) && !wantsCodePlaceholder) return false;
+      if (targetFile) {
+        const base = targetFile.replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "").toLowerCase();
+        const hasExplicitScope = /(?:src\/|tests\/|\.ts\b|\.js\b|\.py\b|\.go\b)/i.test(instruction);
+        if (hasExplicitScope && !instruction.includes(targetFile.toLowerCase()) &&
+            !(base && instruction.includes(base))) return false;
+        const taskNouns = ["payment", "auth", "http", "network", "database", "migration"];
+        const requested = taskNouns.filter((noun) => instruction.includes(noun));
+        const actual = taskNouns.filter((noun) => targetFile.toLowerCase().includes(noun));
+        if (requested.length && actual.length && !requested.some((noun) => actual.includes(noun))) return false;
+        if (requested.length && !actual.length && /\b(?:and|ve)\b/i.test(instruction)) return false;
+      }
+      return true;
+    };
     const customPhrases = (context.ruleConfig.customPhrases ?? []).filter(
       (phrase) => phrase.trim().length > 0
     );
@@ -224,7 +271,8 @@ export const noShortcutsRule: GuardRule = {
     const checkText = (
       text: string,
       source: string,
-      inspectCodeMarkers = false
+      inspectCodeMarkers = false,
+      targetFile?: string
     ) => {
       if (!text || typeof text !== "string") return;
       const lowerText = text.toLowerCase();
@@ -284,7 +332,7 @@ export const noShortcutsRule: GuardRule = {
               confidence: "high",
             };
             findings.push(finding);
-            blocking.push(finding);
+            if (!isAuthorizedMarker(marker, targetFile)) blocking.push(finding);
           }
         }
       }
@@ -304,21 +352,24 @@ export const noShortcutsRule: GuardRule = {
             checkText(
               extractCodeComments(input.content),
               "file write comments",
-              true
+              true,
+              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
             );
           }
           if (typeof input.new_string === "string") {
             checkText(
               extractCodeComments(input.new_string),
               "file edit comments",
-              true
+              true,
+              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
             );
           }
           if (typeof input.newString === "string") {
             checkText(
               extractCodeComments(input.newString),
               "file edit comments",
-              true
+              true,
+              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
             );
           }
           const patchText = extractAddedPatchLines(input.patchText ?? input.patch);
@@ -326,7 +377,8 @@ export const noShortcutsRule: GuardRule = {
             checkText(
               extractCodeComments(patchText),
               "patch added comments",
-              true
+              true,
+              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
             );
           }
           const shellMutation = extractLikelyShellMutation(input);

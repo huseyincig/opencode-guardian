@@ -4,6 +4,8 @@ interface SessionState {
     fingerprints: Set<string>;
     continuationCount: number;
     continuationKeys: Set<string>;
+    pendingRemediationRules?: string[];
+    pendingRemediationFiles?: string[];
 }
 export declare class SessionStateStore {
     private readonly sessions;
@@ -14,6 +16,10 @@ export declare class SessionStateStore {
     canContinue(sessionID: string, turnKey: string, progressKey: string, budget: number): boolean;
     recordContinuation(sessionID: string, turnKey: string, progressKey: string): void;
     rollbackContinuation(sessionID: string, turnKey: string, progressKey: string): void;
+    setPendingRemediation(sessionID: string, turnKey: string, rules: string[], files?: string[]): void;
+    getPendingRemediation(sessionID: string, turnKey?: string): string[] | undefined;
+    getPendingRemediationFiles(sessionID: string, turnKey: string): string[];
+    clearPendingRemediation(sessionID: string): void;
     forget(sessionID: string): void;
 }
 export {};

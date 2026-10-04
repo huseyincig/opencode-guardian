@@ -6,7 +6,7 @@ import { noShortcutsRule } from "./rules/no-shortcuts.js";
 import { noStubsRule } from "./rules/no-stubs.js";
 import { noTruncationRule } from "./rules/no-truncation.js";
 import { noCheatRule } from "./rules/no-cheat.js";
-import { noSecretsRule } from "./rules/no-secrets.js";
+import { noSecretsRule, findAllSecretsInCode } from "./rules/no-secrets.js";
 import { noGhostDepsRule } from "./rules/no-ghost-deps.js";
 import { circuitBreakerRule } from "./rules/circuit-breaker.js";
 import { noApologyRule } from "./rules/no-apology.js";
@@ -35,7 +35,7 @@ export const BUILTIN_RULES = {
     "task/completion-gate": taskCompletionRule,
     "task/instruction-fidelity": instructionFidelityRule,
 };
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
     enabled: true,
     remediationBudget: 1,
     iterationBudget: 3,
@@ -221,7 +221,7 @@ export class GuardEngine {
     rollbackInspection(sessionID) {
         this.inspectedMessages.delete(sessionID);
     }
-    async inspect(sessionID, directory, messages) {
+    async inspect(sessionID, directory, messages, snapshots) {
         if (this.config.enabled === false || messages.length === 0) {
             return { decision: "pass", results: [] };
         }
@@ -232,14 +232,7 @@ export class GuardEngine {
         }
         const { isSubagent, isRemediationResponse, currentTurn, turnKey, } = extractCurrentTurn(messages);
         const contract = extractTaskContract(currentTurn);
-        // Ordinary remediation replies are not reinspected. Explicit iterative
-        // tasks are the one exception: inspect only the completion gate, using an
-        // independent bounded continuation budget, not the global repair budget.
-        if (isRemediationResponse && !contract?.iterativeReview) {
-            this.inspectedMessages.set(sessionID, messageID);
-            return { decision: "pass", results: [] };
-        }
-        const evidence = collectTurnEvidence(currentTurn);
+        const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
         const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
         const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
             ? [currentTurn[0], ...currentTurn.slice(lastGuardianIndex + 1)]
@@ -248,7 +241,13 @@ export class GuardEngine {
         // needs the full human-turn history to evaluate progress across rounds.
         const freshEvidence = freshTurn === currentTurn
             ? evidence
-            : collectTurnEvidence(freshTurn);
+            : collectTurnEvidence(freshTurn, directory, snapshots);
+        const pendingRules = isRemediationResponse
+            ? this.sessionState.getPendingRemediation(sessionID, turnKey) ?? []
+            : [];
+        const pendingFiles = isRemediationResponse
+            ? this.sessionState.getPendingRemediationFiles(sessionID, turnKey)
+            : [];
         const results = [];
         const blockingPrompts = [];
         const blockingResults = [];
@@ -333,6 +332,7 @@ export class GuardEngine {
                 ? Math.floor(this.config.remediationBudget)
                 : 1;
             const budget = Math.max(0, Math.min(5, configuredBudget));
+            const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
             const fingerprint = blockingResults
                 .map((result) => {
                 const findingKey = result.findings
@@ -343,10 +343,20 @@ export class GuardEngine {
             })
                 .sort()
                 .join("||");
-            if (!this.sessionState.canRemediate(sessionID, turnKey, fingerprint, budget)) {
-                return { decision: "pass", results };
+            if ((!contract?.iterativeReview && remediationMessagesCount >= budget) ||
+                !this.sessionState.canRemediate(sessionID, turnKey, fingerprint, budget)) {
+                this.sessionState.clearPendingRemediation(sessionID);
+                return {
+                    decision: "pass",
+                    results,
+                    ...(isRemediationResponse
+                        ? { remediationStatus: pendingRules.length ? "failed" : "unverified",
+                            pendingRemediationRules: pendingRules }
+                        : {}),
+                };
             }
             this.sessionState.recordRemediation(sessionID, turnKey, fingerprint);
+            this.sessionState.setPendingRemediation(sessionID, turnKey, blockingResults.map((r) => r.ruleId), [...(evidence.mutatedFiles ?? [])]);
             return {
                 decision: "block",
                 results,
@@ -354,8 +364,118 @@ export class GuardEngine {
                 rollback: () => {
                     this.inspectedMessages.delete(sessionID);
                     this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint);
+                    this.sessionState.clearPendingRemediation(sessionID);
                 },
             };
+        }
+        if (isRemediationResponse) {
+            // Absence of new findings is not proof of correction. A synthetic reply
+            // without any successful follow-up work must never close an obligation.
+            const successfulFresh = freshEvidence.records.filter((record) => record.status === "success");
+            const fixedPaths = new Set(successfulFresh.filter((record) => record.kind === "file-mutation")
+                .map((record) => record.filePath).filter((file) => !!file));
+            const hasProgress = successfulFresh.some((record) => ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind));
+            const originalFindingsRemain = results.some((result) => pendingRules.includes(result.ruleId) && result.findings.length > 0);
+            let verified = pendingRules.length > 0 && hasProgress && !originalFindingsRemain;
+            if (verified && pendingRules.includes("security/no-secrets")) {
+                // Check actual files, not only the proposed tool input. No file on
+                // disk, an out-of-scope path or an unreadable file means unverified.
+                verified = pendingFiles.length > 0 && pendingFiles.every((rel) => {
+                    if (!fixedPaths.has(rel))
+                        return false;
+                    const full = path.resolve(directory, rel);
+                    const relative = path.relative(path.resolve(directory), full);
+                    if (relative === ".." || relative.startsWith(".." + path.sep) ||
+                        path.isAbsolute(relative))
+                        return false;
+                    try {
+                        const realRoot = fs.realpathSync(path.resolve(directory));
+                        const realFile = fs.realpathSync(full);
+                        const realRelative = path.relative(realRoot, realFile);
+                        if (realRelative === ".." || realRelative.startsWith(".." + path.sep) ||
+                            path.isAbsolute(realRelative))
+                            return false;
+                        const info = fs.lstatSync(full);
+                        return info.isFile() && info.size <= 2 * 1024 * 1024 &&
+                            findAllSecretsInCode(fs.readFileSync(full, "utf8"), rel).length === 0;
+                    }
+                    catch {
+                        return false;
+                    }
+                });
+            }
+            // Recheck actual files: a clean new turn may leave the original TODO,
+            // test bypass or incomplete stub unchanged on disk.
+            const sourceRules = pendingRules.filter((rule) => ["quality/no-shortcuts", "integrity/no-stubs", "testing/no-cheat"].includes(rule));
+            if (verified && sourceRules.length) {
+                verified = pendingFiles.length > 0;
+                for (const rel of pendingFiles) {
+                    if (!verified || !fixedPaths.has(rel)) {
+                        verified = false;
+                        break;
+                    }
+                    const root = path.resolve(directory);
+                    const full = path.resolve(root, rel);
+                    const scoped = path.relative(root, full);
+                    if (scoped === ".." || scoped.startsWith(".." + path.sep) || path.isAbsolute(scoped)) {
+                        verified = false;
+                        break;
+                    }
+                    let content;
+                    try {
+                        const actual = path.relative(fs.realpathSync(root), fs.realpathSync(full));
+                        if (actual === ".." || actual.startsWith(".." + path.sep) || path.isAbsolute(actual)) {
+                            verified = false;
+                            break;
+                        }
+                        const info = fs.lstatSync(full);
+                        if (!info.isFile() || info.size > 2 * 1024 * 1024) {
+                            verified = false;
+                            break;
+                        }
+                        content = fs.readFileSync(full, "utf8");
+                    }
+                    catch {
+                        verified = false;
+                        break;
+                    }
+                    for (const ruleID of sourceRules) {
+                        const rule = this.rules.get(ruleID);
+                        if (!rule) {
+                            verified = false;
+                            break;
+                        }
+                        const checked = await rule.inspect({
+                            sessionID, directory, messages,
+                            currentTurn: [currentTurn[0], {
+                                    info: { id: "guardian-current-file", role: "assistant" },
+                                    parts: [{ type: "tool", tool: "write_to_file",
+                                            state: { status: "completed", input: { path: rel, content } } }],
+                                }],
+                            isSubagent, ruleConfig: {}, evidence: freshEvidence,
+                        });
+                        if (checked.findings.length > 0) {
+                            verified = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (verified && pendingRules.some((rule) => ["integrity/no-unverified-claims", "integrity/no-silent-failure"].includes(rule)) &&
+                !successfulFresh.some((record) => ["test", "build", "typecheck", "lint", "audit"].includes(record.kind))) {
+                verified = false;
+            }
+            if (verified && pendingRules.some((rule) => !["security/no-secrets", "quality/no-shortcuts", "integrity/no-stubs",
+                "testing/no-cheat", "integrity/no-unverified-claims",
+                "integrity/no-silent-failure", "task/completion-gate"].includes(rule))) {
+                verified = false;
+            }
+            const remediationStatus = originalFindingsRemain
+                ? "failed"
+                : verified ? "verified" : "unverified";
+            this.sessionState.clearPendingRemediation(sessionID);
+            return { decision: "pass", results, remediationStatus,
+                pendingRemediationRules: pendingRules };
         }
         return {
             decision: "pass",

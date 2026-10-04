@@ -4,9 +4,10 @@ import { GuardEngine, loadConfig } from "./engine.js";
 import type { MessagePart, SessionMessage } from "./types.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
-import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool } from "./preflight.js";
+import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
 import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
+import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 
@@ -100,6 +101,8 @@ function normalizeV2AssistantPart(part: unknown): MessagePart | null {
     type: "tool",
     tool: typeof value.name === "string" ? value.name : undefined,
     name: typeof value.name === "string" ? value.name : undefined,
+    callID: typeof value.id === "string" ? value.id :
+      typeof value.callID === "string" ? value.callID : undefined,
     state: normalizedState,
   };
 }
@@ -169,19 +172,52 @@ async function handleSessionIdle(
   directory: string,
   fetchMessages: () => Promise<SessionMessage[]>,
   sendPrompt: (promptText: string) => Promise<void>,
-  engine: GuardEngine
+  engine: GuardEngine,
+  snapshots?: ReadonlyMap<string, VerificationSnapshot>,
+  signal?: AbortSignal
 ): Promise<void> {
+  let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   try {
+    if (signal?.aborted) return;
     const messages = await fetchMessages();
-    const result = await engine.inspect(sessionID, directory, messages);
+    if (signal?.aborted) return;
+    stage = "engine-inspect";
+    const result = await engine.inspect(sessionID, directory, messages, snapshots);
+    if (signal?.aborted) { result.rollback?.(); return; }
     const findings = result.results.filter((item) => item.findings.length > 0);
+
+    if (result.remediationStatus === "verified") {
+      const verifiedRules = result.pendingRemediationRules?.length ? result.pendingRemediationRules : ["remediation-verified"];
+      recordGuardianEvent({
+        kind: "remediation-verified",
+        session: sessionFingerprint(sessionID),
+        rules: verifiedRules,
+        reasons: verifiedRules.map((rule) => ({ rule, code: "remediation-verified" })),
+      }, directory);
+    } else if (result.remediationStatus === "unverified") {
+      recordGuardianEvent({ kind: "remediation-unverified",
+        session: sessionFingerprint(sessionID), rules: result.pendingRemediationRules ?? [],
+      }, directory);
+    } else if (result.remediationStatus === "failed") {
+      const failedRules = result.pendingRemediationRules?.length ? result.pendingRemediationRules : ["remediation-failed"];
+      recordGuardianEvent({
+        kind: "remediation-failed",
+        session: sessionFingerprint(sessionID),
+        rules: failedRules,
+        reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
+      }, directory);
+    }
+
     if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
       recordGuardianEvent({ kind: "post-warning", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
     }
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
+      stage = "prompt-send";
       try {
+        if (signal?.aborted) { result.rollback?.(); return; }
         await sendPrompt(result.combinedRemediationPrompt);
+        if (signal?.aborted) return;
         recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
       } catch (promptError) {
         result.rollback?.();
@@ -189,23 +225,35 @@ async function handleSessionIdle(
       }
     }
   } catch (error) {
-    recordGuardianEvent({ kind: "inspection-error", session: sessionFingerprint(sessionID) }, directory);
+    if (signal?.aborted) return;
+    const errorCode =
+      stage === "message-fetch"
+        ? "message-fetch-failed"
+        : stage === "prompt-send"
+          ? "prompt-delivery-failed"
+          : "engine-inspection-failed";
+    recordGuardianEvent({
+      kind: "inspection-error",
+      session: sessionFingerprint(sessionID),
+      rules: [errorCode],
+      reasons: [{ rule: errorCode, code: errorCode }],
+    }, directory);
     // Error objects may contain private paths and disrupt the interactive TUI.
     // The redacted inspection-error event above is the only diagnostic.
   }
 }
 
-/** Records only recognized shell calls and a rule code, never raw commands. */
+/** Records only recognized shell/file calls and a rule code, never raw commands. */
 function inspectPreflight(
   tool: string, args: unknown, sessionID?: string, directory?: string,
   additionalTools: readonly string[] = []
 ): void {
-  if (!isShellExecutionTool(tool, additionalTools)) return;
+  if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool)) return;
   const finding = evaluatePreflight(tool, args, additionalTools);
   recordGuardianEvent({
     kind: finding ? "preflight-blocked" : "preflight-allowed",
     session: sessionFingerprint(sessionID),
-    tool: tool.toLowerCase().split(/[.:/]/).at(-1),
+    tool: tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1),
     ...(finding ? { rules: [finding] } : {}),
   }, directory);
   if (finding) throw new GuardianPreflightError(finding);
@@ -223,6 +271,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
     };
   }
   const engine = new GuardEngine(config);
+  const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
   let promptSequence = 0;
   let updateChecked = false;
@@ -259,7 +308,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
             });
             if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
           },
-          engine
+          engine, verificationStore.snapshots(sessionID)
         );
       },
       onError: (sessionID, _error) => {
@@ -279,7 +328,14 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
   return {
     dispose: async () => {
       watcher?.stopAll();
+      verificationStore.clear();
       contracts.clear();
+    },
+    "tool.execute.after": async (input, output) => {
+      verificationStore.observe(input.sessionID, input.callID, input.tool,
+        input.args && typeof input.args === "object" ? input.args : {},
+        output.output, output.metadata && typeof output.metadata === "object" ? output.metadata : {},
+        directory);
     },
     ...(strictPreflight ? {
       "tool.execute.before": async (
@@ -334,6 +390,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         if (deletedSessionID) {
           watcher?.stop(deletedSessionID);
           engine.forgetSession(deletedSessionID);
+          verificationStore.forget(deletedSessionID);
           contracts.delete(deletedSessionID);
         }
         return;
@@ -369,7 +426,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
           });
           if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
         },
-        engine
+        engine, verificationStore.snapshots(sessionID)
       );
     },
   };
@@ -428,6 +485,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   }
 
   const engine = new GuardEngine(config);
+  const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
   const registrations: Array<{ dispose(): Promise<void> | void }> = [];
 
@@ -448,6 +506,40 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     } catch (error) {
       controller.abort();
       throw new Error("[opencode-guardian preflight] V2 tool hook registration failed; strict preflight cannot be enabled.", { cause: error });
+    }
+  }
+
+  // Optional after-hook: when absent, historic verification remains
+  // sequential evidence rather than a fabricated disk snapshot.
+  if (typeof context.tool?.hook === "function") {
+    try {
+      const after = await context.tool.hook("execute.after", async (event) => {
+        if (controller.signal.aborted || typeof context.session.get !== "function") return;
+        // The plugin load directory is not a reliable session root.
+        let observedDirectory: string;
+        try {
+          const session = await context.session.get({ sessionID: event.sessionID });
+          if (typeof session.location?.directory !== "string" ||
+              !session.location.directory.trim()) return;
+          observedDirectory = session.location.directory;
+        } catch { return; }
+        if (controller.signal.aborted) return;
+        const result = event.status === "completed" ? event.result as {
+          output?: unknown; content?: unknown; metadata?: Record<string, unknown>;
+        } : undefined;
+        verificationStore.observe(event.sessionID, event.id, event.tool,
+          event.input && typeof event.input === "object" && !Array.isArray(event.input)
+            ? event.input as Record<string, unknown> : {},
+          result?.output ?? result?.content ?? "", result?.metadata ?? {}, observedDirectory,
+          event.status);
+      });
+      if (!after || typeof after.dispose !== "function") {
+        throw new Error("V2 execute.after registration has no disposer");
+      }
+      registrations.push(after);
+    } catch {
+      recordGuardianEvent({ kind: "verification-unavailable",
+        rules: ["verification-snapshot-unavailable"] }, directory);
     }
   }
 
@@ -510,6 +602,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             eventData.data?.sessionID ?? eventData.data?.info?.id;
           if (deletedSessionID) {
             engine.forgetSession(deletedSessionID);
+            verificationStore.forget(deletedSessionID);
             contracts.delete(deletedSessionID);
           }
           continue;
@@ -540,6 +633,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             return normalized;
           },
           async (text: string) => {
+            if (controller.signal.aborted) return;
             await context.session.synthetic({
               sessionID,
               text,
@@ -549,14 +643,17 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               resume: true,
             });
           },
-          engine
+          engine, verificationStore.snapshots(sessionID), controller.signal
         );
         }
         if (controller.signal.aborted) return;
         throw new Error("V2 event stream ended before plugin teardown.");
       } catch (error) {
         if (controller.signal.aborted) return;
-        recordGuardianEvent({ kind: "inspection-error" }, directory);
+        recordGuardianEvent({ kind: "inspection-error",
+          rules: ["v2-event-stream-error"],
+          reasons: [{ rule: "v2-event-stream-error", code: "v2-event-stream-error" }],
+        }, directory);
         // Record only the redacted error; never write host exceptions to the TUI.
       }
 
@@ -587,7 +684,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         activeEvents = next;
       } catch (error) {
         if (!controller.signal.aborted) {
-          recordGuardianEvent({ kind: "inspection-error" }, directory);
+          recordGuardianEvent({ kind: "inspection-error",
+            rules: ["v2-event-stream-error"],
+            reasons: [{ rule: "v2-event-stream-error", code: "v2-event-stream-error" }],
+          }, directory);
           // The failure has been recorded without exposing exception data.
         }
         return;
@@ -601,7 +701,12 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   return async () => {
     controller.abort();
     contracts.clear();
-    await Promise.allSettled(registrations.map((registration) => registration.dispose()));
+    verificationStore.clear();
+    for (const registration of registrations.reverse()) {
+      try { await registration.dispose(); } catch {
+        // An optional disposer failing must not prevent remaining cleanup.
+      }
+    }
   };
 };
 

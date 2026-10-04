@@ -52,6 +52,30 @@ export class SessionStateStore {
             state.continuationKeys.delete(progressKey);
         }
     }
+    setPendingRemediation(sessionID, turnKey, rules, files = []) {
+        const state = this.beginTurn(sessionID, turnKey);
+        state.pendingRemediationRules = [...rules];
+        state.pendingRemediationFiles = [...files];
+    }
+    getPendingRemediation(sessionID, turnKey) {
+        const state = this.sessions.get(sessionID);
+        if (!state)
+            return undefined;
+        if (turnKey !== undefined && state.turnKey !== turnKey)
+            return undefined;
+        return state.pendingRemediationRules;
+    }
+    getPendingRemediationFiles(sessionID, turnKey) {
+        const state = this.sessions.get(sessionID);
+        return state?.turnKey === turnKey ? [...(state.pendingRemediationFiles ?? [])] : [];
+    }
+    clearPendingRemediation(sessionID) {
+        const state = this.sessions.get(sessionID);
+        if (state) {
+            delete state.pendingRemediationRules;
+            delete state.pendingRemediationFiles;
+        }
+    }
     forget(sessionID) {
         this.sessions.delete(sessionID);
     }

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
 import { extractLikelyShellMutation } from "./tool-input.js";
 import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, shellCommandVariants, splitShellStages } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
@@ -373,6 +376,7 @@ function recordFromPart(part, sequence) {
             toolName,
             command: command || undefined,
             signature: `${baseSignature}:mutation`,
+            filePath: extractMutatedFilePath(part),
             output: outputText || undefined,
             error: outcome.errorText || undefined,
             exitCode: outcome.exitCode,
@@ -393,12 +397,138 @@ const VERIFICATION_KINDS = new Set([
     "git-status",
     "baseline",
 ]);
-export function collectTurnEvidence(currentTurn) {
+export function extractMutatedFilePath(part) {
+    const input = part.state?.input;
+    if (!input)
+        return undefined;
+    const direct = input.path ??
+        input.targetFile ??
+        input.filePath ??
+        input.file;
+    if (direct && typeof direct === "string" && direct.trim())
+        return direct.trim();
+    const patchRaw = input.patchText ?? input.patch;
+    if (typeof patchRaw === "string") {
+        const match = patchRaw.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
+        if (match && match[1] !== "/dev/null")
+            return match[1].trim();
+    }
+    return undefined;
+}
+export function calculateProductFingerprint(directory, files) {
+    const hash = createHash("sha256");
+    const fileList = files ? [...files].filter(Boolean).sort() : [];
+    if (!directory || fileList.length === 0)
+        return "empty-state";
+    if (fileList.length > 128)
+        return "unverified-state";
+    const root = path.resolve(directory);
+    let realRoot;
+    try {
+        realRoot = fs.realpathSync(root);
+    }
+    catch {
+        return "unverified-state";
+    }
+    for (const rel of fileList) {
+        const full = path.resolve(root, rel);
+        const scoped = path.relative(root, full);
+        if (scoped === ".." || scoped.startsWith(".." + path.sep) || path.isAbsolute(scoped)) {
+            return "unverified-state";
+        }
+        try {
+            const realFile = fs.realpathSync(full);
+            const realRelative = path.relative(realRoot, realFile);
+            if (realRelative === ".." || realRelative.startsWith(".." + path.sep) ||
+                path.isAbsolute(realRelative))
+                return "unverified-state";
+            const stat = fs.lstatSync(full);
+            if (!stat.isFile() || stat.size > 2 * 1024 * 1024)
+                return "unverified-state";
+            hash.update(rel);
+            hash.update("\0");
+            hash.update(createHash("sha256").update(fs.readFileSync(full)).digest());
+            hash.update("\0");
+        }
+        catch {
+            return "unverified-state";
+        }
+    }
+    return hash.digest("hex");
+}
+/** Live tool-after observations; never invent a historical disk snapshot at idle. */
+export class VerificationSnapshotStore {
+    sessions = new Map();
+    observe(sessionID, callID, tool, input, output, metadata, directory, status = "completed") {
+        if (!sessionID || !callID)
+            return;
+        const part = { type: "tool", tool, callID,
+            state: { status, input, output, metadata } };
+        const evidence = collectTurnEvidence([
+            { info: { id: callID, role: "assistant" }, parts: [part] },
+        ]);
+        let session = this.sessions.get(sessionID);
+        if (!session) {
+            session = { paths: new Set(), snapshots: new Map() };
+            this.sessions.set(sessionID, session);
+        }
+        for (const mutation of evidence.fileMutations) {
+            if (mutation.status === "success") {
+                if (mutation.filePath)
+                    session.paths.add(mutation.filePath);
+            }
+        }
+        if (session.paths.size && evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
+            const fingerprint = calculateProductFingerprint(directory, session.paths);
+            if (fingerprint !== "unverified-state" && fingerprint !== "empty-state") {
+                session.snapshots.set(callID, { fingerprint: `sha256:${fingerprint}`,
+                    files: [...session.paths] });
+            }
+        }
+        // Bound the call table even in very long sessions.
+        if (session.snapshots.size > 512) {
+            session.snapshots.delete(session.snapshots.keys().next().value);
+        }
+    }
+    snapshots(sessionID) {
+        return this.sessions.get(sessionID)?.snapshots ?? new Map();
+    }
+    forget(sessionID) { this.sessions.delete(sessionID); }
+    clear() { this.sessions.clear(); }
+}
+export function collectTurnEvidence(currentTurn, directory, snapshots) {
     const records = [];
+    const mutatedFiles = new Set();
     let sequence = 0;
+    let mutationCount = 0;
+    let lastMutationSequence = -1;
     for (const message of currentTurn) {
         for (const part of message.parts) {
-            records.push(...recordFromPart(part, sequence++));
+            const outputText = stringify(part.state?.output ?? part.state?.metadata?.output).trim();
+            const outcome = statusFromPart(part, outputText);
+            const isMutation = hasFileMutation(part);
+            const isSuccessfulMutation = isMutation && outcome.status !== "failure";
+            if (isSuccessfulMutation) {
+                mutationCount++;
+                lastMutationSequence = sequence;
+                const filePath = extractMutatedFilePath(part);
+                if (filePath)
+                    mutatedFiles.add(filePath);
+            }
+            const partRecords = recordFromPart(part, sequence++);
+            for (const record of partRecords) {
+                if (VERIFICATION_KINDS.has(record.kind)) {
+                    const callID = typeof part.callID === "string" ? part.callID : undefined;
+                    // Historical message replay cannot recreate the disk state at test
+                    // time. Only a live after-hook may supply an observed fingerprint.
+                    const snapshot = callID ? snapshots?.get(callID) : undefined;
+                    record.stateFingerprint = snapshot?.fingerprint ??
+                        `seq:${lastMutationSequence}:m${mutationCount}`;
+                    if (snapshot)
+                        record.snapshotFiles = [...snapshot.files];
+                }
+            }
+            records.push(...partRecords);
         }
     }
     return {
@@ -406,6 +536,7 @@ export function collectTurnEvidence(currentTurn) {
         successfulVerifications: records.filter((record) => record.status === "success" && VERIFICATION_KINDS.has(record.kind)),
         failures: records.filter((record) => record.status === "failure"),
         fileMutations: records.filter((record) => record.kind === "file-mutation"),
+        mutatedFiles,
     };
 }
 export function latestEvidence(evidence, kind) {

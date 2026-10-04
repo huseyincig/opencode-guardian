@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import TuiPlugin from "../dist/tui.js";
+import TuiPlugin, { registerGuardianV1Commands,
+  registerGuardianV2Commands } from "../dist/tui.js";
 import RootTui, { default as LocalPathTui } from "../tui.js";
 
 test("V2 TUI registers an additive sidebar slot and returns its disposer", () => {
@@ -14,6 +15,13 @@ test("V2 TUI registers an additive sidebar slot and returns its disposer", () =>
   assert.equal(claim.replace, undefined);
   assert.equal(typeof claim.render, "function");
   assert.equal(cleanup, stop);
+});
+
+test("adaptive TUI exports every function advertised by its type declarations", () => {
+  assert.equal(typeof registerGuardianV1Commands, "function");
+  assert.equal(typeof registerGuardianV2Commands, "function");
+  assert.equal(typeof TuiPlugin.tui, "function");
+  assert.equal(typeof TuiPlugin.setup, "function");
 });
 
 test("root tui.js resolves the same dual-mode sidebar plugin for local path loading", () => {
@@ -153,4 +161,22 @@ test("V2 accent never relies on the possibly transparent action background", asy
   const source = readFileSync(new URL("../src/tui.tsx", import.meta.url), "utf8");
   assert.match(source, /accent: context\.theme\.status\?\.success\?\.base \?\? context\.theme\.text\.base/);
   assert.doesNotMatch(source, /accent: context\.theme\.background\.action\.primary\.base/);
+});
+
+test("available update is the first sidebar row in both collapsed and expanded views", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/tui.tsx", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../dist/tui-runtime.js", import.meta.url), "utf8");
+  const standalone = readFileSync(new URL("../dist/tui-standalone.js", import.meta.url), "utf8");
+  const header = source.indexOf("onMouseDown={() => setOpen");
+  const update = source.indexOf('label="Update available"');
+  const collapsed = source.indexOf("<Show when={!open()}>");
+  const expanded = source.indexOf("<Show when={open()}>");
+  const errors = source.indexOf('label="Errors"');
+  assert.ok(header >= 0 && header < update && update < collapsed && collapsed < expanded && expanded < errors);
+  assert.equal(source.match(/label="Update available"/g)?.length, 1);
+  assert.match(source.slice(header, collapsed), /<Show when=\{hasUpdate\(\) && latestVersion\(\)\}>/);
+  assert.match(source.slice(header, collapsed), /value=\{.*latestVersion\(\).*\}/);
+  assert.match(runtime, /Update available/);
+  assert.match(standalone, /Update available/);
 });

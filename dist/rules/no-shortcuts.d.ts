@@ -6,4 +6,5 @@ export declare const DEFAULT_CODE_MARKER_REGEXES: {
     regex: RegExp;
 }[];
 export declare const DEFAULT_EXCEPTIONS: string[];
+export declare function explicitlyAuthorizedStubOrPlaceholder(text?: string): boolean;
 export declare const noShortcutsRule: GuardRule;

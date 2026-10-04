@@ -96,6 +96,9 @@ export interface EvidenceRecord {
   exitCode?: number;
   errorFingerprint?: string;
   ambiguousOutcome?: boolean;
+  stateFingerprint?: string;
+  snapshotFiles?: string[];
+  filePath?: string;
 }
 
 export interface TurnEvidence {
@@ -103,6 +106,7 @@ export interface TurnEvidence {
   successfulVerifications: EvidenceRecord[];
   failures: EvidenceRecord[];
   fileMutations: EvidenceRecord[];
+  mutatedFiles?: Set<string>;
 }
 
 export interface TurnInspectionContext {

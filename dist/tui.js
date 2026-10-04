@@ -11,3 +11,5 @@ try {
 export default implementation.default;
 export const tui = implementation.default.tui;
 export const setup = implementation.default.setup;
+export const registerGuardianV1Commands = implementation.registerGuardianV1Commands;
+export const registerGuardianV2Commands = implementation.registerGuardianV2Commands;

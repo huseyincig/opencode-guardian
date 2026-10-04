@@ -18,23 +18,23 @@ export const SECRET_PATTERNS: { regex: RegExp; name: string }[] = [
   { regex: /\bAuthorization\s*[:=]\s*["']?Bearer\s+([A-Za-z0-9._~-]{24,})["']?/i, name: "Bearer Authorization Token" },
 ];
 
-function extractFilePathFromPatch(patch: unknown): string | undefined {
+export function extractFilePathFromPatch(patch: unknown): string | undefined {
   if (typeof patch !== "string") return undefined;
   const match = patch.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
   return match ? match[1] : undefined;
 }
 
-function extractAddedLines(text: unknown): string {
+export function extractAddedLines(text: unknown): string {
   if (typeof text !== "string") return "";
   return text.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1)).join("\n");
 }
 
-function maskSecret(secret: string): string {
+export function maskSecret(secret: string): string {
   if (secret.length <= 8) return "********";
   return `${secret.slice(0, 4)}...${secret.slice(-4)}`;
 }
 
-function isExplicitTemplateValue(secretValue: string, capturedPassword?: string): boolean {
+export function isExplicitTemplateValue(secretValue: string, capturedPassword?: string): boolean {
   return [secretValue, capturedPassword ?? ""].some(
     (value) =>
       value.includes("${") ||
@@ -46,7 +46,7 @@ function isExplicitTemplateValue(secretValue: string, capturedPassword?: string)
 
 /** Documented, local-only example credentials are not real deployment secrets.
  * Never exempt token-shaped strings or remote service credentials by filename. */
-function isDocumentedLocalPasswordSample(
+export function isDocumentedLocalPasswordSample(
   filePath: string | undefined,
   value: string,
   password: string | undefined
@@ -62,6 +62,56 @@ function isDocumentedLocalPasswordSample(
   return /@(?:localhost|127\.0\.0\.1|\[::1\]|(?:db\.)?example\.(?:com|org|net))(?::[0-9]+)?\//i.test(value);
 }
 
+export interface DetectedSecret {
+  name: string;
+  secretValue: string;
+  masked: string;
+}
+
+export function findAllSecretsInCode(
+  code: string,
+  filePath?: string,
+  alreadySeen?: Set<string>
+): DetectedSecret[] {
+  if (!code || typeof code !== "string") return [];
+  const results: DetectedSecret[] = [];
+  const seen = alreadySeen ?? new Set<string>();
+
+  for (const pattern of SECRET_PATTERNS) {
+    if (seen.has(pattern.name)) continue;
+    let remaining = code;
+    let match: RegExpExecArray | null = null;
+    while (remaining.length > 0) {
+      pattern.regex.lastIndex = 0;
+      const next = pattern.regex.exec(remaining);
+      if (!next) break;
+      const value = next[0];
+      const password = next[1];
+      const isSample = password !== undefined
+        ? isExplicitTemplateValue(password) ||
+          isDocumentedLocalPasswordSample(filePath, value, password)
+        : isExplicitTemplateValue(value);
+      if (!isSample) {
+        match = next;
+        break;
+      }
+      remaining = remaining.slice(next.index + value.length);
+    }
+    if (!match) continue;
+    const secretValue = match[0];
+    seen.add(pattern.name);
+    results.push({ name: pattern.name, secretValue, masked: maskSecret(secretValue) });
+  }
+  return results;
+}
+
+export function findSecretInCode(
+  code: string,
+  filePath?: string
+): DetectedSecret | undefined {
+  return findAllSecretsInCode(code, filePath)[0];
+}
+
 export const noSecretsRule: GuardRule = {
   id: "security/no-secrets",
   description: "Detects hardcoded secrets, API keys, credentials, and connection strings in code modifications.",
@@ -70,40 +120,13 @@ export const noSecretsRule: GuardRule = {
     const seen = new Set<string>();
 
     const checkCode = (code: string, filePath?: string, source = "file") => {
-      if (!code || typeof code !== "string") return;
-
-      for (const pattern of SECRET_PATTERNS) {
-        if (seen.has(pattern.name)) continue;
-        // A permitted example value must not hide a later real credential
-        // matched by the same pattern in the same file.
-        let remaining = code;
-        let match: RegExpExecArray | null = null;
-        while (remaining.length > 0) {
-          pattern.regex.lastIndex = 0;
-          const next = pattern.regex.exec(remaining);
-          if (!next) break;
-          const value = next[0];
-          const password = next[1];
-          const isSample = password !== undefined
-            ? isExplicitTemplateValue(password) ||
-              isDocumentedLocalPasswordSample(filePath, value, password)
-            : isExplicitTemplateValue(value);
-          if (!isSample) {
-            match = next;
-            break;
-          }
-          remaining = remaining.slice(next.index + value.length);
-        }
-        if (!match) continue;
-        const secretValue = match[0];
-
-        seen.add(pattern.name);
-        const masked = maskSecret(secretValue);
+      const detected = findAllSecretsInCode(code, filePath, seen);
+      for (const item of detected) {
         findings.push({
           ruleId: "security/no-secrets",
-          pattern: pattern.name,
-          messageSnippet: masked,
-          description: `Potential hardcoded secret detected in ${filePath ?? source}: ${pattern.name} (${masked})`,
+          pattern: item.name,
+          messageSnippet: item.masked,
+          description: `Potential hardcoded secret detected in ${filePath ?? source}: ${item.name} (${item.masked})`,
         });
       }
     };

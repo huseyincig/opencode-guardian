@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SAFE_REASON_CODES, SAFE_RULE_IDS } from "./audit.js";
 export const GUARDIAN_MAX_LOG_BYTES = 2 * 1024 * 1024;
+const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ACTIONS = {
     "runtime-started": ["started", "started"],
     "preflight-allowed": ["allowed", "allowed"],
@@ -12,12 +13,21 @@ const ACTIONS = {
     "post-warning": ["warned", "reported"],
     // Queuing an instruction proves nothing about whether the agent fixed it.
     "post-remediation": ["remediation-requested", "unverified"],
+    "remediation-verified": ["remediation-checked", "verified"],
+    "remediation-failed": ["remediation-checked", "reported"],
+    "remediation-unverified": ["remediation-checked", "unverified"],
+    "verification-unavailable": ["warned", "unverified"],
     "inspection-error": ["inspection-failed", "error"],
+    "statistics-reset": ["statistics-reset", "reported"],
 };
 const SAFE_TOOLS = new Set([
     "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
     "execute_command", "command", "run_command", "run_shell_command",
-    "powershell", "pwsh", "cmd",
+    "powershell", "pwsh", "cmd", "privileged_shell_exec", "process_start",
+    "write_to_file", "write_file", "create_file", "save_file",
+    "replace_file_content", "edit_file", "edit", "patch", "apply_patch",
+    "str_replace_editor", "multiedit", "file_editor",
+    "file_mutate", "file_write", "file_edit",
 ]);
 export function guardianStateDirectory(directory) {
     if (process.env.OPENCODE_GUARDIAN_STATE_DIR)
@@ -130,7 +140,10 @@ export function recordGuardianEvent(event, directoryArg) {
                 if (process.platform !== "win32" && (current.mode & 0o777) !== 0o600)
                     fs.fchmodSync(fd, 0o600);
             }
-            fs.writeSync(fd, line);
+            if (fs.writeSync(fd, line) !== Buffer.byteLength(line)) {
+                throw new Error("Guardian audit write was incomplete");
+            }
+            return true;
         }
         finally {
             if (fd !== -1)
@@ -143,6 +156,7 @@ export function recordGuardianEvent(event, directoryArg) {
             // Do not print error objects (which can contain private paths) into the TUI.
             console.error("[opencode-guardian] Could not write local audit log.");
         }
+        return false;
     }
 }
 /** Reads at most the newest 2 MiB across the current log and one archive. */
@@ -158,7 +172,7 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
     maxBytes = Number.isFinite(maxBytes) ? Math.max(1, Math.min(GUARDIAN_MAX_LOG_BYTES, Math.floor(maxBytes))) : GUARDIAN_MAX_LOG_BYTES;
     const result = {
         preflight: "unknown", inspected: 0, blocked: 0, warnings: 0,
-        remediations: 0, errors: 0, truncated: false,
+        remediations: 0, errors: 0, verified: 0, failed: 0, unverified: 0, truncated: false,
     };
     try {
         const file = guardianEventPath(directory);
@@ -206,13 +220,21 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
             catch {
                 continue;
             }
-            if (!entry || typeof entry.kind !== "string" || typeof entry.at !== "string")
+            if (!entry || !Object.hasOwn(ACTIONS, entry.kind) ||
+                typeof entry.at !== "string" || !ISO_EVENT_TIME.test(entry.at))
                 continue;
             result.lastEvent = entry.at;
             result.lastKind = entry.kind;
-            if (entry.kind === "runtime-started" && entry.preflight && entry.at >= recentPreflightAt) {
+            if (entry.kind === "runtime-started" &&
+                (entry.preflight === "active" || entry.preflight === "disabled" ||
+                    entry.preflight === "unavailable") && entry.at >= recentPreflightAt) {
                 recentPreflightAt = entry.at;
                 result.preflight = entry.preflight;
+            }
+            if (entry.kind === "statistics-reset") {
+                result.inspected = result.blocked = result.warnings = result.remediations = 0;
+                result.errors = result.verified = result.failed = result.unverified = 0;
+                continue;
             }
             if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked")
                 result.inspected++;
@@ -224,6 +246,12 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
                 result.remediations++;
             if (entry.kind === "inspection-error")
                 result.errors++;
+            if (entry.kind === "remediation-verified")
+                result.verified++;
+            if (entry.kind === "remediation-failed")
+                result.failed++;
+            if (entry.kind === "remediation-unverified")
+                result.unverified++;
         }
     }
     catch {
@@ -231,4 +259,61 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
         result.truncated = true;
     }
     return result;
+}
+/** Reset displayed counters without deleting or rewriting the security event trail. */
+export function resetGuardianStatistics(directory) {
+    return recordGuardianEvent({ kind: "statistics-reset" }, directory);
+}
+/** Bounded, redacted activity. Never return arbitrary fields from the log. */
+export function readGuardianActivity(directory, limit = 12) {
+    const count = Number.isFinite(limit) ? Math.max(1, Math.min(30, Math.floor(limit))) : 12;
+    const file = guardianEventPath(directory);
+    const output = [];
+    for (const candidate of [file + ".1", file]) {
+        let fd;
+        try {
+            fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+            const stat = fs.fstatSync(fd);
+            if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+                (process.platform !== "win32" && (stat.mode & 0o077) !== 0))
+                continue;
+            const start = Math.max(0, stat.size - GUARDIAN_MAX_LOG_BYTES);
+            const buffer = Buffer.alloc(stat.size - start);
+            const size = fs.readSync(fd, buffer, 0, buffer.length, start);
+            let raw = buffer.toString("utf8", 0, size);
+            if (start > 0)
+                raw = raw.slice(raw.indexOf("\n") + 1);
+            for (const line of raw.split("\n")) {
+                if (!line)
+                    continue;
+                let event;
+                try {
+                    event = JSON.parse(line);
+                }
+                catch {
+                    continue;
+                }
+                if (!event || typeof event.at !== "string" || !ISO_EVENT_TIME.test(event.at) ||
+                    !Object.hasOwn(ACTIONS, event.kind))
+                    continue;
+                const safe = { at: event.at, kind: event.kind };
+                if (typeof event.tool === "string" && SAFE_TOOLS.has(event.tool))
+                    safe.tool = event.tool;
+                if (Array.isArray(event.rules)) {
+                    safe.rules = event.rules.filter((id) => typeof id === "string" && SAFE_RULE_IDS.has(id)).slice(0, 5);
+                }
+                output.push(safe);
+                if (output.length > count)
+                    output.shift();
+            }
+        }
+        catch {
+            // Activity display must not leak paths or interrupt the host.
+        }
+        finally {
+            if (fd !== undefined)
+                fs.closeSync(fd);
+        }
+    }
+    return output.reverse();
 }

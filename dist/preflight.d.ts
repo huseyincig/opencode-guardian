@@ -1,5 +1,9 @@
-export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input";
+export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input" | "hardcoded-secret-in-file-write" | "uninspectable-file-input";
 export declare function isShellExecutionTool(tool: string, additionalTools?: readonly string[]): boolean;
+export declare function isFileMutationTool(tool: string): boolean;
+/** A process launcher requires inspection of both the executable and argv. */
+export declare function isProcessStartTool(tool: string): boolean;
+export declare function evaluateFileMutationPreflight(tool: string, input: unknown): PreflightFinding | undefined;
 export declare function evaluatePreflight(tool: string, input: unknown, additionalTools?: readonly string[]): PreflightFinding | undefined;
 export declare class GuardianPreflightError extends Error {
     readonly reason: PreflightFinding;

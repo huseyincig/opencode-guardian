@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.5.1**.
+Documentation for OpenCode Guardian **v0.6.0**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -19,6 +19,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 | **Plugin Teardown** | V1 dispose() cancels outstanding completion probes | AbortController signal and disposer handles |
 | **Pre-Execution Shell Check** | `tool.execute.before` | `ctx.tool.hook("execute.before")` |
 | **TUI Sidebar Extension** | `tui(api)` → `api.slots.register({ sidebar_content })` | `setup(ctx)` → `ctx.ui.slot({ append: "sidebar.content" })` |
+| **TUI Commands / Slash** | `api.command.register` (when available) and `/guardian-status` | Global `ctx.keymap.layer` and `/guardian status` dispatcher |
 
 ---
 
@@ -86,3 +87,9 @@ All example and template files remain subject to secret scanning. A narrowly
 defined local database example password is tolerated only in an example file
 and only on localhost or a reserved example host. Real-looking API tokens,
 strong passwords, and remote credentials are never exempted by filename.
+
+## v0.6.0 Guardian Command Lifecycle
+
+Both adapters share SDK-independent, redacted reporting in `src/commands.ts`. V1 registers palette and slash actions via `api.command.register` when supported and ties disposal to `api.lifecycle.onDispose`. V2 registers a global keymap layer during TUI setup, separate from the additive sidebar slot.
+
+`/guardian-reset` requires confirmation and appends a `statistics-reset` event. Counters restart while security history remains subject to normal bounded rotation; protection and configuration are unchanged. V2 resolves the active project when invoking a command. Unit tests exercise registrations and failure paths; real-host TUI acceptance is verified for both OpenCode V1 and OpenCode V2 host environments (documented in [`verification-report.md`](verification-report.md)).

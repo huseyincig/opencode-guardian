@@ -6,4 +6,5 @@ export declare const TEST_CHEAT_PATTERNS: {
     regex: RegExp;
     name: string;
 }[];
+export declare function explicitlyAuthorizedTestEdit(text?: string): boolean;
 export declare const noCheatRule: GuardRule;

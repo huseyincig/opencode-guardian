@@ -1,6 +1,8 @@
 import type { GuardConfig, GuardRule, RuleResult, SessionMessage } from "./types.js";
+import { type VerificationSnapshot } from "./evidence.js";
 export declare const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 export declare const BUILTIN_RULES: Record<string, GuardRule>;
+export declare const DEFAULT_CONFIG: GuardConfig;
 export declare class GuardianConfigError extends Error {
     readonly configPath: string;
     constructor(configPath: string, cause?: unknown);
@@ -17,6 +19,8 @@ export interface EngineExecutionResult {
     results: RuleResult[];
     combinedRemediationPrompt?: string;
     rollback?: () => void;
+    remediationStatus?: "verified" | "failed" | "unverified";
+    pendingRemediationRules?: string[];
 }
 export declare class GuardEngine {
     private config;
@@ -27,5 +31,5 @@ export declare class GuardEngine {
     registerRule(rule: GuardRule): void;
     forgetSession(sessionID: string): void;
     rollbackInspection(sessionID: string): void;
-    inspect(sessionID: string, directory: string, messages: SessionMessage[]): Promise<EngineExecutionResult>;
+    inspect(sessionID: string, directory: string, messages: SessionMessage[], snapshots?: ReadonlyMap<string, VerificationSnapshot>): Promise<EngineExecutionResult>;
 }

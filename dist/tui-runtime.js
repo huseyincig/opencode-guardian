@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { readGuardianStatus } from "./telemetry.js";
 import { loadConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
+import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport } from "./commands.js";
 const guardianVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function StatRow(props) {
   return (() => {
@@ -44,10 +45,112 @@ function StatRow(props) {
     return _el$;
   })();
 }
+function v2CommandDirectory(context, fallback) {
+  return context.data?.location?.default?.()?.directory ?? fallback;
+}
+async function v2PerformCommand(context, command, directory) {
+  if (command === "reset") {
+    const confirmed = await context.ui.dialog.confirm({
+      title: "Guardian: Reset Statistics",
+      message: "Reset this project's counters? The audit log is not wiped (normal rotation still applies). Configuration and protection are unchanged.",
+      label: {
+        confirm: "Reset counters",
+        cancel: "Cancel"
+      }
+    });
+    if (confirmed !== true) return;
+    const result = guardianResetReport(directory);
+    await context.ui.dialog.alert(result);
+    return;
+  }
+  const result = await guardianCommandReport(command, directory, guardianVersion);
+  await context.ui.dialog.alert(result);
+}
+
+/** Register in a host-owned Solid component: keymap.layer follows that owner's cleanup. */
+export function registerGuardianV2Commands(context, directory) {
+  if (typeof context.keymap?.layer !== "function") return;
+  const commands = GUARDIAN_COMMANDS.map(command => ({
+    id: "opencode-guardian." + command.id,
+    title: command.title,
+    description: command.description,
+    group: "Guardian",
+    palette: true,
+    slash: {
+      name: "guardian-" + command.id
+    },
+    run: () => v2PerformCommand(context, command.id, directory())
+  }));
+  context.keymap.layer(() => ({
+    mode: "global",
+    commands: [...commands, {
+      id: "opencode-guardian.dispatch",
+      title: "Guardian: Commands",
+      description: "Run /guardian status, activity, doctor, rules, config, version or reset",
+      group: "Guardian",
+      slash: {
+        name: "guardian",
+        arguments: true
+      },
+      run: async raw => {
+        const token = (raw ?? "").trim().toLowerCase().replace(/^\/?guardian(?:\s+|$)/, "").split(/\s+/)[0];
+        const requested = GUARDIAN_COMMANDS.find(item => item.id === token);
+        if (!requested) {
+          await context.ui.dialog.alert({
+            title: "Guardian: Commands",
+            message: "Use /guardian status, activity, doctor, rules, config, version or reset."
+          });
+          return;
+        }
+        await v2PerformCommand(context, requested.id, directory());
+      }
+    }]
+  }));
+}
+function v1ShowReport(api, report, dialog = api.ui.dialog) {
+  dialog.setSize("large");
+  dialog.replace(() => api.ui.DialogAlert(report));
+}
+
+/** V1 command.register is optional in the installed V1 1.18.34 contract. */
+export function registerGuardianV1Commands(api) {
+  if (typeof api.command?.register !== "function") return;
+  const unregister = api.command.register(() => GUARDIAN_COMMANDS.map(command => ({
+    title: command.title,
+    value: "opencode-guardian." + command.id,
+    description: command.description,
+    category: "Guardian",
+    slash: {
+      name: "guardian-" + command.id
+    },
+    onSelect: async selected => {
+      const directory = api.state.path.directory;
+      const dialog = selected ?? api.ui.dialog;
+      if (command.id === "reset") {
+        dialog.setSize("medium");
+        dialog.replace(() => api.ui.DialogConfirm({
+          title: "Guardian: Reset Statistics",
+          message: "Reset this project's counters? The audit log is not wiped (normal rotation still applies). Protection stays active.",
+          onConfirm: () => {
+            dialog.clear();
+            v1ShowReport(api, guardianResetReport(directory), dialog);
+          },
+          onCancel: () => dialog.clear()
+        }));
+        return;
+      }
+      const report = await guardianCommandReport(command.id, directory, guardianVersion);
+      v1ShowReport(api, report, dialog);
+    }
+  })));
+  // The pinned V1 API owns plugin resources via its explicit lifecycle.
+  api.lifecycle?.onDispose?.(unregister);
+}
 function GuardianSidebar(props) {
+  const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
-  const [status, setStatus] = createSignal(readGuardianStatus(props.directory));
-  const timer = setInterval(() => setStatus(readGuardianStatus(props.directory)), 2500);
+  const [status, setStatus] = createSignal(readGuardianStatus(currentDirectory()));
+  const timer = setInterval(() => setStatus(readGuardianStatus(currentDirectory())), 2500);
   let disposed = false;
   onCleanup(() => {
     clearInterval(timer);
@@ -88,6 +191,16 @@ function GuardianSidebar(props) {
         return "● preflight blocked";
       case "post-remediation":
         return "● remediation sent";
+      case "remediation-verified":
+        return "● remediation verified";
+      case "remediation-failed":
+        return "▲ remediation failed";
+      case "remediation-unverified":
+        return "▲ remediation unverified";
+      case "statistics-reset":
+        return "○ statistics reset";
+      case "verification-unavailable":
+        return "▲ verification unavailable";
       case "post-warning":
         return "▲ warning";
       case "preflight-allowed":
@@ -102,11 +215,15 @@ function GuardianSidebar(props) {
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
+      case "remediation-failed":
         return errorColor();
       case "post-warning":
+      case "remediation-unverified":
+      case "verification-unavailable":
         return warningColor();
       case "post-remediation":
         return props.colors.accent;
+      case "remediation-verified":
       case "preflight-allowed":
       case "runtime-started":
         return successColor();
@@ -156,6 +273,28 @@ function GuardianSidebar(props) {
         _$insertNode(_el$13, _$createTextNode(` (↑)`));
         _$effect(_$p => _$setProp(_el$12, "fg", successColor(), _$p));
         return _el$12;
+      }
+    }), null);
+    _$insert(_el$5, _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!hasUpdate())() && latestVersion();
+      },
+      get children() {
+        return _$createComponent(StatRow, {
+          label: "Update available",
+          get value() {
+            return `v${latestVersion()}`;
+          },
+          get valueColor() {
+            return successColor();
+          },
+          get muted() {
+            return props.colors.muted;
+          },
+          get text() {
+            return props.colors.text;
+          }
+        });
       }
     }), null);
     _$insert(_el$5, _$createComponent(Show, {
@@ -265,27 +404,6 @@ function GuardianSidebar(props) {
           }
         }), _$createComponent(Show, {
           get when() {
-            return _$memo(() => !!hasUpdate())() && latestVersion();
-          },
-          get children() {
-            return _$createComponent(StatRow, {
-              label: "Update",
-              get value() {
-                return `v${latestVersion()}`;
-              },
-              get valueColor() {
-                return successColor();
-              },
-              get muted() {
-                return props.colors.muted;
-              },
-              get text() {
-                return props.colors.text;
-              }
-            });
-          }
-        }), _$createComponent(Show, {
-          get when() {
             return status().errors > 0;
           },
           get children() {
@@ -357,6 +475,8 @@ const v2Plugin = {
     const directory = context.location?.directory ?? process.cwd();
     const config = loadConfig(directory);
     if (config.enabled === false) return;
+    // The pinned V2 host owns setup-created layers and removes them on unload.
+    registerGuardianV2Commands(context, () => v2CommandDirectory(context, directory));
     if (config.updateNotice?.enabled !== false && typeof context.ui.toast?.show === "function") {
       void announceGuardianUpdate((current, latest) => context.ui.toast.show({
         title: "OpenCode Guardian — New version",
@@ -370,6 +490,7 @@ const v2Plugin = {
       append: "sidebar.content",
       render: () => _$createComponent(GuardianSidebar, {
         directory: directory,
+        currentDirectory: () => v2CommandDirectory(context, directory),
         get colors() {
           return {
             accent: context.theme.status?.success?.base ?? context.theme.text.base,
@@ -391,12 +512,14 @@ const v1Tui = async api => {
   const directory = api.state.path.directory;
   const config = loadConfig(directory);
   if (config.enabled === false) return;
+  registerGuardianV1Commands(api);
   api.slots.register({
     order: 600,
     slots: {
       sidebar_content(_context, _props) {
         return _$createComponent(GuardianSidebar, {
           directory: directory,
+          currentDirectory: () => api.state.path.directory,
           get colors() {
             return {
               accent: api.theme.current.primary,

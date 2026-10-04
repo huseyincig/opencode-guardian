@@ -4,6 +4,8 @@ interface SessionState {
   fingerprints: Set<string>;
   continuationCount: number;
   continuationKeys: Set<string>;
+  pendingRemediationRules?: string[];
+  pendingRemediationFiles?: string[];
 }
 
 export class SessionStateStore {
@@ -91,6 +93,40 @@ export class SessionStateStore {
     if (state && state.turnKey === turnKey) {
       state.continuationCount = Math.max(0, state.continuationCount - 1);
       state.continuationKeys.delete(progressKey);
+    }
+  }
+
+  setPendingRemediation(
+    sessionID: string,
+    turnKey: string,
+    rules: string[],
+    files: string[] = []
+  ): void {
+    const state = this.beginTurn(sessionID, turnKey);
+    state.pendingRemediationRules = [...rules];
+    state.pendingRemediationFiles = [...files];
+  }
+
+  getPendingRemediation(
+    sessionID: string,
+    turnKey?: string
+  ): string[] | undefined {
+    const state = this.sessions.get(sessionID);
+    if (!state) return undefined;
+    if (turnKey !== undefined && state.turnKey !== turnKey) return undefined;
+    return state.pendingRemediationRules;
+  }
+
+  getPendingRemediationFiles(sessionID: string, turnKey: string): string[] {
+    const state = this.sessions.get(sessionID);
+    return state?.turnKey === turnKey ? [...(state.pendingRemediationFiles ?? [])] : [];
+  }
+
+  clearPendingRemediation(sessionID: string): void {
+    const state = this.sessions.get(sessionID);
+    if (state) {
+      delete state.pendingRemediationRules;
+      delete state.pendingRemediationFiles;
     }
   }
 

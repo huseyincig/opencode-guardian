@@ -28,6 +28,7 @@ import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
+import type { AgentMutationCapability } from "./agent-capability.js";
 
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 
@@ -324,7 +325,7 @@ export class GuardEngine {
     directory: string,
     messages: SessionMessage[],
     snapshots?: ReadonlyMap<string, VerificationSnapshot>,
-    options?: { isSubagent?: boolean }
+    options?: { isSubagent?: boolean; agentCapability?: AgentMutationCapability }
   ): Promise<EngineExecutionResult> {
     if (this.config.enabled === false || messages.length === 0) {
       return { decision: "pass", results: [] };
@@ -467,7 +468,15 @@ export class GuardEngine {
 
     this.inspectedMessages.set(sessionID, messageID);
 
+    const canSelfRemediate = !isSubagent || options?.agentCapability === "write-allowed";
+
     if (blockingPrompts.length > 0) {
+      if (!canSelfRemediate) {
+        return {
+          decision: "block",
+          results,
+        };
+      }
       const completion = blockingResults.find(
         (result) => result.ruleId === "task/completion-gate"
       );

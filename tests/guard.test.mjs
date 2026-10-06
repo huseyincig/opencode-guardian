@@ -4150,7 +4150,12 @@ test("OpenCode V2 foreground subagent handoff waits for Guardian remediation and
       async hook() { return { async dispose() {} }; },
       async get({ sessionID }) {
         if (sessionID === "v2-child-audit") {
-          return { id: sessionID, parentID: "v2-parent-audit", location: { directory: process.cwd() } };
+          return {
+            id: sessionID,
+            parentID: "v2-parent-audit",
+            location: { directory: process.cwd() },
+            permissions: [{ action: "edit", effect: "allow" }],
+          };
         }
         return { id: sessionID, location: { directory: process.cwd() } };
       },
@@ -4253,7 +4258,12 @@ test("OpenCode V2 background subagent keeps idle remediation outside the foregro
       async hook() { return { async dispose() {} }; },
       async get({ sessionID }) {
         if (sessionID === "v2-child-bg") {
-          return { id: sessionID, parentID: "v2-parent-bg", location: { directory: process.cwd() } };
+          return {
+            id: sessionID,
+            parentID: "v2-parent-bg",
+            location: { directory: process.cwd() },
+            permissions: [{ action: "edit", effect: "allow" }],
+          };
         }
         return { id: sessionID, location: { directory: process.cwd() } };
       },

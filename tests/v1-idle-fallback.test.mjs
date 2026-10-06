@@ -305,8 +305,14 @@ test("V1 foreground task handoff waits for Guardian remediation and returns the 
       parts: [{ type: "text", text: "Re-ran the security audit. Found two additional minor issues and reported both." }] },
   ];
 
-  const client = { session: {
-    async status() { return { data: {} }; },
+  const client = {
+    app: {
+      async agents() {
+        return { data: [{ name: "explore", permission: { edit: "allow" } }] };
+      },
+    },
+    session: {
+      async status() { return { data: {} }; },
     async get({ path: { id } }) {
       return { data: id === "child-audit"
         ? { id, parentID: "parent-audit" }
@@ -371,8 +377,14 @@ test("V1 background child keeps normal idle remediation instead of entering the 
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
   let promptAsyncCalls = 0;
-  const client = { session: {
-    async status() { return { data: {} }; },
+  const client = {
+    app: {
+      async agents() {
+        return { data: [{ name: "explore", permission: { edit: "allow" } }] };
+      },
+    },
+    session: {
+      async status() { return { data: {} }; },
     async get({ path: { id } }) {
       return { data: id === "child-bg" ? { id, parentID: "parent-bg" } : { id } };
     },

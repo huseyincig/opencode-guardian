@@ -11,6 +11,16 @@ import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 import { registerGuardianCapability } from "./handoff.js";
+import {
+  type AgentMutationProfile,
+  resolveV1AgentCapability,
+  resolveV2AgentCapability,
+  getCachedAgentCapability,
+  cacheAgentCapability,
+  clearAgentCapability,
+  clearAllAgentCapabilities,
+  extractAgentNameFromMessages,
+} from "./agent-capability.js";
 
 export * from "./types.js";
 export * from "./engine.js";
@@ -40,6 +50,7 @@ export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
+export * from "./agent-capability.js";
 
 function stringifyV2ToolContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -267,10 +278,24 @@ async function finalizeSubagentHandoff(input: {
   engine: GuardEngine;
   fetchMessages: () => Promise<SessionMessage[]>;
   sendAndWait: (promptText: string) => Promise<void>;
-  snapshots?: () => ReadonlyMap<string, VerificationSnapshot> | undefined;
-  signal?: AbortSignal;
+  snapshots?: (() => ReadonlyMap<string, VerificationSnapshot> | undefined) | undefined;
+  signal?: AbortSignal | undefined;
+  agentName?: string | undefined;
+  resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined;
 }): Promise<string | undefined> {
   let remediated = false;
+  let resolvedCapability: AgentMutationProfile | undefined;
+  if (input.resolveCapability) {
+    try {
+      resolvedCapability = await input.resolveCapability();
+    } catch {
+      resolvedCapability = {
+        capability: "unknown",
+        evidence: { agentName: input.agentName, reasons: ["capability resolution failed"] },
+      };
+    }
+  }
+  const agentCapability = resolvedCapability?.capability ?? "unknown";
 
   for (let round = 0; round < MAX_SUBAGENT_HANDOFF_ROUNDS; round++) {
     if (input.signal?.aborted) {
@@ -297,7 +322,7 @@ async function finalizeSubagentHandoff(input: {
         input.directory,
         messages,
         input.snapshots?.(),
-        { isSubagent: true }
+        { isSubagent: true, agentCapability }
       );
     } catch {
       recordGuardianEvent({
@@ -312,6 +337,9 @@ async function finalizeSubagentHandoff(input: {
     const findings = recordInspectionOutcome(result, input.sessionID, input.directory);
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
+      if (agentCapability !== "write-allowed") {
+        return latestAssistantText(messages);
+      }
       if (round === MAX_SUBAGENT_HANDOFF_ROUNDS - 1) {
         result.rollback?.();
         throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
@@ -361,9 +389,10 @@ async function handleSessionIdle(
   fetchMessages: () => Promise<SessionMessage[]>,
   sendPrompt: (promptText: string) => Promise<void>,
   engine: GuardEngine,
-  snapshots?: ReadonlyMap<string, VerificationSnapshot>,
-  signal?: AbortSignal,
-  isSubagent?: boolean
+  snapshots?: ReadonlyMap<string, VerificationSnapshot> | undefined,
+  signal?: AbortSignal | undefined,
+  isSubagent?: boolean | undefined,
+  resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined
 ): Promise<void> {
   let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   try {
@@ -371,17 +400,34 @@ async function handleSessionIdle(
     const messages = await fetchMessages();
     if (signal?.aborted) return;
     stage = "engine-inspect";
+    let resolvedCapability: AgentMutationProfile | undefined;
+    if (isSubagent && resolveCapability) {
+      try {
+        resolvedCapability = await resolveCapability();
+      } catch {
+        resolvedCapability = {
+          capability: "unknown",
+          evidence: { reasons: ["capability resolution failed"] },
+        };
+      }
+    }
+    const agentCapability = resolvedCapability?.capability ?? (isSubagent ? "unknown" : undefined);
     const result = await engine.inspect(
       sessionID,
       directory,
       messages,
       snapshots,
-      isSubagent === undefined ? undefined : { isSubagent }
+      isSubagent === undefined
+        ? undefined
+        : { isSubagent, ...(agentCapability ? { agentCapability } : {}) }
     );
     if (signal?.aborted) { result.rollback?.(); return; }
     const findings = recordInspectionOutcome(result, sessionID, directory);
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
+      if (isSubagent && agentCapability !== "write-allowed") {
+        return;
+      }
       stage = "prompt-send";
       try {
         if (signal?.aborted) { result.rollback?.(); return; }
@@ -519,7 +565,17 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
           engine,
           verificationStore.snapshots(sessionID),
           undefined,
-          relation.known ? Boolean(relation.parentID) : undefined
+          relation.known ? Boolean(relation.parentID) : undefined,
+          relation.known && relation.parentID
+            ? async () => {
+                const cached = getCachedAgentCapability(sessionID);
+                if (cached) return cached;
+                const agentName = extractAgentNameFromMessages(messages);
+                const p = await resolveV1AgentCapability(client, directory, agentName);
+                cacheAgentCapability(sessionID, p);
+                return p;
+              }
+            : undefined
         );
       },
       onError: (sessionID, _error) => {
@@ -542,6 +598,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
       verificationStore.clear();
       contracts.clear();
       foregroundHandoffs.clear();
+      clearAllAgentCapabilities();
     },
     "tool.execute.before": async (input, output) => {
       const args =
@@ -595,10 +652,31 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
               throw new Error("[opencode-guardian handoff] child session ownership mismatch.");
             }
             if (relation.known) {
+              const childAgent = typeof args.agent === "string" ? args.agent : undefined;
               const revised = await finalizeSubagentHandoff({
                 sessionID: childID,
                 directory,
                 engine,
+                agentName: childAgent,
+                resolveCapability: async () => {
+                  const cached = getCachedAgentCapability(childID);
+                  if (cached) return cached;
+                  let resolvedName = childAgent;
+                  if (!resolvedName) {
+                    try {
+                      const res = await client.session.messages({
+                        path: { id: childID },
+                        query: { directory },
+                      });
+                      if (Array.isArray(res?.data)) {
+                        resolvedName = extractAgentNameFromMessages(res.data as SessionMessage[]);
+                      }
+                    } catch {}
+                  }
+                  const p = await resolveV1AgentCapability(client, directory, resolvedName);
+                  cacheAgentCapability(childID, p);
+                  return p;
+                },
                 fetchMessages: async () => {
                   const response = await client.session.messages({
                     path: { id: childID },
@@ -693,6 +771,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
           verificationStore.forget(deletedSessionID);
           contracts.delete(deletedSessionID);
           foregroundHandoffs.delete(deletedSessionID);
+          clearAgentCapability(deletedSessionID);
         }
         return;
       }
@@ -707,6 +786,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         return;
       }
 
+      const isSubagent = relation.known ? Boolean(relation.parentID) : undefined;
       await handleSessionIdle(
         sessionID,
         directory,
@@ -741,7 +821,22 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         engine,
         verificationStore.snapshots(sessionID),
         undefined,
-        relation.known ? Boolean(relation.parentID) : undefined
+        isSubagent,
+        isSubagent
+          ? async () => {
+              const cached = getCachedAgentCapability(sessionID);
+              if (cached) return cached;
+              const res = await client.session.messages({
+                path: { id: sessionID },
+                query: { directory },
+              });
+              const msgs = Array.isArray(res?.data) ? (res.data as SessionMessage[]) : [];
+              const agentName = extractAgentNameFromMessages(msgs);
+              const p = await resolveV1AgentCapability(client, directory, agentName);
+              cacheAgentCapability(sessionID, p);
+              return p;
+            }
+          : undefined
       );
     },
   };
@@ -906,10 +1001,26 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 typeof child.location?.directory === "string" && child.location.directory.trim()
                   ? child.location.directory
                   : observedDirectory;
+              const childAgent = typeof input.agent === "string" ? input.agent : undefined;
               const revised = await finalizeSubagentHandoff({
                 sessionID: childID,
                 directory: childDirectory,
                 engine,
+                agentName: childAgent,
+                resolveCapability: async () => {
+                  const cached = getCachedAgentCapability(childID);
+                  if (cached) return cached;
+                  let resolvedName = childAgent;
+                  if (!resolvedName) {
+                    try {
+                      const ctxMsgs = normalizeV2Messages(await context.session.context({ sessionID: childID }));
+                      resolvedName = extractAgentNameFromMessages(ctxMsgs);
+                    } catch {}
+                  }
+                  const p = await resolveV2AgentCapability(context, childID, resolvedName);
+                  cacheAgentCapability(childID, p);
+                  return p;
+                },
                 fetchMessages: async () =>
                   normalizeV2Messages(await context.session.context({ sessionID: childID })),
                 sendAndWait: async (text) => {
@@ -1037,6 +1148,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             verificationStore.forget(deletedSessionID);
             contracts.delete(deletedSessionID);
             foregroundHandoffs.delete(deletedSessionID);
+            clearAgentCapability(deletedSessionID);
           }
           continue;
         }
@@ -1090,7 +1202,22 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           engine,
           verificationStore.snapshots(sessionID),
           controller.signal,
+          sessionIsSubagent,
           sessionIsSubagent
+            ? async () => {
+                const cached = getCachedAgentCapability(sessionID);
+                if (cached) return cached;
+                let agentName: string | undefined;
+                try {
+                  const msgs = await context.session.context({ sessionID });
+                  const normalized = normalizeV2Messages(msgs);
+                  agentName = extractAgentNameFromMessages(normalized);
+                } catch {}
+                const p = await resolveV2AgentCapability(context, sessionID, agentName);
+                cacheAgentCapability(sessionID, p);
+                return p;
+              }
+            : undefined
         );
         }
         if (controller.signal.aborted) return;
@@ -1150,6 +1277,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     contracts.clear();
     verificationStore.clear();
     foregroundHandoffs.clear();
+    clearAllAgentCapabilities();
     for (const registration of registrations.reverse()) {
       try { await registration.dispose(); } catch {
         // An optional disposer failing must not prevent remaining cleanup.

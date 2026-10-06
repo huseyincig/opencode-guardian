@@ -352,7 +352,10 @@ test("guardian-sq handoff: GuardEngine integrates handoff header into remediatio
   assert.equal(parsed.autoSelect, "forbidden");
 
   // Subagents must NOT receive a handoff header
-  const subagentResult = await engine.inspect("sess-sub", "/tmp", messages, undefined, { isSubagent: true });
+  const subagentResult = await engine.inspect("sess-sub", "/tmp", messages, undefined, {
+    isSubagent: true,
+    agentCapability: "write-allowed",
+  });
   assert.equal(subagentResult.decision, "block");
   assert.ok(subagentResult.combinedRemediationPrompt?.includes(REMEDIATION_MARKER));
   assert.equal(subagentResult.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"), false);

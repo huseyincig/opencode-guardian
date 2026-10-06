@@ -7,6 +7,7 @@ import { VerificationSnapshotStore } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 import { registerGuardianCapability } from "./handoff.js";
+import { resolveV1AgentCapability, resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -35,6 +36,7 @@ export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
+export * from "./agent-capability.js";
 function stringifyV2ToolContent(content) {
     if (!Array.isArray(content))
         return "";
@@ -229,6 +231,19 @@ function recordInspectionOutcome(result, sessionID, directory) {
 }
 async function finalizeSubagentHandoff(input) {
     let remediated = false;
+    let resolvedCapability;
+    if (input.resolveCapability) {
+        try {
+            resolvedCapability = await input.resolveCapability();
+        }
+        catch {
+            resolvedCapability = {
+                capability: "unknown",
+                evidence: { agentName: input.agentName, reasons: ["capability resolution failed"] },
+            };
+        }
+    }
+    const agentCapability = resolvedCapability?.capability ?? "unknown";
     for (let round = 0; round < MAX_SUBAGENT_HANDOFF_ROUNDS; round++) {
         if (input.signal?.aborted) {
             throw new Error("[opencode-guardian handoff] plugin teardown interrupted subagent finalization.");
@@ -248,7 +263,7 @@ async function finalizeSubagentHandoff(input) {
         }
         let result;
         try {
-            result = await input.engine.inspect(input.sessionID, input.directory, messages, input.snapshots?.(), { isSubagent: true });
+            result = await input.engine.inspect(input.sessionID, input.directory, messages, input.snapshots?.(), { isSubagent: true, agentCapability });
         }
         catch {
             recordGuardianEvent({
@@ -261,6 +276,9 @@ async function finalizeSubagentHandoff(input) {
         }
         const findings = recordInspectionOutcome(result, input.sessionID, input.directory);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
+            if (agentCapability !== "write-allowed") {
+                return latestAssistantText(messages);
+            }
             if (round === MAX_SUBAGENT_HANDOFF_ROUNDS - 1) {
                 result.rollback?.();
                 throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
@@ -301,7 +319,7 @@ async function finalizeSubagentHandoff(input) {
 /**
  * Common handler to process session.idle events across v1 and v2.
  */
-async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent) {
+async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability) {
     let stage = "message-fetch";
     try {
         if (signal?.aborted)
@@ -310,13 +328,31 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
         if (signal?.aborted)
             return;
         stage = "engine-inspect";
-        const result = await engine.inspect(sessionID, directory, messages, snapshots, isSubagent === undefined ? undefined : { isSubagent });
+        let resolvedCapability;
+        if (isSubagent && resolveCapability) {
+            try {
+                resolvedCapability = await resolveCapability();
+            }
+            catch {
+                resolvedCapability = {
+                    capability: "unknown",
+                    evidence: { reasons: ["capability resolution failed"] },
+                };
+            }
+        }
+        const agentCapability = resolvedCapability?.capability ?? (isSubagent ? "unknown" : undefined);
+        const result = await engine.inspect(sessionID, directory, messages, snapshots, isSubagent === undefined
+            ? undefined
+            : { isSubagent, ...(agentCapability ? { agentCapability } : {}) });
         if (signal?.aborted) {
             result.rollback?.();
             return;
         }
         const findings = recordInspectionOutcome(result, sessionID, directory);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
+            if (isSubagent && agentCapability !== "write-allowed") {
+                return;
+            }
             stage = "prompt-send";
             try {
                 if (signal?.aborted) {
@@ -449,7 +485,17 @@ const server = async ({ client, directory }) => {
                     });
                     if (response.error)
                         throw new Error("V1 host rejected the Guardian remediation request.");
-                }, engine, verificationStore.snapshots(sessionID), undefined, relation.known ? Boolean(relation.parentID) : undefined);
+                }, engine, verificationStore.snapshots(sessionID), undefined, relation.known ? Boolean(relation.parentID) : undefined, relation.known && relation.parentID
+                    ? async () => {
+                        const cached = getCachedAgentCapability(sessionID);
+                        if (cached)
+                            return cached;
+                        const agentName = extractAgentNameFromMessages(messages);
+                        const p = await resolveV1AgentCapability(client, directory, agentName);
+                        cacheAgentCapability(sessionID, p);
+                        return p;
+                    }
+                    : undefined);
             },
             onError: (sessionID, _error) => {
                 // The V1 host can render console output over its interactive prompt.
@@ -470,6 +516,7 @@ const server = async ({ client, directory }) => {
             verificationStore.clear();
             contracts.clear();
             foregroundHandoffs.clear();
+            clearAllAgentCapabilities();
         },
         "tool.execute.before": async (input, output) => {
             const args = output.args && typeof output.args === "object" && !Array.isArray(output.args)
@@ -508,10 +555,33 @@ const server = async ({ client, directory }) => {
                             throw new Error("[opencode-guardian handoff] child session ownership mismatch.");
                         }
                         if (relation.known) {
+                            const childAgent = typeof args.agent === "string" ? args.agent : undefined;
                             const revised = await finalizeSubagentHandoff({
                                 sessionID: childID,
                                 directory,
                                 engine,
+                                agentName: childAgent,
+                                resolveCapability: async () => {
+                                    const cached = getCachedAgentCapability(childID);
+                                    if (cached)
+                                        return cached;
+                                    let resolvedName = childAgent;
+                                    if (!resolvedName) {
+                                        try {
+                                            const res = await client.session.messages({
+                                                path: { id: childID },
+                                                query: { directory },
+                                            });
+                                            if (Array.isArray(res?.data)) {
+                                                resolvedName = extractAgentNameFromMessages(res.data);
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                    const p = await resolveV1AgentCapability(client, directory, resolvedName);
+                                    cacheAgentCapability(childID, p);
+                                    return p;
+                                },
                                 fetchMessages: async () => {
                                     const response = await client.session.messages({
                                         path: { id: childID },
@@ -599,6 +669,7 @@ const server = async ({ client, directory }) => {
                     verificationStore.forget(deletedSessionID);
                     contracts.delete(deletedSessionID);
                     foregroundHandoffs.delete(deletedSessionID);
+                    clearAgentCapability(deletedSessionID);
                 }
                 return;
             }
@@ -612,6 +683,7 @@ const server = async ({ client, directory }) => {
             if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
                 return;
             }
+            const isSubagent = relation.known ? Boolean(relation.parentID) : undefined;
             await handleSessionIdle(sessionID, directory, async () => {
                 const res = await client.session.messages({
                     path: { id: sessionID },
@@ -640,7 +712,22 @@ const server = async ({ client, directory }) => {
                 });
                 if (response.error)
                     throw new Error("V1 host rejected the Guardian remediation request.");
-            }, engine, verificationStore.snapshots(sessionID), undefined, relation.known ? Boolean(relation.parentID) : undefined);
+            }, engine, verificationStore.snapshots(sessionID), undefined, isSubagent, isSubagent
+                ? async () => {
+                    const cached = getCachedAgentCapability(sessionID);
+                    if (cached)
+                        return cached;
+                    const res = await client.session.messages({
+                        path: { id: sessionID },
+                        query: { directory },
+                    });
+                    const msgs = Array.isArray(res?.data) ? res.data : [];
+                    const agentName = extractAgentNameFromMessages(msgs);
+                    const p = await resolveV1AgentCapability(client, directory, agentName);
+                    cacheAgentCapability(sessionID, p);
+                    return p;
+                }
+                : undefined);
         },
     };
 };
@@ -786,10 +873,28 @@ const setup = async (context) => {
                             const childDirectory = typeof child.location?.directory === "string" && child.location.directory.trim()
                                 ? child.location.directory
                                 : observedDirectory;
+                            const childAgent = typeof input.agent === "string" ? input.agent : undefined;
                             const revised = await finalizeSubagentHandoff({
                                 sessionID: childID,
                                 directory: childDirectory,
                                 engine,
+                                agentName: childAgent,
+                                resolveCapability: async () => {
+                                    const cached = getCachedAgentCapability(childID);
+                                    if (cached)
+                                        return cached;
+                                    let resolvedName = childAgent;
+                                    if (!resolvedName) {
+                                        try {
+                                            const ctxMsgs = normalizeV2Messages(await context.session.context({ sessionID: childID }));
+                                            resolvedName = extractAgentNameFromMessages(ctxMsgs);
+                                        }
+                                        catch { }
+                                    }
+                                    const p = await resolveV2AgentCapability(context, childID, resolvedName);
+                                    cacheAgentCapability(childID, p);
+                                    return p;
+                                },
                                 fetchMessages: async () => normalizeV2Messages(await context.session.context({ sessionID: childID })),
                                 sendAndWait: async (text) => {
                                     await context.session.synthetic({
@@ -903,6 +1008,7 @@ const setup = async (context) => {
                             verificationStore.forget(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
+                            clearAgentCapability(deletedSessionID);
                         }
                         continue;
                     }
@@ -949,7 +1055,23 @@ const setup = async (context) => {
                             delivery: "queue",
                             resume: true,
                         });
-                    }, engine, verificationStore.snapshots(sessionID), controller.signal, sessionIsSubagent);
+                    }, engine, verificationStore.snapshots(sessionID), controller.signal, sessionIsSubagent, sessionIsSubagent
+                        ? async () => {
+                            const cached = getCachedAgentCapability(sessionID);
+                            if (cached)
+                                return cached;
+                            let agentName;
+                            try {
+                                const msgs = await context.session.context({ sessionID });
+                                const normalized = normalizeV2Messages(msgs);
+                                agentName = extractAgentNameFromMessages(normalized);
+                            }
+                            catch { }
+                            const p = await resolveV2AgentCapability(context, sessionID, agentName);
+                            cacheAgentCapability(sessionID, p);
+                            return p;
+                        }
+                        : undefined);
                 }
                 if (controller.signal.aborted)
                     return;
@@ -1011,6 +1133,7 @@ const setup = async (context) => {
         contracts.clear();
         verificationStore.clear();
         foregroundHandoffs.clear();
+        clearAllAgentCapabilities();
         for (const registration of registrations.reverse()) {
             try {
                 await registration.dispose();

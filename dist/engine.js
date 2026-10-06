@@ -361,7 +361,14 @@ export class GuardEngine {
             }
         }
         this.inspectedMessages.set(sessionID, messageID);
+        const canSelfRemediate = !isSubagent || options?.agentCapability === "write-allowed";
         if (blockingPrompts.length > 0) {
+            if (!canSelfRemediate) {
+                return {
+                    decision: "block",
+                    results,
+                };
+            }
             const completion = blockingResults.find((result) => result.ruleId === "task/completion-gate");
             if (completion && contract?.iterativeReview) {
                 const configured = this.config.iterationBudget;

@@ -1,5 +1,6 @@
 import type { GuardConfig, GuardRule, RuleResult, SessionMessage } from "./types.js";
 import { type VerificationSnapshot } from "./evidence.js";
+import type { AgentMutationCapability } from "./agent-capability.js";
 export declare const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 export declare const BUILTIN_RULES: Record<string, GuardRule>;
 export declare const DEFAULT_CONFIG: GuardConfig;
@@ -34,5 +35,6 @@ export declare class GuardEngine {
     rollbackInspection(sessionID: string): void;
     inspect(sessionID: string, directory: string, messages: SessionMessage[], snapshots?: ReadonlyMap<string, VerificationSnapshot>, options?: {
         isSubagent?: boolean;
+        agentCapability?: AgentMutationCapability;
     }): Promise<EngineExecutionResult>;
 }

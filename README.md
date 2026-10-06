@@ -408,9 +408,9 @@ sequenceDiagram
         G->>Host: Remediation + [OPENCODE_HANDOFF:v1] (auto_select=forbidden)
         Host->>SQ: Trusted approval handoff received
         U->>Host: Native question with choices
-        Note over SQ,Host: Auto-reply strictly disabled; user must click manually
+        Note over SQ,Host: Auto-reply strictly disabled - user must click manually
     else Work Already Authorized
-        G->>Host: Instruction fidelity blocks; NO handoff generated
+        G->>Host: Instruction fidelity blocks - no handoff generated
         U->>Host: Agent directly continues authorized work
     end
 ```

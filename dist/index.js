@@ -438,7 +438,14 @@ const server = async ({ client, directory }) => {
                 await handleSessionIdle(sessionID, directory, async () => messages, async (text) => {
                     const response = await client.session.promptAsync({
                         path: { id: sessionID }, query: { directory },
-                        body: { parts: [{ type: "text", text }] },
+                        body: {
+                            parts: [{
+                                    type: "text",
+                                    text,
+                                    synthetic: true,
+                                    metadata: { "opencode-guardian": true },
+                                }],
+                        },
                     });
                     if (response.error)
                         throw new Error("V1 host rejected the Guardian remediation request.");
@@ -622,7 +629,14 @@ const server = async ({ client, directory }) => {
                 const response = await client.session.promptAsync({
                     path: { id: sessionID },
                     query: { directory },
-                    body: { parts: [{ type: "text", text }] },
+                    body: {
+                        parts: [{
+                                type: "text",
+                                text,
+                                synthetic: true,
+                                metadata: { "opencode-guardian": true },
+                            }],
+                    },
                 });
                 if (response.error)
                     throw new Error("V1 host rejected the Guardian remediation request.");

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   parseOpenCodeHandoff,
   formatOpenCodeHandoff,
@@ -9,6 +12,7 @@ import {
   COORDINATION_SYMBOL,
 } from "../dist/handoff.js";
 import { GuardEngine, REMEDIATION_MARKER } from "../dist/engine.js";
+import { OpencodeGuardian } from "../dist/index.js";
 
 test("guardian-sq handoff: parser and formatter roundtrip", () => {
   const original = {
@@ -96,13 +100,13 @@ test("guardian-sq handoff: circuit breaker produces clarification only when miss
   assert.equal(handoff2, null, "Autonomous loop breaker must NOT generate a question handoff");
 });
 
-test("guardian-sq handoff: instruction fidelity produces choice when conflict exists, but NONE on redundant confirmation", () => {
-  const conflictResults = [
+test("guardian-sq handoff: explicit rule handoff requirements produce choice, absent requirements produce NONE", () => {
+  const choiceResults = [
     {
-      ruleId: "task/instruction-fidelity",
+      ruleId: "test/explicit-choice",
       decision: "block",
-      findings: [{ ruleId: "task/instruction-fidelity", pattern: "fidelity", confidence: "high" }],
-      remediationPrompt: "A genuine conflict exists. Ask the user which approach to follow.",
+      findings: [{ ruleId: "test/explicit-choice", pattern: "choice", confidence: "high" }],
+      remediationPrompt: "A genuine unresolved choice exists.",
       handoff: {
         required: true,
         kind: "choice",
@@ -110,21 +114,23 @@ test("guardian-sq handoff: instruction fidelity produces choice when conflict ex
       },
     },
   ];
-  const handoff = createHandoffForBlockingResults(conflictResults, "sess-3", "turn-1");
+  const handoff = createHandoffForBlockingResults(choiceResults, "sess-3", "turn-1");
   assert.ok(handoff);
   assert.equal(handoff.kind, "choice");
   assert.equal(handoff.autoSelect, "allowed");
 
-  const redundantResults = [
+  const noHandoffResults = [
     {
       ruleId: "task/instruction-fidelity",
       decision: "block",
       findings: [{ ruleId: "task/instruction-fidelity", pattern: "redundant", confidence: "high" }],
-      remediationPrompt: "The current user already authorized the requested action. Continue the work instead of asking for redundant confirmation.",
+      remediationPrompt: "Continue the work instead of asking for redundant confirmation.",
     },
   ];
-  const redundantHandoff = createHandoffForBlockingResults(redundantResults, "sess-3", "turn-1");
-  assert.equal(redundantHandoff, null, "Redundant confirmation must NOT generate a handoff");
+  assert.equal(
+    createHandoffForBlockingResults(noHandoffResults, "sess-3", "turn-1"),
+    null
+  );
 });
 
 test("guardian-sq handoff: redundant confirmation in GuardEngine does NOT produce question handoff", async () => {
@@ -152,6 +158,91 @@ test("guardian-sq handoff: redundant confirmation in GuardEngine does NOT produc
   assert.ok(result.combinedRemediationPrompt?.includes("Continue the work instead of asking for redundant confirmation."));
   assert.equal(result.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"), false, "Redundant confirmation remediation must NOT include [OPENCODE_HANDOFF:v1]");
   assert.equal(engine.sessionState.getActiveHandoff(sessionID), undefined);
+});
+
+test("guardian-sq handoff: historical refusal does NOT invent a user choice handoff", async () => {
+  const engine = new GuardEngine({
+    enabled: true,
+    rules: {
+      "task/instruction-fidelity": "error",
+    },
+  });
+
+  const sessionID = "sess-historical-refusal";
+  const messages = [
+    {
+      info: { id: "u-1", role: "user" },
+      parts: [{ type: "text", text: "Implement the requested feature now." }],
+    },
+    {
+      info: { id: "a-1", role: "assistant" },
+      parts: [{ type: "text", text: "Earlier you paused this feature, so I will not do this." }],
+    },
+  ];
+
+  const result = await engine.inspect(sessionID, "/tmp", messages, undefined, { isSubagent: false });
+  assert.equal(result.decision, "block");
+  assert.match(result.combinedRemediationPrompt ?? "", /Do not treat an earlier pause or deferral as a permanent prohibition/);
+  assert.equal(
+    result.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"),
+    false,
+    "A historical refusal is a Guardian correction, not proof of an unresolved user choice"
+  );
+  assert.equal(engine.sessionState.getActiveHandoff(sessionID), undefined);
+});
+
+test("guardian-sq handoff: V1 remediation transport stamps synthetic Guardian provenance", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-handoff-provenance-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(directory, "opencode-guardian.json"),
+    JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      rules: { "task/instruction-fidelity": "error" },
+    })
+  );
+
+  const sent = [];
+  const messages = [
+    {
+      info: { id: "u-1", role: "user" },
+      parts: [{ type: "text", text: "Implement the requested feature now." }],
+    },
+    {
+      info: { id: "a-1", role: "assistant" },
+      parts: [{ type: "text", text: "Would you like me to proceed with implementing this?" }],
+    },
+  ];
+
+  const hooks = await OpencodeGuardian.server({
+    directory,
+    client: {
+      session: {
+        async messages() {
+          return { data: messages };
+        },
+        async promptAsync(input) {
+          sent.push(input);
+          return { data: {}, error: undefined };
+        },
+      },
+    },
+  });
+  t.after(async () => hooks.dispose?.());
+
+  await hooks.event?.({
+    event: {
+      type: "session.idle",
+      properties: { sessionID: "sess-provenance-v1" },
+    },
+  });
+
+  assert.equal(sent.length, 1);
+  const part = sent[0]?.body?.parts?.[0];
+  assert.equal(part?.type, "text");
+  assert.equal(part?.synthetic, true);
+  assert.equal(part?.metadata?.["opencode-guardian"], true);
 });
 
 test("guardian-sq handoff: non-question tools like terraform_plan do NOT satisfy handoff", async () => {
@@ -271,20 +362,29 @@ test("guardian-sq handoff: loop prevention - question invocation passes turn wit
   const engine = new GuardEngine({
     enabled: true,
     rules: {
-      "task/instruction-fidelity": "error",
+      "safety/destructive-operations": "error",
     },
   });
 
   const sessionID = "sess-loop-prevent";
-  // Turn 1: Assistant is blocked by instruction-fidelity and receives handoff
   const turn1Messages = [
     {
       info: { id: "u-1", role: "user" },
-      parts: [{ type: "text", text: "Implement the requested feature now." }],
+      parts: [{ type: "text", text: "Clean up the temporary files safely." }],
     },
     {
       info: { id: "a-1", role: "assistant" },
-      parts: [{ type: "text", text: "Earlier you paused this feature, so I will not do this." }],
+      parts: [
+        {
+          type: "tool",
+          name: "bash",
+          tool: "bash",
+          state: {
+            input: { command: "rm -rf /" },
+            status: "completed",
+          },
+        },
+      ],
     },
   ];
 
@@ -292,7 +392,6 @@ test("guardian-sq handoff: loop prevention - question invocation passes turn wit
   assert.equal(turn1Result.decision, "block");
   assert.ok(turn1Result.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"));
 
-  // Turn 2: Assistant responds to remediation by calling the native ask_question tool
   const turn2Messages = [
     ...turn1Messages,
     {
@@ -308,8 +407,8 @@ test("guardian-sq handoff: loop prevention - question invocation passes turn wit
           tool: "ask_question",
           state: {
             input: {
-              question: "Which environment should I deploy to?",
-              options: ["Staging (Recommended)", "Production"],
+              question: "This operation is destructive. Continue?",
+              options: ["Cancel", "Proceed"],
             },
             status: "completed",
           },
@@ -318,21 +417,18 @@ test("guardian-sq handoff: loop prevention - question invocation passes turn wit
     },
   ];
 
-  // Engine must NOT block this turn because the question was presented
   const turn2Result = await engine.inspect(sessionID, "/tmp", turn2Messages, undefined, { isSubagent: false });
   assert.equal(turn2Result.decision, "pass");
   assert.equal(turn2Result.results.length, 0);
 
-  // Turn 3: User answers the question
   const turn3Messages = [
     ...turn2Messages,
     {
       info: { id: "u-2", role: "user" },
-      parts: [{ type: "text", text: "Staging" }],
+      parts: [{ type: "text", text: "Cancel" }],
     },
   ];
 
-  // Active handoff is now resolved on user reply
   await engine.inspect(sessionID, "/tmp", turn3Messages, undefined, { isSubagent: false });
   assert.equal(engine.sessionState.getActiveHandoff(sessionID), undefined);
 });

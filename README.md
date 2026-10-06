@@ -21,9 +21,9 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic combines the current **v0.6.5 automated verification** with the real-host acceptance runs across **OpenCode V1 (`1.18.34`)** and **OpenCode V2 (`2.0.24`)** executed on real host with `opencode-go/mimo-v2.6-flash`.
+> The graphic combines the current **v0.6.6 automated verification** with the real-host acceptance runs across **OpenCode V1 (`1.18.34`)** and **OpenCode V2 (`2.0.24`)** executed on real host with `opencode-go/mimo-v2.6-flash`.
 
-Guardian **v0.6.5** is validated as follows:
+Guardian **v0.6.6** is validated as follows:
 
 - **Current Automated Verification:** **474 / 474** unit and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
@@ -116,7 +116,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.6.5
+▶ Guardian                 v0.6.6
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -130,7 +130,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.6.5
+▼ Guardian                 v0.6.6
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0
@@ -356,13 +356,16 @@ flowchart TD
     Outcome -->|Evidence insufficient| Unverified[remediation-unverified]
 ```
 
-The diagram illustrates the v0.6.5 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
+The diagram illustrates the v0.6.6 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
 
-For foreground delegated work (`task` on V1, `subagent` on V2), v0.6.5 adds a bounded handoff barrier. Child-session findings are inspected before the parent tool result settles; if remediation is required, Guardian resumes the child, waits for the remediation turn to finish, re-inspects it, and replaces the parent-facing tool result with the latest child report. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
+For foreground delegated work (`task` on V1, `subagent` on V2), v0.6.6 adds a bounded handoff barrier. Child-session findings are inspected before the parent tool result settles; if remediation is required, Guardian resumes the child, waits for the remediation turn to finish, re-inspects it, and replaces the parent-facing tool result with the latest child report. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
 
 ---
 
 ## 🤝 Smart Questions Coordination Protocol
+
+> [!NOTE]
+> Guardian and Smart Questions are **completely standalone plugins** that operate independently with zero required package dependencies. When installed together in the same OpenCode environment, they optionally coordinate through this decoupled, versioned protocol (`[OPENCODE_HANDOFF:v1]`).
 
 OpenCode Guardian coordinates with **[OpenCode Smart Questions](https://github.com/huseyincig/opencode-smart-questions)** through an independent, versioned protocol block (`[OPENCODE_HANDOFF:v1]`) without requiring direct package dependencies:
 

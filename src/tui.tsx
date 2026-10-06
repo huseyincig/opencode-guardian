@@ -265,6 +265,13 @@ function GuardianSidebar(props: {
       </Show>
       <Show when={open()}>
         <StatRow
+          label="Mode"
+          value="Autonomous"
+          valueColor={props.colors.accent}
+          muted={props.colors.muted}
+          text={props.colors.text}
+        />
+        <StatRow
           label="Preflight"
           value={preflightLabel()}
           valueColor={preflightColor()}

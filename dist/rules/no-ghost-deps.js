@@ -408,6 +408,265 @@ function loadRustDependencies(directory) {
         return null;
     }
 }
+const PHP_BUILTIN_NAMESPACES = new Set([
+    "stdclass", "datetime", "datetimeimmutable", "datetimezone", "dateinterval", "dateperiod",
+    "exception", "error", "typeerror", "parseerror", "argumentcounterror", "arithmeticerror", "divisionbyzeroerror",
+    "throwable", "pdo", "pdostatement", "pdoexception", "mysqli", "curlhandle", "curlsharehandle",
+    "splfileinfo", "splfileobject", "spltempfileobject", "arrayobject", "arrayiterator", "splstack", "splqueue",
+    "generator", "closure", "fiber", "reflectionclass", "reflectionfunction", "reflectionmethod", "reflectionproperty",
+    "domdocument", "simplexmlelement", "xmlreader", "xmlwriter", "ziparchive", "intlchar", "transliterator",
+    "numberformatter", "collator", "intldateformatter", "soapclient", "soapserver", "soapfault"
+]);
+function loadComposerDependencies(directory) {
+    const manifest = nearestFile(directory, ["composer.json"]);
+    if (!manifest)
+        return null;
+    try {
+        const text = fs.readFileSync(manifest.path, "utf8");
+        const json = JSON.parse(text);
+        const deps = new Set();
+        const vendorRoots = new Set();
+        for (const section of [json.require, json["require-dev"]]) {
+            if (section && typeof section === "object" && !Array.isArray(section)) {
+                for (const pkg of Object.keys(section)) {
+                    const lower = pkg.toLowerCase();
+                    deps.add(lower);
+                    const vendor = lower.split("/")[0];
+                    if (vendor)
+                        vendorRoots.add(vendor);
+                }
+            }
+        }
+        const autoload = json.autoload;
+        const autoloadDev = json["autoload-dev"];
+        for (const al of [autoload, autoloadDev]) {
+            if (al && typeof al === "object") {
+                for (const psr of ["psr-4", "psr-0"]) {
+                    const map = al[psr];
+                    if (map && typeof map === "object") {
+                        for (const ns of Object.keys(map)) {
+                            const rootNs = ns.replace(/\\.*$/, "").toLowerCase();
+                            if (rootNs)
+                                vendorRoots.add(rootNs);
+                        }
+                    }
+                }
+            }
+        }
+        return { deps, vendorRoots, root: manifest.root };
+    }
+    catch {
+        return null;
+    }
+}
+function extractPhpImports(code) {
+    const mask = buildJsCodeMask(code);
+    const imports = [];
+    const regex = /(?:^|\n)\s*use\s+(?:function\s+|const\s+)?([A-Za-z0-9_\\]+)/g;
+    let match = regex.exec(code);
+    while (match !== null) {
+        if (mask[match.index] === 1 && match[1]) {
+            const trimmed = match[1].trim().replace(/^\\+/, "");
+            if (trimmed)
+                imports.push(trimmed);
+        }
+        match = regex.exec(code);
+    }
+    return imports;
+}
+const CSHARP_BUILTIN_NAMESPACES = new Set([
+    "system", "microsoft", "windows"
+]);
+function loadCSharpDependencies(directory) {
+    const manifest = nearestFile(directory, ["Directory.Packages.props"], /\.csproj$/i);
+    if (!manifest)
+        return null;
+    try {
+        const text = fs.readFileSync(manifest.path, "utf8");
+        const deps = new Set();
+        for (const match of text.matchAll(/<PackageReference\s+[^>]*Include=["']([^"']+)["']/gi)) {
+            if (match[1])
+                deps.add(match[1].toLowerCase());
+        }
+        for (const match of text.matchAll(/<PackageVersion\s+[^>]*Include=["']([^"']+)["']/gi)) {
+            if (match[1])
+                deps.add(match[1].toLowerCase());
+        }
+        return { deps, root: manifest.root };
+    }
+    catch {
+        return null;
+    }
+}
+function extractCSharpUsings(code) {
+    const mask = buildJsCodeMask(code);
+    const usings = [];
+    const regex = /(?:^|\n)\s*using\s+(?:static\s+)?([A-Za-z0-9_.]+)\s*;/g;
+    let match = regex.exec(code);
+    while (match !== null) {
+        if (mask[match.index] === 1 && match[1]) {
+            const trimmed = match[1].trim();
+            if (trimmed)
+                usings.push(trimmed);
+        }
+        match = regex.exec(code);
+    }
+    return usings;
+}
+const JVM_BUILTIN_ROOTS = new Set([
+    "java", "javax", "jakarta", "kotlin", "kotlinx", "android", "androidx", "sun", "com.sun", "org.w3c", "org.xml"
+]);
+function loadJvmDependencies(directory) {
+    const manifest = nearestFile(directory, ["pom.xml", "build.gradle", "build.gradle.kts"]);
+    if (!manifest)
+        return null;
+    try {
+        const text = fs.readFileSync(manifest.path, "utf8");
+        const deps = new Set();
+        if (manifest.path.endsWith("pom.xml")) {
+            for (const match of text.matchAll(/<groupId>([^<]+)<\/groupId>\s*<artifactId>([^<]+)<\/artifactId>/g)) {
+                if (match[1])
+                    deps.add(match[1].toLowerCase());
+                if (match[2])
+                    deps.add(match[2].toLowerCase());
+            }
+            for (const match of text.matchAll(/<artifactId>([^<]+)<\/artifactId>/g)) {
+                if (match[1])
+                    deps.add(match[1].toLowerCase());
+            }
+        }
+        else {
+            for (const match of text.matchAll(/["']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::[^"']*)?["']/g)) {
+                if (match[1])
+                    deps.add(match[1].toLowerCase());
+                if (match[2])
+                    deps.add(match[2].toLowerCase());
+            }
+        }
+        return { deps, root: manifest.root };
+    }
+    catch {
+        return null;
+    }
+}
+function extractJvmImports(code) {
+    const mask = buildJsCodeMask(code);
+    const imports = [];
+    const regex = /(?:^|\n)\s*import\s+(?:static\s+)?([A-Za-z0-9_.]+)\s*;?/g;
+    let match = regex.exec(code);
+    while (match !== null) {
+        if (mask[match.index] === 1 && match[1]) {
+            const trimmed = match[1].trim();
+            if (trimmed)
+                imports.push(trimmed);
+        }
+        match = regex.exec(code);
+    }
+    return imports;
+}
+const RUBY_STDLIB = new Set([
+    "json", "net/http", "net/https", "uri", "fileutils", "pathname", "time", "date", "openssl", "yaml",
+    "benchmark", "csv", "digest", "logger", "tempfile", "securerandom", "socket", "stringio", "optparse",
+    "base64", "cgi", "erb", "forwardable", "ostruct", "set", "strscan", "timeout", "zlib", "delegate",
+    "singleton", "observer", "prettyprint", "pp", "pstore", "resolv", "shellwords", "tsort", "weakref"
+]);
+function loadRubyDependencies(directory) {
+    const manifest = nearestFile(directory, ["Gemfile"]);
+    if (!manifest)
+        return null;
+    try {
+        const text = fs.readFileSync(manifest.path, "utf8");
+        const deps = new Set();
+        for (const match of text.matchAll(/^\s*gem\s+["']([A-Za-z0-9_-]+)["']/gm)) {
+            if (match[1])
+                deps.add(match[1].toLowerCase());
+        }
+        return { deps, root: manifest.root };
+    }
+    catch {
+        return null;
+    }
+}
+function extractRubyRequires(code) {
+    const requires = [];
+    for (const rawLine of code.split(/\r?\n/)) {
+        const line = rawLine.replace(/#.*$/, "").trim();
+        const match = /^\s*(?:require|require_relative)\s+["']([^"']+)["']/.exec(line);
+        if (match?.[1]) {
+            requires.push(match[1].trim());
+        }
+    }
+    return requires;
+}
+const DART_BUILTIN = new Set([
+    "flutter", "flutter_test", "flutter_web_plugins"
+]);
+function loadDartDependencies(directory) {
+    const manifest = nearestFile(directory, ["pubspec.yaml"]);
+    if (!manifest)
+        return null;
+    try {
+        const text = fs.readFileSync(manifest.path, "utf8");
+        const deps = new Set();
+        let ownPackage = "";
+        let inDeps = false;
+        for (const rawLine of text.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (/^name:\s*([A-Za-z0-9_]+)/.test(line)) {
+                ownPackage = RegExp.$1.toLowerCase();
+                continue;
+            }
+            if (/^(?:dependencies|dev_dependencies):/.test(line)) {
+                inDeps = true;
+                continue;
+            }
+            if (/^[a-zA-Z0-9_-]+:/.test(line) && !rawLine.startsWith(" ") && !rawLine.startsWith("\t")) {
+                inDeps = false;
+                continue;
+            }
+            if (inDeps) {
+                if (rawLine.startsWith("  ") && !rawLine.startsWith("    ")) {
+                    const pkgMatch = /^\s*([A-Za-z0-9_]+)\s*:/.exec(rawLine);
+                    if (pkgMatch?.[1])
+                        deps.add(pkgMatch[1].toLowerCase());
+                }
+            }
+        }
+        return { deps, ownPackage, root: manifest.root };
+    }
+    catch {
+        return null;
+    }
+}
+function extractDartImports(code) {
+    const mask = buildJsCodeMask(code);
+    const imports = [];
+    const regex = /(?:^|\n)\s*import\s+['"]package:([A-Za-z0-9_]+)\/[^'"]+['"]/g;
+    let match = regex.exec(code);
+    while (match !== null) {
+        if (mask[match.index] === 1 && match[1]) {
+            imports.push(match[1]);
+        }
+        match = regex.exec(code);
+    }
+    return imports;
+}
+export function isHallucinatedOrSuspiciousPackage(ecosystemOrName, name) {
+    const ecosystem = name !== undefined ? ecosystemOrName.toLowerCase() : "npm";
+    const packageName = name !== undefined ? name : ecosystemOrName;
+    const trimmed = packageName.trim();
+    if (!trimmed)
+        return false;
+    if (/(?:-official|-security-patch|-security-update|-fixed-version|-patched-release)$/i.test(trimmed)) {
+        return true;
+    }
+    if (/\s/.test(trimmed))
+        return true;
+    if (ecosystem === "npm" && !trimmed.startsWith("@") && /[A-Z]/.test(trimmed)) {
+        return true;
+    }
+    return false;
+}
 function getNodePackageName(importPath) {
     if (importPath.startsWith("node:") || importPath.startsWith("#"))
         return "";
@@ -734,7 +993,7 @@ function extensionOf(targetFile) {
 }
 export const noGhostDepsRule = {
     id: "manifest/no-ghost-deps",
-    description: "Detects undeclared imports against the nearest Node, Python, Go, or Rust dependency manifest.",
+    description: "Detects undeclared imports against the nearest Node, Python, Go, Rust, PHP, C#, JVM, Ruby, or Dart dependency manifest.",
     inspect: (context) => {
         const findings = [];
         const blocking = [];
@@ -764,6 +1023,10 @@ export const noGhostDepsRule = {
                 if (declared) {
                     for (const importPath of extractJsImports(code)) {
                         const pkg = getNodePackageName(importPath);
+                        if (pkg && isHallucinatedOrSuspiciousPackage(pkg)) {
+                            addFinding("Node", pkg, importPath, source, "package.json (suspicious typosquatting)");
+                            continue;
+                        }
                         if (!pkg ||
                             NODE_BUILTINS.has(pkg) ||
                             declared.has(pkg)) {
@@ -835,6 +1098,101 @@ export const noGhostDepsRule = {
                         continue;
                     addFinding("Rust", crateName, crateName, source, "Cargo.toml");
                 }
+                return;
+            }
+            if (ext === ".php") {
+                const manifest = loadComposerDependencies(dir);
+                if (!manifest)
+                    return;
+                for (const importPath of extractPhpImports(code)) {
+                    const parts = importPath.split("\\");
+                    const rootNs = parts[0]?.toLowerCase() ?? "";
+                    if (!rootNs || PHP_BUILTIN_NAMESPACES.has(rootNs))
+                        continue;
+                    if (manifest.vendorRoots.has(rootNs))
+                        continue;
+                    const fullLower = importPath.toLowerCase().replace(/\\/g, "/");
+                    if ([...manifest.deps].some((dep) => fullLower === dep || fullLower.startsWith(dep + "/")))
+                        continue;
+                    if (fs.existsSync(path.join(manifest.root, "src", ...parts) + ".php") ||
+                        fs.existsSync(path.join(manifest.root, ...parts) + ".php"))
+                        continue;
+                    const patternName = parts.length > 1 ? `${parts[0]}\\${parts[1]}` : (parts[0] ?? importPath);
+                    addFinding("PHP", patternName, importPath, source, "composer.json");
+                }
+                return;
+            }
+            if (ext === ".cs") {
+                const manifest = loadCSharpDependencies(dir);
+                if (!manifest)
+                    return;
+                for (const usingPath of extractCSharpUsings(code)) {
+                    const rootNs = usingPath.split(".")[0]?.toLowerCase() ?? "";
+                    if (CSHARP_BUILTIN_NAMESPACES.has(rootNs))
+                        continue;
+                    const usingLower = usingPath.toLowerCase();
+                    if (manifest.deps.has(usingLower) || manifest.deps.has(rootNs))
+                        continue;
+                    if ([...manifest.deps].some((dep) => usingLower.startsWith(dep) || dep.startsWith(usingLower)))
+                        continue;
+                    addFinding("C#", usingPath.split(".")[0] ?? usingPath, usingPath, source, "*.csproj");
+                }
+                return;
+            }
+            if (ext === ".java" || ext === ".kt") {
+                const manifest = loadJvmDependencies(dir);
+                if (!manifest)
+                    return;
+                for (const importPath of extractJvmImports(code)) {
+                    const parts = importPath.split(".");
+                    const rootNs = parts[0]?.toLowerCase() ?? "";
+                    if (JVM_BUILTIN_ROOTS.has(rootNs))
+                        continue;
+                    const fullLower = importPath.toLowerCase();
+                    const artifactCandidate = parts.slice(0, 3).join(".");
+                    if (manifest.deps.has(rootNs) ||
+                        manifest.deps.has(parts[1]?.toLowerCase() ?? "") ||
+                        [...manifest.deps].some((dep) => fullLower.includes(dep) || dep.includes(artifactCandidate))) {
+                        continue;
+                    }
+                    addFinding("JVM", artifactCandidate, importPath, source, "pom.xml / build.gradle");
+                }
+                return;
+            }
+            if (ext === ".rb") {
+                const manifest = loadRubyDependencies(dir);
+                if (!manifest)
+                    return;
+                for (const req of extractRubyRequires(code)) {
+                    if (req.startsWith(".") || req.startsWith("/"))
+                        continue;
+                    const gemName = req.split("/")[0]?.toLowerCase() ?? "";
+                    if (RUBY_STDLIB.has(gemName) || RUBY_STDLIB.has(req.toLowerCase()))
+                        continue;
+                    if (manifest.deps.has(gemName) || manifest.deps.has(req.toLowerCase()))
+                        continue;
+                    if (fs.existsSync(path.join(manifest.root, "lib", req + ".rb")) ||
+                        fs.existsSync(path.join(manifest.root, req + ".rb")))
+                        continue;
+                    addFinding("Ruby", gemName, req, source, "Gemfile");
+                }
+                return;
+            }
+            if (ext === ".dart") {
+                const manifest = loadDartDependencies(dir);
+                if (!manifest)
+                    return;
+                for (const pkg of extractDartImports(code)) {
+                    const lower = pkg.toLowerCase();
+                    if (DART_BUILTIN.has(lower))
+                        continue;
+                    if (manifest.ownPackage && lower === manifest.ownPackage)
+                        continue;
+                    if (manifest.deps.has(lower))
+                        continue;
+                    addFinding("Dart", pkg, `package:${pkg}`, source, "pubspec.yaml");
+                }
+                return;
             }
         };
         for (const msg of context.currentTurn) {

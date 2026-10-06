@@ -70,6 +70,7 @@ export async function guardianCommandReport(command, directory, installedVersion
                     "Configuration: valid",
                     "Guardian: " + option(config.enabled !== false),
                     "Strict preflight configured: " + option(config.preflight?.enabled === true),
+                    "Protection mode: " + (config.preflight?.enabled === true ? "Autonomous (Strict)" : "Autonomous (Standard)"),
                     "Preflight at last recorded start: " + status.preflight,
                     "Audit log: " + (present ? "present" : "not created"),
                     "Audit window: " + (status.truncated ? "partial or unreadable" : "readable"),
@@ -110,6 +111,7 @@ export async function guardianCommandReport(command, directory, installedVersion
                 message: [
                     "Guardian: " + option(config.enabled !== false),
                     "Strict preflight: " + option(config.preflight?.enabled === true),
+                    "Protection mode: " + (config.preflight?.enabled === true ? "Autonomous (Strict)" : "Autonomous (Standard)"),
                     "Custom shell tool entries: " + (config.preflight?.shellTools?.length ?? 0),
                     "Remediation budget: " + (config.remediationBudget ?? 1),
                     "Iteration budget: " + (config.iterationBudget ?? 3),

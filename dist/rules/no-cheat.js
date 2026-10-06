@@ -43,6 +43,14 @@ export const TEST_CHEAT_PATTERNS = [
         regex: /(?:\/\/|#)\s*(?:expect\s*\(|assert(?:\.|\s*\()|self\.assert)/,
         name: "commented-out assertion (expect / assert)",
     },
+    {
+        regex: /\b(?:test|it)\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(?:\(\s*\)|function\s*\([^)]*\))\s*=>?\s*\{\s*(?:\/\/.*|\/\*[\s\S]*?\*\/|\s)*\}/,
+        name: "empty test block without assertions (JS/TS)",
+    },
+    {
+        regex: /def\s+test_\w+\s*\([^)]*\)\s*:\s*(?:#[^\n]*\n\s*)*(?:pass|\.\.\.|return)\s*(?:\n|$)(?!\s+[a-zA-Z])/,
+        name: "empty def test_...: pass without assertions (Python)",
+    },
 ];
 function isTestFilePath(filePath) {
     if (!filePath)

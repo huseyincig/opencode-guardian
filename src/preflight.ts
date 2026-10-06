@@ -7,7 +7,9 @@ export type PreflightFinding =
   | "opaque-shell-execution"
   | "uninspectable-shell-input"
   | "hardcoded-secret-in-file-write"
-  | "uninspectable-file-input";
+  | "uninspectable-file-input"
+  | "lazy-commit-message"
+  | "hallucinated-or-malformed-package";
 
 /**
  * Shell tools known to execute shell commands.
@@ -158,6 +160,30 @@ export function evaluateFileMutationPreflight(
   return undefined;
 }
 
+export function isLazyCommitMessage(command: string): boolean {
+  const trimmed = command.trim();
+  const commitMatch = /\bgit\s+commit\b[^\n;&|]*-(?:m|-message)(?:=|\s+)(["'])([\s\S]*?)\1/i.exec(trimmed) ??
+                      /\bgit\s+commit\b[^\n;&|]*-m\s+([^\s;&|]+)/i.exec(trimmed);
+  if (!commitMatch) return false;
+  const msg = (commitMatch[2] ?? commitMatch[1] ?? "").trim();
+  if (msg.length < 4) return true;
+  return /^(?:fix|update|wip|done|test|temp|changes|commit|asdf|minor|stuff|work|misc|foo|bar|checkpoint|save|tmp|quick\s*fix|bug\s*fix|hotfix)$/i.test(msg);
+}
+
+export function isHallucinatedOrMalformedPackageInstall(command: string): boolean {
+  const trimmed = command.trim();
+  const npmMatch = /(?:^|[;&|]\s*)(?:npm\s+(?:i|install|add)|pnpm\s+add|yarn\s+add)\s+([^\n;&|]+)/i.exec(trimmed);
+  if (npmMatch && npmMatch[1]) {
+    const rawArgs = npmMatch[1].trim().split(/\s+/);
+    for (const arg of rawArgs) {
+      if (!arg || arg.startsWith("-")) continue;
+      if (!arg.startsWith("@") && /[A-Z]/.test(arg)) return true;
+      if (/(?:-official|-security-patch|-security-update|-fixed-version|-patched-release)$/i.test(arg)) return true;
+    }
+  }
+  return false;
+}
+
 export function evaluatePreflight(
   tool: string,
   input: unknown,
@@ -180,11 +206,14 @@ export function evaluatePreflight(
       return "uninspectable-shell-input";
     }
     const commands = values as string[];
+
     if (commands.some((command) =>
       isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
       isWindowsDestructiveCommand(command))) return "destructive-command";
     if (commands.some(isOpaqueShellExecution)) return "opaque-shell-execution";
     if (commands.some(hasDynamicCommandName)) return "uninspectable-shell-input";
+    if (commands.some(isLazyCommitMessage)) return "lazy-commit-message";
+    if (commands.some(isHallucinatedOrMalformedPackageInstall)) return "hallucinated-or-malformed-package";
     // Different shell command aliases give no reliable way to know which the
     // host will execute. Do not pick only the first, apparently safe value.
     if (new Set(commands).size > 1) return "uninspectable-shell-input";
@@ -208,6 +237,8 @@ export class GuardianPreflightError extends Error {
       "uninspectable-shell-input": "missing or uninspectable shell command",
       "hardcoded-secret-in-file-write": "potential hardcoded secret in file write",
       "uninspectable-file-input": "missing or uninspectable file mutation payload",
+      "lazy-commit-message": "lazy or uninformative git commit message; write a descriptive conventional commit (feat:, fix:, etc.)",
+      "hallucinated-or-malformed-package": "malformed or suspicious package installation command",
     };
     super(`[opencode-guardian preflight] Tool execution rejected: ${descriptions[reason]}. Disable the optional preflight feature only if you understand and accept the risk.`);
     this.name = "GuardianPreflightError";

@@ -336,6 +336,18 @@ function GuardianSidebar(props) {
       },
       get children() {
         return [_$createComponent(StatRow, {
+          label: "Mode",
+          value: "Autonomous",
+          get valueColor() {
+            return props.colors.accent;
+          },
+          get muted() {
+            return props.colors.muted;
+          },
+          get text() {
+            return props.colors.text;
+          }
+        }), _$createComponent(StatRow, {
           label: "Preflight",
           get value() {
             return preflightLabel();

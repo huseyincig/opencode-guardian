@@ -26,7 +26,8 @@ const RULE_CODES = {
 export const SAFE_RULE_IDS = new Set([
     ...RULE_IDS, "destructive-command", "opaque-shell-execution",
     "uninspectable-shell-input", "uninspectable-file-input", "v1-completion-probe",
-    "hardcoded-secret-in-file-write", "remediation-verified", "remediation-failed", "remediation-unverified",
+    "hardcoded-secret-in-file-write", "lazy-commit-message", "hallucinated-or-malformed-package",
+    "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
     "v2-event-stream-error", "verification-snapshot-unavailable",
 ]);
@@ -36,7 +37,8 @@ export const SAFE_REASON_CODES = new Set([
     "masked-verification-failure", "opaque-shell-execution",
     "missing-follow-up-review", "verification-not-confirmed",
     "destructive-command", "uninspectable-shell-input", "uninspectable-file-input", "v1-completion-probe",
-    "hardcoded-secret-in-file-write", "remediation-verified", "remediation-failed", "remediation-unverified",
+    "hardcoded-secret-in-file-write", "lazy-commit-message", "hallucinated-or-malformed-package",
+    "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
     "v2-event-stream-error", "verification-snapshot-unavailable",
 ]);

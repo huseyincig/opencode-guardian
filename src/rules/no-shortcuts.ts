@@ -1,6 +1,7 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
 import { sanitizeProseForInspection } from "../prose.js";
 import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractGitCommitMessage } from "../preflight.js";
 
 export const DEFAULT_HEDGING_PATTERNS = [
   // Deferred work
@@ -390,22 +391,22 @@ export const noShortcutsRule: GuardRule = {
             );
           }
           const cmd = typeof input.command === "string" ? input.command : typeof input.cmd === "string" ? input.cmd : "";
-          if (cmd && /\bgit\s+commit\b/i.test(cmd)) {
-            const commitMatch = /\bgit\s+commit\b[^\n;&|]*-(?:m|-message)(?:=|\s+)(["'])([\s\S]*?)\1/i.exec(cmd) ??
-                                /\bgit\s+commit\b[^\n;&|]*-m\s+([^\s;&|]+)/i.exec(cmd);
-            if (commitMatch) {
-              const msg = (commitMatch[2] ?? commitMatch[1] ?? "").trim();
-              if (msg.length < 4 || /^(?:fix|update|wip|done|test|temp|changes|commit|asdf|minor|stuff|work|misc|foo|bar|checkpoint|save|tmp|quick\s*fix|bug\s*fix|hotfix)$/i.test(msg)) {
-                const finding: RuleFinding = {
-                  ruleId: "quality/no-shortcuts",
-                  pattern: `commit: "${msg}"`,
-                  messageSnippet: cmd,
-                  description: `Lazy or uninformative git commit message "${msg}" detected in shell command`,
-                  confidence: "high",
-                };
-                findings.push(finding);
-                blocking.push(finding);
-              }
+          if (cmd) {
+            const msg = extractGitCommitMessage(cmd);
+            if (
+              msg !== undefined &&
+              (msg.length < 4 ||
+                /^(?:fix|update|wip|done|test|temp|changes|commit|asdf|minor|stuff|work|misc|foo|bar|checkpoint|save|tmp|quick\s*fix|bug\s*fix|hotfix)$/i.test(msg))
+            ) {
+              const finding: RuleFinding = {
+                ruleId: "quality/no-shortcuts",
+                pattern: `commit: "${msg}"`,
+                messageSnippet: cmd,
+                description: `Lazy or uninformative git commit message "${msg}" detected in shell command`,
+                confidence: "high",
+              };
+              findings.push(finding);
+              blocking.push(finding);
             }
           }
         }

@@ -39,9 +39,11 @@ export function evaluateTaskPolicy(
         ? "observed"
         : "missing";
   const verifications = contract.requiredVerifications.map((kind) => {
+    // A verification from the same tool call as a mutation cannot prove
+    // whether it ran before or after that mutation. Require a later call.
     const record = evidence.records
       .filter((candidate) =>
-        candidate.kind === kind && candidate.sequence >= lastMutationSequence
+        candidate.kind === kind && candidate.sequence > lastMutationSequence
       )
       .sort((left, right) => right.sequence - left.sequence)[0];
     const status: VerificationDecision["status"] =

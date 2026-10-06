@@ -142,7 +142,10 @@ export function registerGuardianV1Commands(api: TuiPluginApi): void {
 }
 
 function GuardianSidebar(props: {
-  colors: SidebarColors; directory?: string; currentDirectory?: () => string;
+  colors: SidebarColors;
+  directory?: string;
+  currentDirectory?: () => string;
+  checkUpdates?: boolean;
 }) {
   const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
@@ -157,14 +160,16 @@ function GuardianSidebar(props: {
   const [hasUpdate, setHasUpdate] = createSignal(false);
   const [latestVersion, setLatestVersion] = createSignal<string | undefined>(undefined);
 
-  checkGuardianUpdate({ allowDevelopment: true })
-    .then((info) => {
-      if (!disposed && info) {
-        setHasUpdate(true);
-        setLatestVersion(info.latest);
-      }
-    })
-    .catch(() => {});
+  if (props.checkUpdates !== false) {
+    checkGuardianUpdate({ allowDevelopment: true })
+      .then((info) => {
+        if (!disposed && info) {
+          setHasUpdate(true);
+          setLatestVersion(info.latest);
+        }
+      })
+      .catch(() => {});
+  }
 
   const successColor = () => props.colors.success ?? props.colors.accent;
   const warningColor = () => props.colors.warning ?? props.colors.accent;
@@ -342,7 +347,8 @@ const v2Plugin: Plugin.Definition = {
     return context.ui.slot({
       append: "sidebar.content",
       render: () => <GuardianSidebar directory={directory}
-        currentDirectory={() => v2CommandDirectory(context, directory)} colors={{
+        currentDirectory={() => v2CommandDirectory(context, directory)}
+        checkUpdates={config.updateNotice?.enabled !== false} colors={{
         accent: context.theme.status?.success?.base ?? context.theme.text.base,
         onAccent: context.theme.text.action.primary.base,
         text: context.theme.text.base,
@@ -366,7 +372,8 @@ const v1Tui: TuiPlugin = async (api: TuiPluginApi) => {
     slots: {
       sidebar_content(_context, _props) {
         return <GuardianSidebar directory={directory}
-          currentDirectory={() => api.state.path.directory} colors={{
+          currentDirectory={() => api.state.path.directory}
+          checkUpdates={config.updateNotice?.enabled !== false} colors={{
           accent: api.theme.current.primary,
           onAccent: api.theme.current.background,
           text: api.theme.current.text,

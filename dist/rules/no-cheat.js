@@ -44,12 +44,14 @@ export const TEST_CHEAT_PATTERNS = [
         name: "commented-out assertion (expect / assert)",
     },
     {
-        regex: /\b(?:test|it)\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(?:\(\s*\)|function\s*\([^)]*\))\s*=>?\s*\{\s*(?:\/\/.*|\/\*[\s\S]*?\*\/|\s)*\}/,
+        regex: /\b(?:test|it)\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*|function\s*\([^)]*\)\s*)\{\s*(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|\s)*\}/,
         name: "empty test block without assertions (JS/TS)",
+        alwaysBlock: true,
     },
     {
         regex: /def\s+test_\w+\s*\([^)]*\)\s*:\s*(?:#[^\n]*\n\s*)*(?:pass|\.\.\.|return)\s*(?:\n|$)(?!\s+[a-zA-Z])/,
         name: "empty def test_...: pass without assertions (Python)",
+        alwaysBlock: true,
     },
 ];
 function isTestFilePath(filePath) {
@@ -253,34 +255,9 @@ export const noCheatRule = {
         const blocking = [];
         const seen = new Set();
         const blockSnapshotUpdates = context.ruleConfig.blockSnapshotUpdates === true;
-        const hasFailedTestEvidence = Boolean(context.evidence?.records.some((record) => record.kind === "test" && record.status === "failure"));
-        const blockStructuralTestChanges = context.ruleConfig.blockStructuralTestChanges === true ||
-            hasFailedTestEvidence;
-        const userInstruction = extractUserInstruction(context);
-        const authorizedTestModification = explicitlyAuthorizedTestEdit(userInstruction);
-        const specificallyAuthorized = (finding) => {
-            const pattern = finding.pattern;
-            if (!authorizedTestModification)
-                return false;
-            // A prohibition ("do not skip") is never an authorization to skip.
-            if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:skip|ignore|delete|weaken|remove|only)\b|\b(?:atlama|silme|kaldırma|zayıflatma)\b/iu.test(userInstruction))
-                return false;
-            const namedFile = / in ([\w./-]+\.(?:test|spec)\.[a-z]+)/iu.exec(finding.description)?.[1];
-            const requestedFiles = userInstruction.match(/[\w./-]+\.(?:test|spec)\.[a-z]+/giu) ?? [];
-            if (namedFile && requestedFiles.length &&
-                !requestedFiles.some((requested) => namedFile.toLowerCase().endsWith(requested.toLowerCase())))
-                return false;
-            // Permission to edit tests is NOT permission to bypass them. Each
-            // integrity-reducing operation needs explicit authorization.
-            if (/skip|xit|xtest|ignore|todo/i.test(pattern)) {
-                return /\bskip\b|\batla\b|\bignore\b/i.test(userInstruction);
-            }
-            if (/focus|only/i.test(pattern))
-                return /\bonly\b|\bfocus\b/i.test(userInstruction);
-            if (/assertion weakened/i.test(pattern))
-                return /\bweaken\b|\bgevşet\b/i.test(userInstruction);
-            if (/coverage threshold reduced/i.test(pattern))
-                return /(?:lower|reduce|düşür|azalt)[^\n.!?]{0,45}(?:coverage|threshold|kapsam|eşik)/iu.test(userInstruction);
+        const hasFailedTestEvidence = Boolean(context.eviden
+…[nc: wire response truncated]…
+struction);
             if (/test file deleted/i.test(pattern))
                 return /(?:delete|remove|sil|kaldır)[^\n.!?]{0,45}\btests?\b|\btests?\b[^\n.!?]{0,45}(?:delete|remove|sil|kaldır)/iu.test(userInstruction);
             if (/CI test step removed/i.test(pattern))
@@ -320,7 +297,7 @@ export const noCheatRule = {
                     messageSnippet: extractSnippet(code, match.index, match[0].length),
                     description: `Weakened test detected in ${filePath ?? "test code"}`,
                     confidence: directPatternsBlock ? "high" : "medium",
-                }, directPatternsBlock);
+                }, directPatternsBlock || pattern.alwaysBlock === true);
             }
         };
         for (const msg of context.currentTurn) {

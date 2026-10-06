@@ -318,119 +318,9 @@ export class GuardEngine {
     const isSubagent = options?.isSubagent ?? inferredSubagent;
     const firstCurrentMessage = currentTurn[0];
     if (!firstCurrentMessage) {
-      return { decision: "pass", results: [] };
-    }
+    
+…[nc: wire response truncated]…
 
-    const contract = extractTaskContract(currentTurn);
-    const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
-    const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
-    const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
-      ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
-      : currentTurn;
-    // Reinspect only new work for the other rules; the completion gate alone
-    // needs the full human-turn history to evaluate progress across rounds.
-    const freshEvidence = freshTurn === currentTurn
-      ? evidence
-      : collectTurnEvidence(freshTurn, directory, snapshots);
-    const pendingRules = isRemediationResponse
-      ? this.sessionState.getPendingRemediation(sessionID, turnKey) ?? []
-      : [];
-    const pendingFiles = isRemediationResponse
-      ? this.sessionState.getPendingRemediationFiles(sessionID, turnKey)
-      : [];
-    const results: RuleResult[] = [];
-    const blockingPrompts: string[] = [];
-    const blockingResults: RuleResult[] = [];
-
-    for (const [ruleId, rule] of this.rules.entries()) {
-      const isCompletionGate = ruleId === "task/completion-gate";
-      const ruleSetting = this.config.rules?.[ruleId];
-      const ruleConfig = sanitizeRuleConfig(
-        typeof ruleSetting === "object" ? ruleSetting : {}
-      );
-      const defaultSetting = DEFAULT_CONFIG.rules?.[ruleId];
-      const configuredSeverity =
-        typeof ruleSetting === "string"
-          ? normalizeSeverity(ruleSetting)
-          : normalizeSeverity(
-              ruleSetting &&
-                typeof ruleSetting === "object" &&
-                !Array.isArray(ruleSetting)
-                ? (ruleSetting as GuardRuleConfig).severity
-                : undefined
-            );
-      const explicitlyInvalidSeverity =
-        (typeof ruleSetting === "string" &&
-          normalizeSeverity(ruleSetting) === undefined) ||
-        (ruleSetting &&
-          typeof ruleSetting === "object" &&
-          !Array.isArray(ruleSetting) &&
-          "severity" in ruleSetting &&
-          (ruleSetting as GuardRuleConfig).severity !== undefined &&
-          normalizeSeverity((ruleSetting as GuardRuleConfig).severity) ===
-            undefined);
-      const defaultSeverity =
-        normalizeSeverity(defaultSetting) ??
-        normalizeSeverity(
-          defaultSetting && typeof defaultSetting === "object"
-            ? defaultSetting.severity
-            : undefined
-        ) ??
-        "error";
-      // Invalid explicit severity is a config error. Fail open to warn instead
-      // of unexpectedly turning a typo into a blocking rule.
-      const severity = explicitlyInvalidSeverity
-        ? "warn"
-        : configuredSeverity ?? defaultSeverity;
-
-      if (severity === "off") continue;
-
-      const context: TurnInspectionContext = {
-        sessionID,
-        directory,
-        messages,
-        currentTurn: isCompletionGate ? currentTurn : freshTurn,
-        isSubagent,
-        ruleConfig,
-        evidence: isCompletionGate ? evidence : freshEvidence,
-      };
-
-      const res = await rule.inspect(context);
-      results.push(res);
-
-      if (
-        severity !== "warn" &&
-        res.decision === "block" &&
-        res.remediationPrompt
-      ) {
-        blockingPrompts.push(res.remediationPrompt);
-        blockingResults.push(res);
-      }
-    }
-
-    this.inspectedMessages.set(sessionID, messageID);
-
-    if (blockingPrompts.length > 0) {
-      const completion = blockingResults.find(
-        (result) => result.ruleId === "task/completion-gate"
-      );
-      if (completion && contract?.iterativeReview) {
-        const configured = this.config.iterationBudget;
-        const budget = typeof configured === "number" && Number.isFinite(configured)
-          ? Math.max(0, Math.min(5, Math.floor(configured)))
-          : 3;
-        // A second prompt requires observable progress. A repeated final
-        // message without any new tool work cannot cause an infinite loop.
-        const progressKey = `${latestMutationSequence(evidence)}:${evidence.records.length}`;
-        if (!this.sessionState.canContinue(sessionID, turnKey, progressKey, budget)) {
-          return { decision: "pass", results };
-        }
-        this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
-        return {
-          decision: "block",
-          results,
-          combinedRemediationPrompt:
-            `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
           rollback: () => {
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
@@ -565,6 +455,12 @@ export class GuardEngine {
           for (const ruleID of sourceRules) {
             const rule = this.rules.get(ruleID);
             if (!rule) { verified = false; break; }
+            const configuredRule = this.config.rules?.[ruleID];
+            const recheckRuleConfig = sanitizeRuleConfig(
+              configuredRule && typeof configuredRule === "object" && !Array.isArray(configuredRule)
+                ? configuredRule
+                : {}
+            );
             const checked = await rule.inspect({
               sessionID, directory, messages,
               currentTurn: [firstCurrentMessage, {
@@ -572,7 +468,7 @@ export class GuardEngine {
                 parts: [{ type: "tool", tool: "write_to_file",
                   state: { status: "completed", input: { path: rel, content } } }],
               }],
-              isSubagent, ruleConfig: {}, evidence: freshEvidence,
+              isSubagent, ruleConfig: recheckRuleConfig, evidence: freshEvidence,
             });
             if (checked.findings.length > 0) { verified = false; break; }
           }

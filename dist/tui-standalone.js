@@ -158,14 +158,16 @@ function GuardianSidebar(props) {
   });
   const [hasUpdate, setHasUpdate] = createSignal(false);
   const [latestVersion, setLatestVersion] = createSignal(undefined);
-  checkGuardianUpdate({
-    allowDevelopment: true
-  }).then(info => {
-    if (!disposed && info) {
-      setHasUpdate(true);
-      setLatestVersion(info.latest);
-    }
-  }).catch(() => {});
+  if (props.checkUpdates !== false) {
+    checkGuardianUpdate({
+      allowDevelopment: true
+    }).then(info => {
+      if (!disposed && info) {
+        setHasUpdate(true);
+        setLatestVersion(info.latest);
+      }
+    }).catch(() => {});
+  }
   const successColor = () => props.colors.success ?? props.colors.accent;
   const warningColor = () => props.colors.warning ?? props.colors.accent;
   const errorColor = () => props.colors.error ?? props.colors.accent;
@@ -271,81 +273,9 @@ function GuardianSidebar(props) {
           _el$13 = _$createElement("b");
         _$insertNode(_el$12, _el$13);
         _$insertNode(_el$13, _$createTextNode(` (↑)`));
-        _$effect(_$p => _$setProp(_el$12, "fg", successColor(), _$p));
-        return _el$12;
-      }
-    }), null);
-    _$insert(_el$5, _$createComponent(Show, {
-      get when() {
-        return _$memo(() => !!hasUpdate())() && latestVersion();
-      },
-      get children() {
-        return _$createComponent(StatRow, {
-          label: "Update available",
-          get value() {
-            return `v${latestVersion()}`;
-          },
-          get valueColor() {
-            return successColor();
-          },
-          get muted() {
-            return props.colors.muted;
-          },
-          get text() {
-            return props.colors.text;
-          }
-        });
-      }
-    }), null);
-    _$insert(_el$5, _$createComponent(Show, {
-      get when() {
-        return !open();
-      },
-      get children() {
-        return [_$createComponent(StatRow, {
-          label: "Status",
-          get value() {
-            return statusLabel();
-          },
-          get valueColor() {
-            return statusColor();
-          },
-          get muted() {
-            return props.colors.muted;
-          },
-          get text() {
-            return props.colors.text;
-          }
-        }), _$createComponent(StatRow, {
-          label: "Interventions",
-          get value() {
-            return `${status().warnings}w · ${status().remediations}r`;
-          },
-          get muted() {
-            return props.colors.muted;
-          },
-          get text() {
-            return props.colors.text;
-          }
-        })];
-      }
-    }), null);
-    _$insert(_el$5, _$createComponent(Show, {
-      get when() {
-        return open();
-      },
-      get children() {
-        return [_$createComponent(StatRow, {
-          label: "Mode",
-          value: "Autonomous",
-          get valueColor() {
-            return props.colors.accent;
-          },
-          get muted() {
-            return props.colors.muted;
-          },
-          get text() {
-            return props.colors.text;
+        _$
+…[nc: wire response truncated]…
+lors.text;
           }
         }), _$createComponent(StatRow, {
           label: "Preflight",
@@ -503,6 +433,9 @@ const v2Plugin = {
       render: () => _$createComponent(GuardianSidebar, {
         directory: directory,
         currentDirectory: () => v2CommandDirectory(context, directory),
+        get checkUpdates() {
+          return config.updateNotice?.enabled !== false;
+        },
         get colors() {
           return {
             accent: context.theme.status?.success?.base ?? context.theme.text.base,
@@ -532,6 +465,9 @@ const v1Tui = async api => {
         return _$createComponent(GuardianSidebar, {
           directory: directory,
           currentDirectory: () => api.state.path.directory,
+          get checkUpdates() {
+            return config.updateNotice?.enabled !== false;
+          },
           get colors() {
             return {
               accent: api.theme.current.primary,

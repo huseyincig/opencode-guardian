@@ -137,30 +137,92 @@ export function evaluateFileMutationPreflight(tool, input) {
     }
     return undefined;
 }
+function shellWords(text) {
+    const words = [];
+    const pattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
+    let match = pattern.exec(text);
+    while (match) {
+        words.push(match[1] ?? match[2] ?? match[3] ?? "");
+        match = pattern.exec(text);
+    }
+    return words.filter(Boolean);
+}
+function normalizeCommitMessage(value) {
+    let message = value.trim().replace(/^=/, "");
+    if (message.length >= 2 &&
+        ((message.startsWith('"') && message.endsWith('"')) ||
+            (message.startsWith("'") && message.endsWith("'")))) {
+        message = message.slice(1, -1);
+    }
+    return message.trim();
+}
+export function extractGitCommitMessage(command) {
+    const match = /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+commit\b([^\n;&|]*)/i.exec(command);
+    if (!match)
+        return undefined;
+    const words = shellWords(match[1] ?? "");
+    for (let index = 0; index < words.length; index++) {
+        const word = words[index] ?? "";
+        if (word === "-m" || word === "--message") {
+            const next = words[index + 1];
+            return next === undefined ? undefined : normalizeCommitMessage(next);
+        }
+        if (word.startsWith("--message=")) {
+            return normalizeCommitMessage(word.slice("--message=".length));
+        }
+        if (/^-[^-]/.test(word)) {
+            const messageOption = word.indexOf("m", 1);
+            if (messageOption >= 0) {
+                const attached = word.slice(messageOption + 1);
+                if (attached)
+                    return normalizeCommitMessage(attached);
+                const next = words[index + 1];
+                return next === undefined ? undefined : normalizeCommitMessage(next);
+            }
+        }
+    }
+    return undefined;
+}
 export function isLazyCommitMessage(command) {
-    const trimmed = command.trim();
-    const commitMatch = /\bgit\s+commit\b[^\n;&|]*-(?:m|-message)(?:=|\s+)(["'])([\s\S]*?)\1/i.exec(trimmed) ??
-        /\bgit\s+commit\b[^\n;&|]*-m\s+([^\s;&|]+)/i.exec(trimmed);
-    if (!commitMatch)
+    const msg = extractGitCommitMessage(command);
+    if (msg === undefined)
         return false;
-    const msg = (commitMatch[2] ?? commitMatch[1] ?? "").trim();
     if (msg.length < 4)
         return true;
     return /^(?:fix|update|wip|done|test|temp|changes|commit|asdf|minor|stuff|work|misc|foo|bar|checkpoint|save|tmp|quick\s*fix|bug\s*fix|hotfix)$/i.test(msg);
 }
+function npmPackageNameFromSpec(spec) {
+    const value = spec.trim();
+    if (!value)
+        return undefined;
+    if (/^(?:\.{1,2}(?:\/|$)|\/|~\/|file:|link:|workspace:|https?:|git(?:\+|:)|github:|ssh:)/i.test(value)) {
+        return undefined;
+    }
+    if (value.startsWith("@")) {
+        const slash = value.indexOf("/");
+        if (slash < 2)
+            return value;
+        const versionAt = value.indexOf("@", slash + 1);
+        return versionAt > slash ? value.slice(0, versionAt) : value;
+    }
+    const versionAt = value.indexOf("@", 1);
+    return versionAt > 0 ? value.slice(0, versionAt) : value;
+}
+function suspiciousNpmPackageName(name) {
+    return (/[A-Z]/.test(name) ||
+        /(?:-official|-security-patch|-security-update|-fixed-version|-patched-release)$/i.test(name));
+}
 export function isHallucinatedOrMalformedPackageInstall(command) {
     const trimmed = command.trim();
-    const npmMatch = /(?:^|[;&|]\s*)(?:npm\s+(?:i|install|add)|pnpm\s+add|yarn\s+add)\s+([^\n;&|]+)/i.exec(trimmed);
-    if (npmMatch && npmMatch[1]) {
-        const rawArgs = npmMatch[1].trim().split(/\s+/);
-        for (const arg of rawArgs) {
-            if (!arg || arg.startsWith("-"))
-                continue;
-            if (!arg.startsWith("@") && /[A-Z]/.test(arg))
-                return true;
-            if (/(?:-official|-security-patch|-security-update|-fixed-version|-patched-release)$/i.test(arg))
-                return true;
-        }
+    const npmMatch = /(?:^|[;&|]\s*)(?:sudo\s+)?(?:npm\s+(?:i|install|add)|pnpm\s+add|yarn\s+add)\s+([^\n;&|]+)/i.exec(trimmed);
+    if (!npmMatch?.[1])
+        return false;
+    for (const arg of shellWords(npmMatch[1])) {
+        if (!arg || arg.startsWith("-"))
+            continue;
+        const packageName = npmPackageNameFromSpec(arg);
+        if (packageName && suspiciousNpmPackageName(packageName))
+            return true;
     }
     return false;
 }

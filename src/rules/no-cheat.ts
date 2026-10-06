@@ -9,7 +9,7 @@ import { extractLikelyShellMutation } from "../tool-input.js";
 /**
  * High-confidence patterns that directly disable or bypass tests.
  */
-export const TEST_CHEAT_PATTERNS: { regex: RegExp; name: string }[] = [
+export const TEST_CHEAT_PATTERNS: { regex: RegExp; name: string; alwaysBlock?: boolean }[] = [
   {
     regex: /\b(?:test|it|describe)\.skip\s*\(/,
     name: "test.skip() / it.skip() (JS/TS)",
@@ -51,12 +51,14 @@ export const TEST_CHEAT_PATTERNS: { regex: RegExp; name: string }[] = [
     name: "commented-out assertion (expect / assert)",
   },
   {
-    regex: /\b(?:test|it)\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(?:\(\s*\)|function\s*\([^)]*\))\s*=>?\s*\{\s*(?:\/\/.*|\/\*[\s\S]*?\*\/|\s)*\}/,
+    regex: /\b(?:test|it)\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*|function\s*\([^)]*\)\s*)\{\s*(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|\s)*\}/,
     name: "empty test block without assertions (JS/TS)",
+    alwaysBlock: true,
   },
   {
     regex: /def\s+test_\w+\s*\([^)]*\)\s*:\s*(?:#[^\n]*\n\s*)*(?:pass|\.\.\.|return)\s*(?:\n|$)(?!\s+[a-zA-Z])/,
     name: "empty def test_...: pass without assertions (Python)",
+    alwaysBlock: true,
   },
 ];
 
@@ -398,7 +400,7 @@ export const noCheatRule: GuardRule = {
             description: `Weakened test detected in ${filePath ?? "test code"}`,
             confidence: directPatternsBlock ? "high" : "medium",
           },
-          directPatternsBlock
+          directPatternsBlock || pattern.alwaysBlock === true
         );
       }
     };

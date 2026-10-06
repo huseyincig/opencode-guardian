@@ -168,6 +168,14 @@ export const circuitBreakerRule: GuardRule = {
       )
       .join("\n");
 
+    const MISSING_INFO_PATTERN =
+      /\b(?:auth|unauthorized|forbidden|401|403|credential|token|api[_-]?key|secret|password|missing\s+(?:env|environment\s+variable|input|file|config|permission))\b/i;
+    const needsUserClarification = findings.some(
+      (f) =>
+        MISSING_INFO_PATTERN.test(f.messageSnippet) ||
+        MISSING_INFO_PATTERN.test(f.description)
+    );
+
     return {
       ruleId: "runtime/circuit-breaker",
       decision: "block",
@@ -175,6 +183,15 @@ export const circuitBreakerRule: GuardRule = {
       remediationPrompt:
         `Circuit breaker tripped! Repetitive error loop detected:\n${list}\n\n` +
         `Stop repeating the same failing approach. Reconsider the hypothesis, inspect the root cause, change strategy, or ask the user for genuinely missing information.`,
+      ...(needsUserClarification
+        ? {
+            handoff: {
+              required: true as const,
+              kind: "clarification" as const,
+              autoSelect: "allowed" as const,
+            },
+          }
+        : {}),
     };
   },
 };

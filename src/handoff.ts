@@ -93,48 +93,42 @@ export function parseOpenCodeHandoff(text: string): OpenCodeHandoff | null {
 
 /**
  * Analyze blocking rule results and produce an appropriate question handoff if user input/choice is required.
+ * Relies strictly on rules explicitly requesting handoff through `result.handoff`.
  */
 export function createHandoffForBlockingResults(
   results: readonly RuleResult[],
   sessionID: string,
-  turnKey: string
+  turnKey: string,
+  sequence = 1
 ): OpenCodeHandoff | null {
-  const ruleIds = results.map((r) => r.ruleId);
-  const prompts = results
-    .map((r) => r.remediationPrompt ?? "")
-    .filter(Boolean)
-    .join("\n");
+  const blockingResults = results.filter((r) => r.decision === "block");
+  if (blockingResults.length === 0) return null;
+
+  const ruleIds = blockingResults.map((r) => r.ruleId);
+  const handoffRequests = blockingResults
+    .map((r) => r.handoff)
+    .filter((h): h is NonNullable<typeof h> => Boolean(h && h.required));
 
   let kind: HandoffKind | null = null;
   let autoSelect: HandoffAutoSelect = "allowed";
 
-  // 1. Destructive operations: strict human approval required, auto-selection is forbidden.
-  if (ruleIds.includes("safety/destructive-operations")) {
-    kind = "approval";
-    autoSelect = "forbidden";
-  } else if (ruleIds.includes("runtime/circuit-breaker")) {
-    // 2. Circuit breaker loop: clarify strategy or missing information with user.
-    kind = "clarification";
-    autoSelect = "allowed";
-  } else if (ruleIds.includes("task/instruction-fidelity")) {
-    // 3. Instruction conflict or user choice required.
-    kind = "choice";
-    autoSelect = "allowed";
-  } else if (/(?:request confirmation|explicit confirmation|onay iste|kullanıcı onayı)/i.test(prompts)) {
-    kind = "approval";
-    autoSelect = "forbidden";
-  } else if (/(?:choice|choose|which approach|seçim|hangisini)/i.test(prompts)) {
-    kind = "choice";
-    autoSelect = "allowed";
-  } else if (/(?:ask the user|kullanıcıya sor|clarify with the user)/i.test(prompts)) {
-    kind = "clarification";
-    autoSelect = "allowed";
+  if (handoffRequests.length > 0) {
+    if (handoffRequests.some((h) => h.kind === "approval" || h.autoSelect === "forbidden")) {
+      kind = "approval";
+      autoSelect = "forbidden";
+    } else if (handoffRequests.some((h) => h.kind === "choice")) {
+      kind = "choice";
+      autoSelect = "allowed";
+    } else if (handoffRequests.some((h) => h.kind === "clarification")) {
+      kind = "clarification";
+      autoSelect = "allowed";
+    }
   }
 
   if (!kind) return null;
 
   const handoffHash = createHash("sha256")
-    .update(`${sessionID}:${turnKey}:${ruleIds.join(",")}`)
+    .update(`${sessionID}:${turnKey}:${sequence}:${ruleIds.join(",")}`)
     .digest("hex")
     .slice(0, 10);
   const handoffId = `gq_${handoffHash}`;

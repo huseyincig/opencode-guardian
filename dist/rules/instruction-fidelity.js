@@ -72,6 +72,11 @@ export const instructionFidelityRule = {
             findings: [finding],
             ...(advisory ? {} : {
                 remediationPrompt: "Re-evaluate the current explicit user request. Do not treat an earlier pause or deferral as a permanent prohibition. Perform the requested work if otherwise permitted; if a genuine conflict prevents it, identify the conflicting instruction precisely and ask the user rather than silently declining.",
+                handoff: {
+                    required: true,
+                    kind: "choice",
+                    autoSelect: "allowed",
+                },
             }),
         };
     },

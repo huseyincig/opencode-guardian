@@ -128,11 +128,18 @@ export interface RuleFinding {
   confidence?: "low" | "medium" | "high";
 }
 
+export interface RuleHandoffRequirement {
+  required: true;
+  kind: "clarification" | "choice" | "approval";
+  autoSelect: "allowed" | "forbidden";
+}
+
 export interface RuleResult {
   ruleId: string;
   decision: "pass" | "block";
   findings: RuleFinding[];
   remediationPrompt?: string;
+  handoff?: RuleHandoffRequirement;
 }
 
 export interface GuardRule {

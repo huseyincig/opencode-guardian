@@ -454,6 +454,11 @@ export const destructiveOperationsRule: GuardRule = {
       remediationPrompt:
         `Destructive or opaque shell activity needs review:\n${list}\n\n` +
         `Do not perform destructive repository, filesystem, package-registry, database, or infrastructure actions without explicit authorization. A decoded shell payload cannot be certified safe from the visible command; inspect it before running, use a constrained environment, or request confirmation.`,
+      handoff: {
+        required: true,
+        kind: "approval",
+        autoSelect: "forbidden",
+      },
     };
   },
 };

@@ -9,6 +9,7 @@ export class SessionStateStore {
                 fingerprints: new Set(),
                 continuationCount: 0,
                 continuationKeys: new Set(),
+                handoffSequence: 0,
                 ...(existing?.activeHandoff ? { activeHandoff: existing.activeHandoff } : {}),
             };
             this.sessions.set(sessionID, next);
@@ -91,6 +92,11 @@ export class SessionStateStore {
         if (state) {
             delete state.activeHandoff;
         }
+    }
+    nextHandoffSequence(sessionID, turnKey) {
+        const state = this.beginTurn(sessionID, turnKey);
+        state.handoffSequence = (state.handoffSequence ?? 0) + 1;
+        return state.handoffSequence;
     }
     forget(sessionID) {
         this.sessions.delete(sessionID);

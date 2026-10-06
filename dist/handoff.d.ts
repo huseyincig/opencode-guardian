@@ -32,8 +32,9 @@ export declare function formatOpenCodeHandoff(handoff: Omit<OpenCodeHandoff, "ve
 export declare function parseOpenCodeHandoff(text: string): OpenCodeHandoff | null;
 /**
  * Analyze blocking rule results and produce an appropriate question handoff if user input/choice is required.
+ * Relies strictly on rules explicitly requesting handoff through `result.handoff`.
  */
-export declare function createHandoffForBlockingResults(results: readonly RuleResult[], sessionID: string, turnKey: string): OpenCodeHandoff | null;
+export declare function createHandoffForBlockingResults(results: readonly RuleResult[], sessionID: string, turnKey: string, sequence?: number): OpenCodeHandoff | null;
 /**
  * Register Guardian capability in the global OpenCode coordination registry.
  */

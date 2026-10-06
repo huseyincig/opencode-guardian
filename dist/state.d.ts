@@ -13,6 +13,7 @@ interface SessionState {
     pendingRemediationRules?: string[];
     pendingRemediationFiles?: string[];
     activeHandoff?: HandoffTrackingState;
+    handoffSequence: number;
 }
 export declare class SessionStateStore {
     private readonly sessions;
@@ -30,6 +31,7 @@ export declare class SessionStateStore {
     setActiveHandoff(sessionID: string, handoff: HandoffTrackingState): void;
     getActiveHandoff(sessionID: string): HandoffTrackingState | undefined;
     clearActiveHandoff(sessionID: string): void;
+    nextHandoffSequence(sessionID: string, turnKey: string): number;
     forget(sessionID: string): void;
 }
 export {};

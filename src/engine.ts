@@ -175,6 +175,22 @@ function isGuardianRemediationMessage(message: SessionMessage): boolean {
   );
 }
 
+export const NATIVE_QUESTION_TOOLS = new Set([
+  "ask_question",
+  "question",
+  "form",
+  "form_create",
+  "create_form",
+  "session.form",
+]);
+
+function isNativeQuestionTool(toolRaw: string): boolean {
+  if (!toolRaw) return false;
+  const name = toolRaw.toLowerCase().trim();
+  const baseName = name.includes(".") ? (name.split(".").pop() ?? name) : name;
+  return NATIVE_QUESTION_TOOLS.has(name) || NATIVE_QUESTION_TOOLS.has(baseName);
+}
+
 export function extractCurrentTurn(messages: SessionMessage[]): {
   isSubagent: boolean;
   isRemediationResponse: boolean;
@@ -344,15 +360,13 @@ export class GuardEngine {
       const askedQuestion = currentTurn.some((msg) =>
         msg.info.role === "assistant" &&
         msg.parts?.some((part) => {
-          const toolRaw = typeof part.tool === "string" ? part.tool : typeof part.name === "string" ? part.name : "";
-          const name = toolRaw.toLowerCase();
-          return (
-            name === "ask_question" ||
-            name === "question" ||
-            name.endsWith(".ask_question") ||
-            name.endsWith(".question") ||
-            name.includes("form")
-          );
+          const toolRaw =
+            typeof part.tool === "string"
+              ? part.tool
+              : typeof part.name === "string"
+              ? part.name
+              : "";
+          return isNativeQuestionTool(toolRaw);
         })
       );
       if (askedQuestion) {
@@ -469,8 +483,9 @@ export class GuardEngine {
           return { decision: "pass", results };
         }
         this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
+        const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
         const handoff = !isSubagent
-          ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey)
+          ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey, sequence)
           : null;
         if (handoff) {
           this.sessionState.setActiveHandoff(sessionID, {
@@ -537,8 +552,9 @@ export class GuardEngine {
         blockingResults.map((r) => r.ruleId),
         [...(evidence.mutatedFiles ?? [])]
       );
+      const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
       const handoff = !isSubagent
-        ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey)
+        ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey, sequence)
         : null;
       if (handoff) {
         this.sessionState.setActiveHandoff(sessionID, {

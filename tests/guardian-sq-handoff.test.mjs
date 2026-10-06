@@ -51,6 +51,11 @@ test("guardian-sq handoff: destructive operations produce approval with forbidde
       decision: "block",
       findings: [{ ruleId: "safety/destructive-operations", pattern: "rm -rf", confidence: "high" }],
       remediationPrompt: "Destructive operation needs confirmation.",
+      handoff: {
+        required: true,
+        kind: "approval",
+        autoSelect: "forbidden",
+      },
     },
   ];
   const handoff = createHandoffForBlockingResults(results, "sess-1", "turn-1");
@@ -60,34 +65,156 @@ test("guardian-sq handoff: destructive operations produce approval with forbidde
   assert.ok(handoff.handoffId.startsWith("gq_"));
 });
 
-test("guardian-sq handoff: circuit breaker produces clarification with allowed auto-selection", () => {
-  const results = [
+test("guardian-sq handoff: circuit breaker produces clarification only when missing info is needed", () => {
+  const resultsWithClarification = [
     {
       ruleId: "runtime/circuit-breaker",
       decision: "block",
       findings: [{ ruleId: "runtime/circuit-breaker", pattern: "loop", confidence: "high" }],
       remediationPrompt: "Stop repeating the same failing approach. Ask the user for missing info.",
+      handoff: {
+        required: true,
+        kind: "clarification",
+        autoSelect: "allowed",
+      },
     },
   ];
-  const handoff = createHandoffForBlockingResults(results, "sess-2", "turn-1");
-  assert.ok(handoff);
-  assert.equal(handoff.kind, "clarification");
-  assert.equal(handoff.autoSelect, "allowed");
+  const handoff1 = createHandoffForBlockingResults(resultsWithClarification, "sess-2", "turn-1");
+  assert.ok(handoff1);
+  assert.equal(handoff1.kind, "clarification");
+  assert.equal(handoff1.autoSelect, "allowed");
+
+  const resultsAutonomous = [
+    {
+      ruleId: "runtime/circuit-breaker",
+      decision: "block",
+      findings: [{ ruleId: "runtime/circuit-breaker", pattern: "loop", confidence: "high" }],
+      remediationPrompt: "Stop repeating the same failing approach. Try a different test strategy.",
+    },
+  ];
+  const handoff2 = createHandoffForBlockingResults(resultsAutonomous, "sess-2", "turn-1");
+  assert.equal(handoff2, null, "Autonomous loop breaker must NOT generate a question handoff");
 });
 
-test("guardian-sq handoff: instruction fidelity produces choice with allowed auto-selection", () => {
-  const results = [
+test("guardian-sq handoff: instruction fidelity produces choice when conflict exists, but NONE on redundant confirmation", () => {
+  const conflictResults = [
     {
       ruleId: "task/instruction-fidelity",
       decision: "block",
       findings: [{ ruleId: "task/instruction-fidelity", pattern: "fidelity", confidence: "high" }],
       remediationPrompt: "A genuine conflict exists. Ask the user which approach to follow.",
+      handoff: {
+        required: true,
+        kind: "choice",
+        autoSelect: "allowed",
+      },
     },
   ];
-  const handoff = createHandoffForBlockingResults(results, "sess-3", "turn-1");
+  const handoff = createHandoffForBlockingResults(conflictResults, "sess-3", "turn-1");
   assert.ok(handoff);
   assert.equal(handoff.kind, "choice");
   assert.equal(handoff.autoSelect, "allowed");
+
+  const redundantResults = [
+    {
+      ruleId: "task/instruction-fidelity",
+      decision: "block",
+      findings: [{ ruleId: "task/instruction-fidelity", pattern: "redundant", confidence: "high" }],
+      remediationPrompt: "The current user already authorized the requested action. Continue the work instead of asking for redundant confirmation.",
+    },
+  ];
+  const redundantHandoff = createHandoffForBlockingResults(redundantResults, "sess-3", "turn-1");
+  assert.equal(redundantHandoff, null, "Redundant confirmation must NOT generate a handoff");
+});
+
+test("guardian-sq handoff: redundant confirmation in GuardEngine does NOT produce question handoff", async () => {
+  const engine = new GuardEngine({
+    enabled: true,
+    rules: {
+      "task/instruction-fidelity": "error",
+    },
+  });
+
+  const sessionID = "sess-redundant-probe";
+  const messages = [
+    {
+      info: { id: "u-1", role: "user" },
+      parts: [{ type: "text", text: "Implement the requested feature now." }],
+    },
+    {
+      info: { id: "a-1", role: "assistant" },
+      parts: [{ type: "text", text: "Would you like me to proceed with implementing this?" }],
+    },
+  ];
+
+  const result = await engine.inspect(sessionID, "/tmp", messages, undefined, { isSubagent: false });
+  assert.equal(result.decision, "block");
+  assert.ok(result.combinedRemediationPrompt?.includes("Continue the work instead of asking for redundant confirmation."));
+  assert.equal(result.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"), false, "Redundant confirmation remediation must NOT include [OPENCODE_HANDOFF:v1]");
+  assert.equal(engine.sessionState.getActiveHandoff(sessionID), undefined);
+});
+
+test("guardian-sq handoff: non-question tools like terraform_plan do NOT satisfy handoff", async () => {
+  const engine = new GuardEngine({
+    enabled: true,
+    rules: {
+      "safety/destructive-operations": "error",
+    },
+  });
+
+  const sessionID = "sess-terraform-no-question";
+  const turn1Messages = [
+    {
+      info: { id: "u-1", role: "user" },
+      parts: [{ type: "text", text: "Please clean up the temp directory" }],
+    },
+    {
+      info: { id: "a-1", role: "assistant" },
+      parts: [
+        {
+          type: "tool",
+          name: "bash",
+          tool: "bash",
+          state: {
+            input: { command: "rm -rf /" },
+            status: "completed",
+          },
+        },
+      ],
+    },
+  ];
+
+  const turn1Result = await engine.inspect(sessionID, "/tmp", turn1Messages, undefined, { isSubagent: false });
+  assert.equal(turn1Result.decision, "block");
+  assert.ok(turn1Result.combinedRemediationPrompt?.includes("[OPENCODE_HANDOFF:v1]"));
+  assert.equal(engine.sessionState.getActiveHandoff(sessionID)?.status, "handed_off");
+
+  // Assistant invokes terraform_plan
+  const turn2Messages = [
+    ...turn1Messages,
+    {
+      info: { id: "rem-1", role: "user" },
+      parts: [{ type: "text", text: turn1Result.combinedRemediationPrompt }],
+    },
+    {
+      info: { id: "a-2", role: "assistant" },
+      parts: [
+        {
+          type: "tool",
+          name: "terraform_plan",
+          tool: "terraform_plan",
+          state: {
+            input: { args: [] },
+            status: "completed",
+          },
+        },
+      ],
+    },
+  ];
+
+  // Engine must NOT treat terraform_plan as a question tool!
+  await engine.inspect(sessionID, "/tmp", turn2Messages, undefined, { isSubagent: false });
+  assert.notEqual(engine.sessionState.getActiveHandoff(sessionID)?.status, "question_presented");
 });
 
 test("guardian-sq handoff: GuardEngine integrates handoff header into remediation prompt", async () => {

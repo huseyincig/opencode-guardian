@@ -14,6 +14,7 @@ interface SessionState {
   pendingRemediationRules?: string[];
   pendingRemediationFiles?: string[];
   activeHandoff?: HandoffTrackingState;
+  handoffSequence: number;
 }
 
 export class SessionStateStore {
@@ -28,6 +29,7 @@ export class SessionStateStore {
         fingerprints: new Set<string>(),
         continuationCount: 0,
         continuationKeys: new Set<string>(),
+        handoffSequence: 0,
         ...(existing?.activeHandoff ? { activeHandoff: existing.activeHandoff } : {}),
       };
       this.sessions.set(sessionID, next);
@@ -155,6 +157,12 @@ export class SessionStateStore {
     if (state) {
       delete state.activeHandoff;
     }
+  }
+
+  nextHandoffSequence(sessionID: string, turnKey: string): number {
+    const state = this.beginTurn(sessionID, turnKey);
+    state.handoffSequence = (state.handoffSequence ?? 0) + 1;
+    return state.handoffSequence;
   }
 
   forget(sessionID: string): void {

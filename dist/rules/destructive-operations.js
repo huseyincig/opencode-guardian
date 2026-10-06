@@ -51,6 +51,112 @@ function matchesRequestedTargets(request, command) {
         });
     });
 }
+function normalizeLiteralTarget(target) {
+    return target
+        .trim()
+        .replace(/^["'`]|["'`]$/g, "")
+        .replace(/^\.\//, "")
+        .toLowerCase();
+}
+function literalTargetPositions(request, target) {
+    const literal = normalizeLiteralTarget(target);
+    if (!literal)
+        return [];
+    const positions = [];
+    let pos = request.indexOf(literal);
+    while (pos !== -1) {
+        const before = request[pos - 1];
+        const afterAt = pos + literal.length;
+        const after = request[afterAt];
+        const boundary = /[a-z0-9_./@:-]/i;
+        const beforeOK = before === undefined || !boundary.test(before);
+        const sentencePeriod = after === "." &&
+            (request[afterAt + 1] === undefined || /\s/.test(request[afterAt + 1] ?? ""));
+        const afterOK = after === undefined || !boundary.test(after) || sentencePeriod;
+        if (beforeOK && afterOK)
+            positions.push(pos);
+        pos = request.indexOf(literal, pos + 1);
+    }
+    return positions;
+}
+function targetNearContext(request, target, context) {
+    const literal = normalizeLiteralTarget(target);
+    if (!literal)
+        return false;
+    return literalTargetPositions(request, literal).some((pos) => {
+        const start = Math.max(0, pos - 100);
+        const end = Math.min(request.length, pos + literal.length + 100);
+        context.lastIndex = 0;
+        return context.test(request.slice(start, end));
+    });
+}
+function gitScopeAuthorized(request, command) {
+    const scope = /(?:^|\s)-C\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|\n]+))/i.exec(command);
+    const target = scope?.[1] ?? scope?.[2] ?? scope?.[3];
+    if (!target || target === "." || target === "./")
+        return true;
+    return literalTargetPositions(request, target).length > 0;
+}
+function commandTarget(command, pattern) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(command);
+    const target = match?.slice(1).find((value) => Boolean(value));
+    return target ? normalizeLiteralTarget(target) : undefined;
+}
+function simpleShellTokens(text) {
+    const tokens = [];
+    const tokenPattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
+    let match = tokenPattern.exec(text);
+    while (match) {
+        const token = match[1] ?? match[2] ?? match[3];
+        if (token)
+            tokens.push(token);
+        match = tokenPattern.exec(text);
+    }
+    return tokens;
+}
+function commandTargetsAfter(command, prefix) {
+    prefix.lastIndex = 0;
+    const match = prefix.exec(command);
+    if (!match)
+        return [];
+    const start = (match.index ?? 0) + match[0].length;
+    const tail = command.slice(start).split(/(?:&&|\|\||;|\n)/, 1)[0] ?? "";
+    const targets = [];
+    for (const token of simpleShellTokens(tail)) {
+        if (token.startsWith("-"))
+            break;
+        const target = normalizeLiteralTarget(token);
+        if (target)
+            targets.push(target);
+    }
+    return targets;
+}
+function terraformTargets(text) {
+    const targets = [];
+    const pattern = /(?:^|\s)-target(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi;
+    let match = pattern.exec(text);
+    while (match) {
+        const raw = match[1] ?? match[2] ?? match[3] ?? "";
+        const target = normalizeLiteralTarget(raw).replace(/[.!?,]+$/, "");
+        if (target)
+            targets.push(target);
+        match = pattern.exec(text);
+    }
+    return targets;
+}
+function sqlDestructiveTargets(command) {
+    const targets = [];
+    const pattern = /\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\s+(?:if\s+exists\s+)?["'`]?([a-z0-9_.-]+)["'`]?/gi;
+    let match = pattern.exec(command);
+    while (match) {
+        const target = match[1] ? normalizeLiteralTarget(match[1]) : "";
+        if (target)
+            targets.push(target);
+        match = pattern.exec(command);
+    }
+    return targets;
+}
 /** A question about deletion is not permission to perform it.
  * Permit direct "can/could you delete" requests; treat explanations,
  * safety questions and Turkish advice questions as discussion. */
@@ -75,10 +181,12 @@ function explicitlyAuthorized(request, command) {
     if (hasFindDeletion(command))
         return request.trim() === command.trim().toLowerCase();
     if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b/i.test(command)) {
-        return /\b(?:force\s+push|zorla\s+push|--force|force-with-lease)\b/iu.test(request);
+        return (gitScopeAuthorized(request, command) &&
+            /\b(?:force\s+push|zorla\s+push|--force|force-with-lease)\b/iu.test(request));
     }
     if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i.test(command)) {
-        return /\b(?:hard\s+reset|reset(?:le|leyin)?|sıfırla|sıfırlayın)\b/iu.test(request);
+        return (gitScopeAuthorized(request, command) &&
+            /\b(?:hard\s+reset|reset(?:le|leyin)?|sıfırla|sıfırlayın)\b/iu.test(request));
     }
     const cleanInvocation = gitCleanInvocation(command);
     if (cleanInvocation) {
@@ -137,19 +245,41 @@ function explicitlyAuthorized(request, command) {
             /\b(?:projenin|deponun|klasörün|dizinin)\s+tamamını\s+(?:sil|silin)\b/iu.test(request));
     }
     if (/\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b/i.test(command)) {
-        return /\b(?:drop|truncate|delete|remove|sil|kaldır)\b/iu.test(request);
+        const targets = sqlDestructiveTargets(command);
+        return (targets.length > 0 &&
+            /\b(?:drop|truncate|delete|remove|sil|kaldır)\b/iu.test(request) &&
+            targets.every((target) => targetNearContext(request, target, /\b(?:drop|truncate|delete|remove|sil|kaldır|tables?|databases?|schemas?|tablolar?|veritabanı|şema)\b/iu)));
     }
     if (/\bterraform\s+destroy\b/i.test(command)) {
-        return /\b(?:terraform\s+destroy|destroy\s+(?:the\s+)?(?:stack|infra|infrastructure)|altyapıyı\s+(?:sil|yok\s+et))\b/iu.test(request);
+        const actionAuthorized = /\b(?:terraform\s+destroy|destroy\s+(?:the\s+)?(?:stack|infra|infrastructure)|altyapıyı\s+(?:sil|yok\s+et))\b/iu.test(request);
+        if (!actionAuthorized)
+            return false;
+        const requestedTargets = terraformTargets(request);
+        if (requestedTargets.length === 0)
+            return true;
+        const commandTargets = terraformTargets(command);
+        return (commandTargets.length > 0 &&
+            commandTargets.every((target) => requestedTargets.includes(target)));
     }
     if (/\bkubectl\s+delete\s+(?:namespace|ns)\b/i.test(command)) {
-        return /\b(?:delete|remove|sil|kaldır)\b[\s\S]*\b(?:namespace|ns|namespace'i|namespace'ı)\b/iu.test(request);
+        const targets = commandTargetsAfter(command, /\bkubectl\s+delete\s+(?:namespace|ns)\b/i);
+        return (targets.length > 0 &&
+            /\b(?:delete|remove|sil|kaldır)\b[\s\S]*\b(?:namespaces?|ns|namespace'i|namespace'ı)\b/iu.test(request) &&
+            targets.every((target) => targetNearContext(request, target, /\b(?:delete|remove|sil|kaldır|namespaces?|ns)\b/iu)));
     }
     if (/\bnpm\s+unpublish\b/i.test(command)) {
-        return /\b(?:unpublish|yayından\s+kaldır)\b/iu.test(request);
+        const target = commandTarget(command, /\bnpm\s+unpublish\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i);
+        const normalizedTarget = target ?? "";
+        return Boolean(normalizedTarget &&
+            /\b(?:unpublish|yayından\s+kaldır)\b/iu.test(request) &&
+            targetNearContext(request, normalizedTarget, /\b(?:unpublish|yayından\s+kaldır|package|paket)\b/iu));
     }
     if (/\bgh\s+repo\s+delete\b/i.test(command)) {
-        return /\b(?:delete|remove|sil|kaldır)\b[\s\S]*\b(?:repo|repository|depo)\b/iu.test(request);
+        const target = commandTarget(command, /\bgh\s+repo\s+delete\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i);
+        const normalizedTarget = target ?? "";
+        return Boolean(normalizedTarget &&
+            /\b(?:delete|remove|sil|kaldır)\b[\s\S]*\b(?:repo|repository|depo)\b/iu.test(request) &&
+            targetNearContext(request, normalizedTarget, /\b(?:delete|remove|sil|kaldır|repo|repository|depo)\b/iu));
     }
     if (/\bdocker\s+system\s+prune\b/i.test(command)) {
         return /\b(?:docker\s+(?:system\s+)?prune|docker\s+temizle)\b/iu.test(request);

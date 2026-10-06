@@ -102,6 +102,9 @@ function nearestFile(directory, names, dynamicName) {
 }
 function dependenciesFromPackage(pkg) {
     const deps = new Set();
+    if (typeof pkg.name === "string" && pkg.name.trim()) {
+        deps.add(pkg.name.trim());
+    }
     for (const section of [
         pkg.dependencies,
         pkg.devDependencies,
@@ -367,30 +370,46 @@ function loadRustDependencies(directory) {
         const text = fs.readFileSync(manifest.path, "utf8");
         const deps = new Set();
         let inDeps = false;
+        let inPackage = false;
+        let ownCrate = "";
         for (const rawLine of text.split(/\r?\n/)) {
             const line = rawLine.trim();
+            if (line === "[package]") {
+                inPackage = true;
+                inDeps = false;
+                continue;
+            }
             if (/^\[(?:(?:dependencies|dev-dependencies|build-dependencies|workspace\.dependencies)|target\..+\.(?:dependencies|dev-dependencies|build-dependencies))\]$/.test(line)) {
+                inPackage = false;
                 inDeps = true;
                 continue;
             }
             if (/^\[.*\]$/.test(line)) {
+                inPackage = false;
                 inDeps = false;
                 continue;
             }
-            if (!inDeps || !line || line.startsWith("#"))
+            if (!line || line.startsWith("#"))
+                continue;
+            if (inPackage && !ownCrate) {
+                const packageName = /^name\s*=\s*["']([^"']+)["']\s*$/.exec(line)?.[1];
+                if (packageName)
+                    ownCrate = packageName.replace(/-/g, "_");
+            }
+            if (!inDeps)
                 continue;
             const key = /^["']?([A-Za-z0-9_-]+)["']?\s*=/.exec(line)?.[1];
             if (key)
                 deps.add(key.replace(/-/g, "_"));
         }
-        return { deps, root: manifest.root };
+        return { deps, root: manifest.root, ownCrate };
     }
     catch {
         return null;
     }
 }
 function getNodePackageName(importPath) {
-    if (importPath.startsWith("node:"))
+    if (importPath.startsWith("node:") || importPath.startsWith("#"))
         return "";
     if (importPath.startsWith(".") ||
         importPath.startsWith("/") ||
@@ -408,13 +427,42 @@ const JS_IMPORT_REGEXES = [
     /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
     /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
 ];
-function buildJsCodeMask(code) {
+function buildJsCodeMask(code, nestedBlockComments = false, rustRawStrings = false) {
+    // 0 = comment, 1 = executable code, 2 = quoted string/template.
+    // Import scanners use the match start to reject examples embedded in
+    // comments/strings; Go import blocks additionally distinguish real quoted
+    // import paths (2) from quoted text inside comments (0).
     const mask = new Uint8Array(code.length);
     mask.fill(1);
     let i = 0;
     while (i < code.length) {
         const ch = code[i];
         const next = code[i + 1];
+        if (rustRawStrings) {
+            const previous = code[i - 1];
+            const tokenBoundary = i === 0 || !/[A-Za-z0-9_]/.test(previous ?? "");
+            const prefixLength = tokenBoundary && ch === "r"
+                ? 1
+                : tokenBoundary && ch === "b" && next === "r"
+                    ? 2
+                    : 0;
+            if (prefixLength > 0) {
+                let cursor = i + prefixLength;
+                let hashes = 0;
+                while (code[cursor] === "#") {
+                    hashes++;
+                    cursor++;
+                }
+                if (code[cursor] === '"') {
+                    const start = i;
+                    const closing = '"' + "#".repeat(hashes);
+                    const end = code.indexOf(closing, cursor + 1);
+                    i = end === -1 ? code.length : end + closing.length;
+                    mask.fill(2, start, i);
+                    continue;
+                }
+            }
+        }
         if (ch === "/" && next === "/") {
             const start = i;
             i += 2;
@@ -425,13 +473,24 @@ function buildJsCodeMask(code) {
         }
         if (ch === "/" && next === "*") {
             const start = i;
+            let depth = 1;
             i += 2;
-            while (i < code.length &&
-                !(code[i] === "*" && code[i + 1] === "/")) {
+            while (i < code.length && depth > 0) {
+                if (nestedBlockComments &&
+                    code[i] === "/" &&
+                    code[i + 1] === "*") {
+                    depth++;
+                    i += 2;
+                    continue;
+                }
+                if (code[i] === "*" && code[i + 1] === "/") {
+                    depth--;
+                    i += 2;
+                    continue;
+                }
                 i++;
             }
-            i = Math.min(code.length, i + 2);
-            mask.fill(0, start, i);
+            mask.fill(0, start, Math.min(i, code.length));
             continue;
         }
         if (ch === "'" || ch === '"' || ch === "`") {
@@ -449,7 +508,7 @@ function buildJsCodeMask(code) {
                 }
                 i++;
             }
-            mask.fill(0, start, Math.min(i, code.length));
+            mask.fill(2, start, Math.min(i, code.length));
             continue;
         }
         i++;
@@ -546,31 +605,67 @@ function extractPythonImports(code) {
 }
 function extractGoImports(code) {
     const imports = [];
-    for (const match of code.matchAll(/\bimport\s+"([^"]+)"/g)) {
-        const importPath = match[1];
+    const mask = buildJsCodeMask(code);
+    for (const match of code.matchAll(/\bimport\s+(?:(?:[A-Za-z_][\w]*|\.)\s+)?(?:"([^"]+)"|`([^`]+)`)/g)) {
+        const start = match.index;
+        if (start === undefined || mask[start] !== 1)
+            continue;
+        const importPath = match[1] ?? match[2];
         if (importPath)
             imports.push(importPath);
     }
-    for (const block of code.matchAll(/\bimport\s*\(([\s\S]*?)\)/g)) {
-        const body = block[1];
-        if (body === undefined)
+    const blockPattern = /\bimport\s*\(/g;
+    let block = blockPattern.exec(code);
+    while (block !== null) {
+        const blockStart = block.index;
+        if (mask[blockStart] !== 1) {
+            block = blockPattern.exec(code);
             continue;
-        for (const match of body.matchAll(/"([^"]+)"/g)) {
-            const importPath = match[1];
+        }
+        const openParen = code.indexOf("(", blockStart);
+        let closeParen = -1;
+        for (let index = openParen + 1; index < code.length; index++) {
+            if (code[index] === ")" && mask[index] === 1) {
+                closeParen = index;
+                break;
+            }
+        }
+        if (closeParen === -1)
+            break;
+        const bodyStart = openParen + 1;
+        const body = code.slice(bodyStart, closeParen);
+        for (const match of body.matchAll(/(?:"([^"]+)"|`([^`]+)`)/g)) {
+            const relative = match.index;
+            if (relative === undefined || mask[bodyStart + relative] !== 2)
+                continue;
+            const importPath = match[1] ?? match[2];
             if (importPath)
                 imports.push(importPath);
         }
+        blockPattern.lastIndex = closeParen + 1;
+        block = blockPattern.exec(code);
     }
     return imports;
 }
 function extractRustCrates(code) {
     const crates = new Set();
+    const mask = buildJsCodeMask(code, true, true);
     for (const match of code.matchAll(/\bextern\s+crate\s+([A-Za-z_][\w]*)\s*;/g)) {
+        const start = match.index;
+        if (start === undefined || mask[start] !== 1)
+            continue;
         const crate = match[1];
         if (crate)
             crates.add(crate);
     }
     for (const match of code.matchAll(/(?:^|\n)\s*use\s+([A-Za-z_][\w]*)::/g)) {
+        const matchStart = match.index;
+        if (matchStart === undefined)
+            continue;
+        const useOffset = match[0].search(/\buse\b/);
+        const start = useOffset < 0 ? -1 : matchStart + useOffset;
+        if (start < 0 || mask[start] !== 1)
+            continue;
         const crate = match[1];
         if (crate)
             crates.add(crate);
@@ -727,9 +822,11 @@ export const noGhostDepsRule = {
                     return;
                 const localMods = new Set([...code.matchAll(/(?:^|\n)\s*mod\s+([A-Za-z_][\w]*)\s*;/g)].map((match) => match[1]));
                 for (const crateName of extractRustCrates(code)) {
-                    if (["std", "core", "alloc", "crate", "self", "super"].includes(crateName)) {
+                    if (["std", "core", "alloc", "proc_macro", "crate", "self", "super"].includes(crateName)) {
                         continue;
                     }
+                    if (manifest.ownCrate && crateName === manifest.ownCrate)
+                        continue;
                     if (localMods.has(crateName))
                         continue;
                     if (localRustModuleExists(manifest.root, crateName))

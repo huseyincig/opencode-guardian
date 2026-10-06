@@ -6,6 +6,7 @@ import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
+import { registerGuardianCapability } from "./handoff.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -33,6 +34,7 @@ export * from "./telemetry.js";
 export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
+export * from "./handoff.js";
 function stringifyV2ToolContent(content) {
     if (!Array.isArray(content))
         return "";
@@ -367,6 +369,7 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
         throw new GuardianPreflightError(finding);
 }
 const server = async ({ client, directory }) => {
+    registerGuardianCapability();
     const config = loadConfig(directory);
     if (config.enabled === false) {
         recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "disabled" }, directory);
@@ -628,6 +631,7 @@ const server = async ({ client, directory }) => {
     };
 };
 const setup = async (context) => {
+    registerGuardianCapability();
     // Transition builds may call setup() with a partial v2 context.
     // Resolve the explicit security setting first: strict preflight must never
     // silently disappear merely because another v2 capability is unavailable.

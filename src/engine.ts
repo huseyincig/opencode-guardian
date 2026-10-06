@@ -27,8 +27,19 @@ import { SessionStateStore } from "./state.js";
 import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence } from "./task-contract.js";
+import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
 
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
+
+function composeCombinedRemediationPrompt(
+  blockingPrompts: string[],
+  handoff: OpenCodeHandoff | null
+): string {
+  if (!handoff) {
+    return `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`;
+  }
+  return `${REMEDIATION_MARKER}\n\n${formatOpenCodeHandoff(handoff)}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
+}
 
 export const BUILTIN_RULES: Record<string, GuardRule> = {
   "discipline/no-evasion": noEvasionRule,
@@ -321,6 +332,38 @@ export class GuardEngine {
       return { decision: "pass", results: [] };
     }
 
+    const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
+    if (activeHandoff?.status === "question_presented") {
+      const hasUserReply = currentTurn.some((msg) =>
+        msg.info.role === "user" && !isGuardianRemediationMessage(msg)
+      );
+      if (hasUserReply) {
+        this.sessionState.clearActiveHandoff(sessionID);
+      }
+    } else if (activeHandoff?.status === "handed_off") {
+      const askedQuestion = currentTurn.some((msg) =>
+        msg.info.role === "assistant" &&
+        msg.parts?.some((part) => {
+          const toolRaw = typeof part.tool === "string" ? part.tool : typeof part.name === "string" ? part.name : "";
+          const name = toolRaw.toLowerCase();
+          return (
+            name === "ask_question" ||
+            name === "question" ||
+            name.endsWith(".ask_question") ||
+            name.endsWith(".question") ||
+            name.includes("form")
+          );
+        })
+      );
+      if (askedQuestion) {
+        this.sessionState.setActiveHandoff(sessionID, {
+          ...activeHandoff,
+          status: "question_presented",
+        });
+        return { decision: "pass", results: [] };
+      }
+    }
+
     const contract = extractTaskContract(currentTurn);
     const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
     const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
@@ -426,14 +469,25 @@ export class GuardEngine {
           return { decision: "pass", results };
         }
         this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
+        const handoff = !isSubagent
+          ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey)
+          : null;
+        if (handoff) {
+          this.sessionState.setActiveHandoff(sessionID, {
+            handoffId: handoff.handoffId,
+            kind: handoff.kind,
+            autoSelect: handoff.autoSelect,
+            status: "handed_off",
+          });
+        }
         return {
           decision: "block",
           results,
-          combinedRemediationPrompt:
-            `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+          combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
           rollback: () => {
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
+            if (handoff) this.sessionState.clearActiveHandoff(sessionID);
           },
         };
       }
@@ -483,15 +537,26 @@ export class GuardEngine {
         blockingResults.map((r) => r.ruleId),
         [...(evidence.mutatedFiles ?? [])]
       );
+      const handoff = !isSubagent
+        ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey)
+        : null;
+      if (handoff) {
+        this.sessionState.setActiveHandoff(sessionID, {
+          handoffId: handoff.handoffId,
+          kind: handoff.kind,
+          autoSelect: handoff.autoSelect,
+          status: "handed_off",
+        });
+      }
       return {
         decision: "block",
         results,
-        combinedRemediationPrompt:
-          `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`,
+        combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
         rollback: () => {
           this.inspectedMessages.delete(sessionID);
           this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint);
           this.sessionState.clearPendingRemediation(sessionID);
+          if (handoff) this.sessionState.clearActiveHandoff(sessionID);
         },
       };
     }

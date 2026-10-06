@@ -9,6 +9,7 @@ export class SessionStateStore {
                 fingerprints: new Set(),
                 continuationCount: 0,
                 continuationKeys: new Set(),
+                ...(existing?.activeHandoff ? { activeHandoff: existing.activeHandoff } : {}),
             };
             this.sessions.set(sessionID, next);
             return next;
@@ -74,6 +75,21 @@ export class SessionStateStore {
         if (state) {
             delete state.pendingRemediationRules;
             delete state.pendingRemediationFiles;
+        }
+    }
+    setActiveHandoff(sessionID, handoff) {
+        const state = this.sessions.get(sessionID);
+        if (state) {
+            state.activeHandoff = handoff;
+        }
+    }
+    getActiveHandoff(sessionID) {
+        return this.sessions.get(sessionID)?.activeHandoff;
+    }
+    clearActiveHandoff(sessionID) {
+        const state = this.sessions.get(sessionID);
+        if (state) {
+            delete state.activeHandoff;
         }
     }
     forget(sessionID) {

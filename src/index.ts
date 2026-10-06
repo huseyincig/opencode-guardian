@@ -10,6 +10,7 @@ import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
+import { registerGuardianCapability } from "./handoff.js";
 
 export * from "./types.js";
 export * from "./engine.js";
@@ -38,6 +39,7 @@ export * from "./telemetry.js";
 export * from "./audit.js";
 export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
+export * from "./handoff.js";
 
 function stringifyV2ToolContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -429,6 +431,7 @@ function inspectPreflight(
 }
 
 const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
+  registerGuardianCapability();
   const config = loadConfig(directory);
   if (config.enabled === false) {
     recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "disabled" }, directory);
@@ -733,6 +736,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
 const setup: OpenCodeV2.Plugin["setup"] = async (
   context: OpenCodeV2.Context
 ) => {
+  registerGuardianCapability();
   // Transition builds may call setup() with a partial v2 context.
   // Resolve the explicit security setting first: strict preflight must never
   // silently disappear merely because another v2 capability is unavailable.

@@ -1,3 +1,9 @@
+export interface HandoffTrackingState {
+    handoffId: string;
+    kind: "clarification" | "choice" | "approval";
+    autoSelect: "allowed" | "forbidden";
+    status: "handed_off" | "question_presented" | "resolved";
+}
 interface SessionState {
     turnKey: string;
     remediationCount: number;
@@ -6,6 +12,7 @@ interface SessionState {
     continuationKeys: Set<string>;
     pendingRemediationRules?: string[];
     pendingRemediationFiles?: string[];
+    activeHandoff?: HandoffTrackingState;
 }
 export declare class SessionStateStore {
     private readonly sessions;
@@ -20,6 +27,9 @@ export declare class SessionStateStore {
     getPendingRemediation(sessionID: string, turnKey?: string): string[] | undefined;
     getPendingRemediationFiles(sessionID: string, turnKey: string): string[];
     clearPendingRemediation(sessionID: string): void;
+    setActiveHandoff(sessionID: string, handoff: HandoffTrackingState): void;
+    getActiveHandoff(sessionID: string): HandoffTrackingState | undefined;
+    clearActiveHandoff(sessionID: string): void;
     forget(sessionID: string): void;
 }
 export {};

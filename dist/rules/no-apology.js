@@ -97,9 +97,10 @@ export const noApologyRule = {
                     const regex = new RegExp(pattern.regex.source, pattern.regex.flags.includes("g")
                         ? pattern.regex.flags
                         : `${pattern.regex.flags}g`);
-                    let match;
-                    while ((match = regex.exec(cleanText)) !== null) {
+                    let match = regex.exec(cleanText);
+                    while (match !== null) {
                         if (isReportedApologyToken(cleanText, match.index)) {
+                            match = regex.exec(cleanText);
                             continue;
                         }
                         seenPatterns.add(pattern.name);

@@ -50,7 +50,7 @@ export function evaluateTaskPolicy(
         : record?.status === "failure"
           ? "failed"
           : "unknown";
-    return { kind, status, evidence: record };
+    return { kind, status, ...(record ? { evidence: record } : {}) };
   });
   return {
     lastMutationSequence,

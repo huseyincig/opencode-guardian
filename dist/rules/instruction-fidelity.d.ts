@@ -1,3 +1,3 @@
 import type { GuardRule } from "../types.js";
-/** The rule needs both an explicit current action and an explicit refusal. */
+/** High-confidence conflicts with the current explicit action only. */
 export declare const instructionFidelityRule: GuardRule;

@@ -274,3 +274,130 @@ test("V1 SDK polling failures are recorded without writing a stack over the TUI"
     console.error = originalError;
   }
 });
+
+test("V1 foreground task handoff waits for Guardian remediation and returns the revised child report", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v1-handoff-barrier-"));
+  fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+    enabled: true,
+    preflight: { enabled: true },
+    rules: {
+      "discipline/no-apology": "off",
+      "quality/no-shortcuts": "off",
+    },
+  }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let phase = 0;
+  let promptCalls = 0;
+  let promptAsyncCalls = 0;
+  const remediationTexts = [];
+  const initialMessages = [
+    { info: { id: "u-audit", role: "user" },
+      parts: [{ type: "text", text: "Run the security audit completely and report every issue." }] },
+    { info: { id: "a-audit-1", role: "assistant", agent: "explore", time: { completed: 1 } },
+      parts: [{ type: "text", text: "The remaining test failure is unrelated to this change." }] },
+  ];
+  const finalMessages = () => [
+    ...initialMessages,
+    { info: { id: "g-audit", role: "user" },
+      parts: [{ type: "text", text: remediationTexts[0] }] },
+    { info: { id: "a-audit-2", role: "assistant", agent: "explore", time: { completed: 2 } },
+      parts: [{ type: "text", text: "Re-ran the security audit. Found two additional minor issues and reported both." }] },
+  ];
+
+  const client = { session: {
+    async status() { return { data: {} }; },
+    async get({ path: { id } }) {
+      return { data: id === "child-audit"
+        ? { id, parentID: "parent-audit" }
+        : { id } };
+    },
+    async messages({ path: { id } }) {
+      assert.equal(id, "child-audit");
+      return { data: phase === 0 ? initialMessages : finalMessages() };
+    },
+    async prompt({ path: { id }, body }) {
+      assert.equal(id, "child-audit");
+      promptCalls++;
+      remediationTexts.push(body.parts[0].text);
+      phase = 1;
+      return { data: finalMessages().at(-1) };
+    },
+    async promptAsync() { promptAsyncCalls++; return { data: undefined }; },
+  } };
+
+  const hooks = await Guardian.server({ directory, client });
+  try {
+    await hooks["tool.execute.before"](
+      { tool: "task", sessionID: "parent-audit", callID: "task-call-1" },
+      { args: { description: "security audit", prompt: "audit", background: false } },
+    );
+
+    await hooks.event({ event: {
+      type: "session.idle", properties: { sessionID: "child-audit" },
+    } });
+    assert.equal(promptAsyncCalls, 0, "foreground child idle must be owned by the handoff barrier");
+
+    const output = {
+      title: "security audit",
+      metadata: { parentSessionId: "parent-audit", sessionId: "child-audit" },
+      output: '<task id="child-audit" state="completed">\n<task_result>\nThe remaining test failure is unrelated to this change.\n</task_result>\n</task>',
+    };
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "parent-audit", callID: "task-call-1",
+        args: { description: "security audit", prompt: "audit", background: false } },
+      output,
+    );
+
+    assert.equal(promptCalls, 1, "Guardian must synchronously remediate the child before parent handoff");
+    assert.match(remediationTexts[0], /^\[opencode-guardian remediation\]/);
+    assert.match(output.output, /Found two additional minor issues/);
+    assert.doesNotMatch(output.output, /remaining test failure is unrelated/);
+  } finally {
+    await hooks.dispose?.();
+  }
+});
+
+test("V1 background child keeps normal idle remediation instead of entering the foreground handoff barrier", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v1-background-child-"));
+  fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+    enabled: true,
+    preflight: { enabled: true },
+    rules: {
+      "discipline/no-apology": "off",
+      "quality/no-shortcuts": "off",
+    },
+  }));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let promptAsyncCalls = 0;
+  const client = { session: {
+    async status() { return { data: {} }; },
+    async get({ path: { id } }) {
+      return { data: id === "child-bg" ? { id, parentID: "parent-bg" } : { id } };
+    },
+    async messages() {
+      return { data: [
+        { info: { id: "u-bg", role: "user" },
+          parts: [{ type: "text", text: "Run the audit." }] },
+        { info: { id: "a-bg", role: "assistant", agent: "explore", time: { completed: 1 } },
+          parts: [{ type: "text", text: "The failure is unrelated to this change." }] },
+      ] };
+    },
+    async promptAsync() { promptAsyncCalls++; return { data: undefined }; },
+  } };
+
+  const hooks = await Guardian.server({ directory, client });
+  try {
+    await hooks["tool.execute.before"](
+      { tool: "task", sessionID: "parent-bg", callID: "task-bg" },
+      { args: { description: "background audit", prompt: "audit", background: true } },
+    );
+    await hooks.event({ event: {
+      type: "session.idle", properties: { sessionID: "child-bg" },
+    } });
+    assert.equal(promptAsyncCalls, 1, "background child must retain the existing idle-remediation path");
+  } finally {
+    await hooks.dispose?.();
+  }
+});

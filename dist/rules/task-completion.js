@@ -81,9 +81,9 @@ export const taskCompletionRule = {
             ruleId: this.id,
             decision: blocking.length ? "block" : "pass",
             findings,
-            remediationPrompt: blocking.length
-                ? "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
-                : undefined,
+            ...(blocking.length ? {
+                remediationPrompt: "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command.",
+            } : {}),
         };
     },
 };

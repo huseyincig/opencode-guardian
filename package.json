@@ -1,6 +1,6 @@
 {
   "name": "opencode-guardian",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Universal quality and safety guardian plugin for OpenCode AI agents (Dual-Mode: OpenCode v1 & v2)",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,9 @@
     "postbuild": "node scripts/emit-tui.mjs",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "lint": "oxlint src tests --deny-warnings",
+    "typecheck:strict": "tsc --noEmit --noUnusedLocals --noUnusedParameters --noUncheckedIndexedAccess --exactOptionalPropertyTypes"
   },
   "keywords": [
     "opencode",
@@ -66,6 +68,7 @@
     "@opentui/solid": "^0.5.14",
     "@types/node": "^22.0.0",
     "babel-preset-solid": "^1.9.12",
+    "oxlint": "1.87.0",
     "solid-js": "^1.9.12",
     "typescript": "^5.8.0"
   },
@@ -89,7 +92,8 @@
     }
   },
   "overrides": {
-    "@babel/core": "^7.29.7"
+    "@babel/core": "^7.29.7",
+    "seroval": "1.6.8"
   },
   "engines": {
     "node": ">=24.0.0"

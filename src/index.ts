@@ -1,6 +1,6 @@
 import type { Plugin as OpenCodeV1ServerPlugin } from "@opencode-ai/plugin";
 import type { Plugin as OpenCodeV2 } from "@opencode/plugin";
-import { GuardEngine, loadConfig } from "./engine.js";
+import { GuardEngine, loadConfig, type EngineExecutionResult } from "./engine.js";
 import type { MessagePart, SessionMessage } from "./types.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
@@ -76,20 +76,17 @@ function normalizeV2AssistantPart(part: unknown): MessagePart | null {
   }
 
   const state = value.state as Record<string, unknown>;
-  const normalizedState: NonNullable<MessagePart["state"]> = {
-    status: typeof state.status === "string" ? state.status : undefined,
-    input:
-      state.input && typeof state.input === "object"
-        ? (state.input as Record<string, unknown>)
-        : undefined,
-    error: state.error,
-    metadata:
-      state.metadata && typeof state.metadata === "object"
-        ? (state.metadata as Record<string, unknown>)
-        : undefined,
-    exitCode: state.exitCode,
-    raw: state.raw,
-  };
+  const normalizedState: NonNullable<MessagePart["state"]> = {};
+  if (typeof state.status === "string") normalizedState.status = state.status;
+  if (state.input && typeof state.input === "object") {
+    normalizedState.input = state.input as Record<string, unknown>;
+  }
+  if (state.error !== undefined) normalizedState.error = state.error;
+  if (state.metadata && typeof state.metadata === "object") {
+    normalizedState.metadata = state.metadata as Record<string, unknown>;
+  }
+  if (state.exitCode !== undefined) normalizedState.exitCode = state.exitCode;
+  if (state.raw !== undefined) normalizedState.raw = state.raw;
 
   const output =
     typeof state.output === "string"
@@ -154,7 +151,7 @@ export function normalizeV2Messages(messages: readonly unknown[]): SessionMessag
         info: {
           id,
           role: "assistant",
-          agent: typeof msg.agent === "string" ? msg.agent : undefined,
+          ...(typeof msg.agent === "string" ? { agent: msg.agent } : {}),
         },
         parts,
       });
@@ -162,6 +159,195 @@ export function normalizeV2Messages(messages: readonly unknown[]): SessionMessag
   }
 
   return normalized;
+}
+
+const MAX_SUBAGENT_HANDOFF_ROUNDS = 6;
+
+function markForegroundHandoff(
+  handoffs: Map<string, Set<string>>,
+  sessionID: string,
+  callID: string
+): void {
+  const active = handoffs.get(sessionID) ?? new Set<string>();
+  active.add(callID);
+  handoffs.set(sessionID, active);
+}
+
+function clearForegroundHandoff(
+  handoffs: Map<string, Set<string>>,
+  sessionID: string,
+  callID: string
+): void {
+  const active = handoffs.get(sessionID);
+  if (!active) return;
+  active.delete(callID);
+  if (active.size === 0) handoffs.delete(sessionID);
+}
+
+function hasForegroundHandoff(
+  handoffs: ReadonlyMap<string, ReadonlySet<string>>,
+  sessionID?: string
+): boolean {
+  return Boolean(sessionID && handoffs.get(sessionID)?.size);
+}
+
+function renderV1TaskResult(sessionID: string, text: string): string {
+  return [
+    `<task id="${sessionID}" state="completed">`,
+    "<task_result>",
+    text,
+    "</task_result>",
+    "</task>",
+  ].join("\n");
+}
+
+function latestAssistantText(messages: readonly SessionMessage[]): string | undefined {
+  const assistant = messages.findLast((message) => message.info.role === "assistant");
+  if (!assistant) return undefined;
+  const text = (assistant.parts ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
+function recordInspectionOutcome(
+  result: EngineExecutionResult,
+  sessionID: string,
+  directory: string
+) {
+  const findings = result.results.filter((item) => item.findings.length > 0);
+
+  if (result.remediationStatus === "verified") {
+    const verifiedRules = result.pendingRemediationRules?.length
+      ? result.pendingRemediationRules
+      : ["remediation-verified"];
+    recordGuardianEvent({
+      kind: "remediation-verified",
+      session: sessionFingerprint(sessionID),
+      rules: verifiedRules,
+      reasons: verifiedRules.map((rule) => ({ rule, code: "remediation-verified" })),
+    }, directory);
+  } else if (result.remediationStatus === "unverified") {
+    recordGuardianEvent({
+      kind: "remediation-unverified",
+      session: sessionFingerprint(sessionID),
+      rules: result.pendingRemediationRules ?? [],
+    }, directory);
+  } else if (result.remediationStatus === "failed") {
+    const failedRules = result.pendingRemediationRules?.length
+      ? result.pendingRemediationRules
+      : ["remediation-failed"];
+    recordGuardianEvent({
+      kind: "remediation-failed",
+      session: sessionFingerprint(sessionID),
+      rules: failedRules,
+      reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
+    }, directory);
+  }
+
+  if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
+    recordGuardianEvent({
+      kind: "post-warning",
+      session: sessionFingerprint(sessionID),
+      rules: findings.map((item) => item.ruleId),
+      reasons: auditReasons(findings),
+    }, directory);
+  }
+
+  return findings;
+}
+
+async function finalizeSubagentHandoff(input: {
+  sessionID: string;
+  directory: string;
+  engine: GuardEngine;
+  fetchMessages: () => Promise<SessionMessage[]>;
+  sendAndWait: (promptText: string) => Promise<void>;
+  snapshots?: () => ReadonlyMap<string, VerificationSnapshot> | undefined;
+  signal?: AbortSignal;
+}): Promise<string | undefined> {
+  let remediated = false;
+
+  for (let round = 0; round < MAX_SUBAGENT_HANDOFF_ROUNDS; round++) {
+    if (input.signal?.aborted) {
+      throw new Error("[opencode-guardian handoff] plugin teardown interrupted subagent finalization.");
+    }
+
+    let messages: SessionMessage[];
+    try {
+      messages = await input.fetchMessages();
+    } catch {
+      recordGuardianEvent({
+        kind: "inspection-error",
+        session: sessionFingerprint(input.sessionID),
+        rules: ["message-fetch-failed"],
+        reasons: [{ rule: "message-fetch-failed", code: "message-fetch-failed" }],
+      }, input.directory);
+      throw new Error("[opencode-guardian handoff] could not read the subagent result.");
+    }
+
+    let result: EngineExecutionResult;
+    try {
+      result = await input.engine.inspect(
+        input.sessionID,
+        input.directory,
+        messages,
+        input.snapshots?.(),
+        { isSubagent: true }
+      );
+    } catch {
+      recordGuardianEvent({
+        kind: "inspection-error",
+        session: sessionFingerprint(input.sessionID),
+        rules: ["engine-inspection-failed"],
+        reasons: [{ rule: "engine-inspection-failed", code: "engine-inspection-failed" }],
+      }, input.directory);
+      throw new Error("[opencode-guardian handoff] subagent inspection failed.");
+    }
+
+    const findings = recordInspectionOutcome(result, input.sessionID, input.directory);
+
+    if (result.decision === "block" && result.combinedRemediationPrompt) {
+      if (round === MAX_SUBAGENT_HANDOFF_ROUNDS - 1) {
+        result.rollback?.();
+        throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
+      }
+      try {
+        await input.sendAndWait(result.combinedRemediationPrompt);
+        remediated = true;
+        recordGuardianEvent({
+          kind: "post-remediation",
+          session: sessionFingerprint(input.sessionID),
+          rules: findings.map((item) => item.ruleId),
+          reasons: auditReasons(findings),
+        }, input.directory);
+      } catch {
+        result.rollback?.();
+        recordGuardianEvent({
+          kind: "inspection-error",
+          session: sessionFingerprint(input.sessionID),
+          rules: ["prompt-delivery-failed"],
+          reasons: [{ rule: "prompt-delivery-failed", code: "prompt-delivery-failed" }],
+        }, input.directory);
+        throw new Error("[opencode-guardian handoff] could not complete subagent remediation.");
+      }
+      continue;
+    }
+
+    if (result.remediationStatus === "failed") {
+      throw new Error("[opencode-guardian handoff] unresolved Guardian findings; subagent result withheld.");
+    }
+
+    const latest = latestAssistantText(messages);
+    if (remediated && !latest) {
+      throw new Error("[opencode-guardian handoff] remediated subagent produced no final text result.");
+    }
+    return latest;
+  }
+
+  throw new Error("[opencode-guardian handoff] subagent finalization exceeded its bounded loop.");
 }
 
 /**
@@ -174,7 +360,8 @@ async function handleSessionIdle(
   sendPrompt: (promptText: string) => Promise<void>,
   engine: GuardEngine,
   snapshots?: ReadonlyMap<string, VerificationSnapshot>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  isSubagent?: boolean
 ): Promise<void> {
   let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   try {
@@ -182,35 +369,15 @@ async function handleSessionIdle(
     const messages = await fetchMessages();
     if (signal?.aborted) return;
     stage = "engine-inspect";
-    const result = await engine.inspect(sessionID, directory, messages, snapshots);
+    const result = await engine.inspect(
+      sessionID,
+      directory,
+      messages,
+      snapshots,
+      isSubagent === undefined ? undefined : { isSubagent }
+    );
     if (signal?.aborted) { result.rollback?.(); return; }
-    const findings = result.results.filter((item) => item.findings.length > 0);
-
-    if (result.remediationStatus === "verified") {
-      const verifiedRules = result.pendingRemediationRules?.length ? result.pendingRemediationRules : ["remediation-verified"];
-      recordGuardianEvent({
-        kind: "remediation-verified",
-        session: sessionFingerprint(sessionID),
-        rules: verifiedRules,
-        reasons: verifiedRules.map((rule) => ({ rule, code: "remediation-verified" })),
-      }, directory);
-    } else if (result.remediationStatus === "unverified") {
-      recordGuardianEvent({ kind: "remediation-unverified",
-        session: sessionFingerprint(sessionID), rules: result.pendingRemediationRules ?? [],
-      }, directory);
-    } else if (result.remediationStatus === "failed") {
-      const failedRules = result.pendingRemediationRules?.length ? result.pendingRemediationRules : ["remediation-failed"];
-      recordGuardianEvent({
-        kind: "remediation-failed",
-        session: sessionFingerprint(sessionID),
-        rules: failedRules,
-        reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
-      }, directory);
-    }
-
-    if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
-      recordGuardianEvent({ kind: "post-warning", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
-    }
+    const findings = recordInspectionOutcome(result, sessionID, directory);
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
       stage = "prompt-send";
@@ -224,7 +391,7 @@ async function handleSessionIdle(
         throw promptError;
       }
     }
-  } catch (error) {
+  } catch {
     if (signal?.aborted) return;
     const errorCode =
       stage === "message-fetch"
@@ -250,10 +417,12 @@ function inspectPreflight(
 ): void {
   if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool)) return;
   const finding = evaluatePreflight(tool, args, additionalTools);
+  const session = sessionFingerprint(sessionID);
+  const safeTool = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1);
   recordGuardianEvent({
     kind: finding ? "preflight-blocked" : "preflight-allowed",
-    session: sessionFingerprint(sessionID),
-    tool: tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1),
+    ...(session ? { session } : {}),
+    ...(safeTool ? { tool: safeTool } : {}),
     ...(finding ? { rules: [finding] } : {}),
   }, directory);
   if (finding) throw new GuardianPreflightError(finding);
@@ -276,6 +445,31 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
   let promptSequence = 0;
   let updateChecked = false;
   const strictPreflight = config.preflight?.enabled === true;
+  const foregroundHandoffs = new Map<string, Set<string>>();
+  const hostSessionRelation = async (sessionID: string): Promise<{
+    known: boolean;
+    parentID?: string;
+  }> => {
+    const getSession = (client.session as typeof client.session & {
+      get?: (input: { path: { id: string }; query?: { directory?: string } }) =>
+        Promise<{ data?: { parentID?: string }; error?: unknown }>;
+    }).get;
+    if (typeof getSession !== "function") return { known: false };
+    try {
+      const response = await getSession.call(client.session, {
+        path: { id: sessionID },
+        query: { directory },
+      });
+      if (response.error || !response.data) return { known: false };
+      const parentID =
+        typeof response.data.parentID === "string" && response.data.parentID.length > 0
+          ? response.data.parentID
+          : undefined;
+      return { known: true, ...(parentID ? { parentID } : {}) };
+    } catch {
+      return { known: false };
+    }
+  };
   // Only active, newly prompted V1 sessions are probed. No global session
   // scanning and no inspection before the SDK confirms a completed response.
   const watcher = typeof client.session.status === "function"
@@ -297,6 +491,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         return response.data as SessionMessage[];
       },
       onIdle: async (sessionID, messages) => {
+        const relation = await hostSessionRelation(sessionID);
+        if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
+          return;
+        }
         const contract = extractTaskContract(messages);
         if (contract) contracts.set(sessionID, contract);
         await handleSessionIdle(
@@ -308,7 +506,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
             });
             if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
           },
-          engine, verificationStore.snapshots(sessionID)
+          engine,
+          verificationStore.snapshots(sessionID),
+          undefined,
+          relation.known ? Boolean(relation.parentID) : undefined
         );
       },
       onError: (sessionID, _error) => {
@@ -330,18 +531,106 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
       watcher?.stopAll();
       verificationStore.clear();
       contracts.clear();
+      foregroundHandoffs.clear();
+    },
+    "tool.execute.before": async (input, output) => {
+      const args =
+        output.args && typeof output.args === "object" && !Array.isArray(output.args)
+          ? output.args as Record<string, unknown>
+          : {};
+      if (
+        input.tool === "task" &&
+        typeof input.sessionID === "string" &&
+        typeof input.callID === "string" &&
+        args.background !== true
+      ) {
+        markForegroundHandoff(foregroundHandoffs, input.sessionID, input.callID);
+      }
+      if (strictPreflight) {
+        inspectPreflight(
+          input.tool,
+          output.args,
+          input.sessionID,
+          directory,
+          config.preflight?.shellTools
+        );
+      }
     },
     "tool.execute.after": async (input, output) => {
-      verificationStore.observe(input.sessionID, input.callID, input.tool,
-        input.args && typeof input.args === "object" ? input.args : {},
-        output.output, output.metadata && typeof output.metadata === "object" ? output.metadata : {},
-        directory);
+      const args =
+        input.args && typeof input.args === "object" && !Array.isArray(input.args)
+          ? input.args as Record<string, unknown>
+          : {};
+      const tracked =
+        input.tool === "task" &&
+        typeof input.sessionID === "string" &&
+        typeof input.callID === "string" &&
+        args.background !== true &&
+        Boolean(foregroundHandoffs.get(input.sessionID)?.has(input.callID));
+
+      try {
+        if (
+          tracked &&
+          output.metadata &&
+          typeof output.metadata === "object" &&
+          !Array.isArray(output.metadata)
+        ) {
+          const metadata = output.metadata as Record<string, unknown>;
+          const childID =
+            typeof metadata.sessionId === "string" ? metadata.sessionId : undefined;
+          const background = metadata.background === true;
+          if (childID && !background) {
+            const relation = await hostSessionRelation(childID);
+            if (relation.known && relation.parentID !== input.sessionID) {
+              throw new Error("[opencode-guardian handoff] child session ownership mismatch.");
+            }
+            if (relation.known) {
+              const revised = await finalizeSubagentHandoff({
+                sessionID: childID,
+                directory,
+                engine,
+                fetchMessages: async () => {
+                  const response = await client.session.messages({
+                    path: { id: childID },
+                    query: { directory },
+                  });
+                  if (response.error || !Array.isArray(response.data)) {
+                    throw new Error("V1 child messages unavailable.");
+                  }
+                  return response.data as SessionMessage[];
+                },
+                sendAndWait: async (text) => {
+                  const response = await client.session.prompt({
+                    path: { id: childID },
+                    query: { directory },
+                    body: { parts: [{ type: "text", text }] },
+                  });
+                  if (response.error) {
+                    throw new Error("V1 child remediation failed.");
+                  }
+                },
+                snapshots: () => verificationStore.snapshots(childID),
+              });
+              if (revised !== undefined) {
+                output.output = renderV1TaskResult(childID, revised);
+              }
+            }
+          }
+        }
+
+        verificationStore.observe(input.sessionID, input.callID, input.tool,
+          args,
+          output.output,
+          output.metadata && typeof output.metadata === "object"
+            ? output.metadata as Record<string, unknown>
+            : {},
+          directory);
+      } finally {
+        if (tracked) {
+          clearForegroundHandoff(foregroundHandoffs, input.sessionID, input.callID);
+        }
+      }
     },
-    ...(strictPreflight ? {
-      "tool.execute.before": async (
-        input: { tool: string; sessionID?: string }, output: { args: unknown }
-      ) => inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools),
-    } : {}),
     "chat.message": async (input, output) => {
       const text = output.parts
         .map((part) => part.type === "text" ? part.text : "")
@@ -376,7 +665,8 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         updateChecked = true;
         const tui = (client as unknown as { tui?: { showToast?: (input: { body: { title: string; message: string; variant: "info"; duration: number } }) => Promise<unknown> } }).tui;
         if (typeof tui?.showToast === "function") {
-          void announceGuardianUpdate((current, latest) => tui.showToast!({
+          const showToast = tui.showToast;
+          void announceGuardianUpdate((current, latest) => showToast({
             body: { title: "OpenCode Guardian — New version", message: `v${current} → v${latest} (update manually)`, variant: "info", duration: 5000 },
           }));
         }
@@ -392,6 +682,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
           engine.forgetSession(deletedSessionID);
           verificationStore.forget(deletedSessionID);
           contracts.delete(deletedSessionID);
+          foregroundHandoffs.delete(deletedSessionID);
         }
         return;
       }
@@ -401,6 +692,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
         eventData.properties?.sessionID ?? eventData.data?.sessionID;
       if (!sessionID) return;
       watcher?.stop(sessionID);
+      const relation = await hostSessionRelation(sessionID);
+      if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
+        return;
+      }
 
       await handleSessionIdle(
         sessionID,
@@ -426,7 +721,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }) => {
           });
           if (response.error) throw new Error("V1 host rejected the Guardian remediation request.");
         },
-        engine, verificationStore.snapshots(sessionID)
+        engine,
+        verificationStore.snapshots(sessionID),
+        undefined,
+        relation.known ? Boolean(relation.parentID) : undefined
       );
     },
   };
@@ -487,6 +785,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const engine = new GuardEngine(config);
   const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
+  const foregroundHandoffs = new Map<string, Set<string>>();
   const registrations: Array<{ dispose(): Promise<void> | void }> = [];
 
   if (strictPreflight) {
@@ -509,35 +808,150 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     }
   }
 
-  // Optional after-hook: when absent, historic verification remains
-  // sequential evidence rather than a fabricated disk snapshot.
+  // Verification and foreground subagent finalization share one atomic
+  // registration group. If either hook cannot be installed, dispose the other
+  // immediately so a stale foreground marker can never suppress idle handling.
   if (typeof context.tool?.hook === "function") {
+    const toolRegistrations: Array<{ dispose(): Promise<void> | void }> = [];
+    const canFinalizeSubagent =
+      typeof context.session.get === "function" &&
+      typeof context.session.context === "function" &&
+      typeof context.session.synthetic === "function" &&
+      typeof context.session.wait === "function";
     try {
+      if (canFinalizeSubagent) {
+        const before = await context.tool.hook("execute.before", (event) => {
+          if (controller.signal.aborted || event.tool !== "subagent") return;
+          const input =
+            event.input && typeof event.input === "object" && !Array.isArray(event.input)
+              ? event.input as Record<string, unknown>
+              : {};
+          if (input.background === true) return;
+          markForegroundHandoff(foregroundHandoffs, event.sessionID, event.id);
+        });
+        if (!before || typeof before.dispose !== "function") {
+          throw new Error("V2 foreground handoff hook has no disposer");
+        }
+        toolRegistrations.push(before);
+      }
+
       const after = await context.tool.hook("execute.after", async (event) => {
         if (controller.signal.aborted || typeof context.session.get !== "function") return;
-        // The plugin load directory is not a reliable session root.
-        let observedDirectory: string;
-        try {
-          const session = await context.session.get({ sessionID: event.sessionID });
-          if (typeof session.location?.directory !== "string" ||
-              !session.location.directory.trim()) return;
-          observedDirectory = session.location.directory;
-        } catch { return; }
-        if (controller.signal.aborted) return;
-        const result = event.status === "completed" ? event.result as {
-          output?: unknown; content?: unknown; metadata?: Record<string, unknown>;
-        } : undefined;
-        verificationStore.observe(event.sessionID, event.id, event.tool,
+
+        const input =
           event.input && typeof event.input === "object" && !Array.isArray(event.input)
-            ? event.input as Record<string, unknown> : {},
-          result?.output ?? result?.content ?? "", result?.metadata ?? {}, observedDirectory,
-          event.status);
+            ? event.input as Record<string, unknown>
+            : {};
+        const tracked =
+          canFinalizeSubagent &&
+          event.tool === "subagent" &&
+          input.background !== true &&
+          Boolean(foregroundHandoffs.get(event.sessionID)?.has(event.id));
+
+        try {
+          // The plugin load directory is not a reliable session root.
+          let observedDirectory: string;
+          try {
+            const session = await context.session.get({ sessionID: event.sessionID });
+            if (typeof session.location?.directory !== "string" ||
+                !session.location.directory.trim()) return;
+            observedDirectory = session.location.directory;
+          } catch { return; }
+          if (controller.signal.aborted) return;
+
+          if (tracked && event.status === "completed") {
+            const current = event.result as {
+              output?: unknown;
+              content?: unknown;
+              metadata?: Record<string, unknown>;
+            };
+            const structured =
+              current.output && typeof current.output === "object" && !Array.isArray(current.output)
+                ? current.output as Record<string, unknown>
+                : undefined;
+            const childID =
+              typeof current.metadata?.sessionID === "string"
+                ? current.metadata.sessionID
+                : typeof structured?.sessionID === "string"
+                  ? structured.sessionID
+                  : undefined;
+            const completed =
+              current.metadata?.status === "completed" ||
+              structured?.status === "completed";
+
+            if (childID && completed) {
+              const child = await context.session.get({ sessionID: childID });
+              if (child.parentID !== event.sessionID) {
+                throw new Error("[opencode-guardian handoff] child session ownership mismatch.");
+              }
+              const childDirectory =
+                typeof child.location?.directory === "string" && child.location.directory.trim()
+                  ? child.location.directory
+                  : observedDirectory;
+              const revised = await finalizeSubagentHandoff({
+                sessionID: childID,
+                directory: childDirectory,
+                engine,
+                fetchMessages: async () =>
+                  normalizeV2Messages(await context.session.context({ sessionID: childID })),
+                sendAndWait: async (text) => {
+                  await context.session.synthetic({
+                    sessionID: childID,
+                    text,
+                    description: "OpenCode Guardian remediation",
+                    metadata: { "opencode-guardian": true },
+                    delivery: "queue",
+                    resume: true,
+                  });
+                  await context.session.wait({ sessionID: childID });
+                },
+                snapshots: () => verificationStore.snapshots(childID),
+                signal: controller.signal,
+              });
+
+              if (revised !== undefined) {
+                event.result = {
+                  ...event.result,
+                  output: {
+                    ...structured,
+                    sessionID: childID,
+                    status: "completed",
+                    output: revised,
+                  },
+                  content: `<subagent sessionID="${childID}" state="completed">\n${revised}\n</subagent>`,
+                  metadata: {
+                    ...current.metadata,
+                    sessionID: childID,
+                    status: "completed",
+                  },
+                };
+              }
+            }
+          }
+
+          const result = event.status === "completed" ? event.result as {
+            output?: unknown; content?: unknown; metadata?: Record<string, unknown>;
+          } : undefined;
+          verificationStore.observe(event.sessionID, event.id, event.tool,
+            input,
+            result?.output ?? result?.content ?? "", result?.metadata ?? {}, observedDirectory,
+            event.status);
+        } finally {
+          if (tracked) {
+            clearForegroundHandoff(foregroundHandoffs, event.sessionID, event.id);
+          }
+        }
       });
       if (!after || typeof after.dispose !== "function") {
         throw new Error("V2 execute.after registration has no disposer");
       }
-      registrations.push(after);
+      toolRegistrations.push(after);
+      registrations.push(...toolRegistrations);
     } catch {
+      foregroundHandoffs.clear();
+      await Promise.allSettled(toolRegistrations.map((registration) =>
+        Promise.resolve().then(() => registration.dispose())
+      ));
       recordGuardianEvent({ kind: "verification-unavailable",
         rules: ["verification-snapshot-unavailable"] }, directory);
     }
@@ -574,7 +988,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       }
       taskRegistrations.push(contextRegistration);
       registrations.push(...taskRegistrations);
-    } catch (error) {
+    } catch {
       // Beta hosts may support only one hook. Undo partial registration now,
       // rather than leaving an orphaned prompt hook until plugin shutdown.
       await Promise.allSettled(taskRegistrations.map((registration) =>
@@ -604,6 +1018,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             engine.forgetSession(deletedSessionID);
             verificationStore.forget(deletedSessionID);
             contracts.delete(deletedSessionID);
+            foregroundHandoffs.delete(deletedSessionID);
           }
           continue;
         }
@@ -613,13 +1028,24 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (!sessionID) continue;
 
         let sessionDirectory: string = directory;
+        let sessionIsSubagent: boolean | undefined;
+        let sessionParentID: string | undefined;
         try {
           if (typeof context.session.get === "function") {
             const session = await context.session.get({ sessionID });
             sessionDirectory = session.location?.directory ?? directory;
+            sessionParentID =
+              typeof session.parentID === "string" && session.parentID.length > 0
+                ? session.parentID
+                : undefined;
+            sessionIsSubagent = Boolean(sessionParentID);
           }
         } catch {
           // A transient/partial host must not disable the existing idle path.
+        }
+
+        if (sessionParentID && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
+          continue;
         }
 
         await handleSessionIdle(
@@ -643,12 +1069,15 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               resume: true,
             });
           },
-          engine, verificationStore.snapshots(sessionID), controller.signal
+          engine,
+          verificationStore.snapshots(sessionID),
+          controller.signal,
+          sessionIsSubagent
         );
         }
         if (controller.signal.aborted) return;
         throw new Error("V2 event stream ended before plugin teardown.");
-      } catch (error) {
+      } catch {
         if (controller.signal.aborted) return;
         recordGuardianEvent({ kind: "inspection-error",
           rules: ["v2-event-stream-error"],
@@ -682,7 +1111,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           throw new Error("V2 event resubscription did not return an async iterable.");
         }
         activeEvents = next;
-      } catch (error) {
+      } catch {
         if (!controller.signal.aborted) {
           recordGuardianEvent({ kind: "inspection-error",
             rules: ["v2-event-stream-error"],
@@ -702,6 +1131,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     controller.abort();
     contracts.clear();
     verificationStore.clear();
+    foregroundHandoffs.clear();
     for (const registration of registrations.reverse()) {
       try { await registration.dispose(); } catch {
         // An optional disposer failing must not prevent remaining cleanup.

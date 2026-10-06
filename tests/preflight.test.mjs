@@ -71,16 +71,25 @@ test("preflight denies missing or uninspectable shell arguments", () => {
   }
 });
 
-test("V1 default and disabled configurations do not install a preflight hook", async (t) => {
+test("V1 default and disabled preflight never enforce shell policy", async (t) => {
   for (const config of [
     { enabled: true }, { enabled: true, preflight: { enabled: false } },
-    { enabled: false, preflight: { enabled: true } },
   ]) {
     const hooks = await Guardian.server({ directory: tempConfig(t, config), client });
-    assert.equal(hooks["tool.execute.before"], undefined, JSON.stringify(config));
+    assert.equal(typeof hooks["tool.execute.before"], "function", JSON.stringify(config));
+    await assert.doesNotReject(() => hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "session", callID: "call" },
+      { args: { command: "git clean -fd" } },
+    ));
     assert.equal(typeof hooks.event, "function");
     assert.equal(typeof hooks["chat.message"], "function");
   }
+
+  const disabled = await Guardian.server({
+    directory: tempConfig(t, { enabled: false, preflight: { enabled: true } }),
+    client,
+  });
+  assert.equal(disabled["tool.execute.before"], undefined);
 });
 
 test("V1 enabled hook rejects risky calls before the host runs them", async (t) => {

@@ -150,7 +150,7 @@ export function recordGuardianEvent(event, directoryArg) {
                 fs.closeSync(fd);
         }
     }
-    catch (error) {
+    catch {
         if (!reportedWriteFailure) {
             reportedWriteFailure = true;
             // Do not print error objects (which can contain private paths) into the TUI.

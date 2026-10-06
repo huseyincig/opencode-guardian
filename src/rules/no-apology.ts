@@ -119,11 +119,10 @@ export const noApologyRule: GuardRule = {
               ? pattern.regex.flags
               : `${pattern.regex.flags}g`
           );
-          let match: RegExpExecArray | null;
-          while ((match = regex.exec(cleanText)) !== null) {
-            if (
-              isReportedApologyToken(cleanText, match.index)
-            ) {
+          let match = regex.exec(cleanText);
+          while (match !== null) {
+            if (isReportedApologyToken(cleanText, match.index)) {
+              match = regex.exec(cleanText);
               continue;
             }
 

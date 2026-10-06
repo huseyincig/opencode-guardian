@@ -64,7 +64,7 @@ export async function guardianCommandReport(
       };
     }
     case "doctor": {
-      let config;
+      let config: ReturnType<typeof loadConfig>;
       try { config = loadConfig(directory); } catch {
         return { title: "Guardian: Diagnostics", message: "Configuration: invalid. Fix the Guardian configuration before continuing." };
       }
@@ -87,7 +87,7 @@ export async function guardianCommandReport(
       };
     }
     case "rules": {
-      let config;
+      let config: ReturnType<typeof loadConfig>;
       try { config = loadConfig(directory); } catch {
         return { title: "Guardian: Rules", message: "Configuration is invalid; rule settings cannot be verified." };
       }
@@ -102,7 +102,7 @@ export async function guardianCommandReport(
       };
     }
     case "config": {
-      let config;
+      let config: ReturnType<typeof loadConfig>;
       try { config = loadConfig(directory); } catch {
         return { title: "Guardian: Configuration", message: "Configuration is invalid. No raw file contents will be displayed." };
       }

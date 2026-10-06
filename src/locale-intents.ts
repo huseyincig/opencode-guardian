@@ -192,8 +192,8 @@ function matches(text: string, rawTerm: string): boolean {
     if (index < 0) return false;
     const previous = text[index - 1] ?? "";
     const following = text[index + target.length] ?? "";
-    const leftBound = !previous || isCjk(target[0]) || !/[\p{L}\p{M}\p{N}]/u.test(previous);
-    const rightBound = prefix || !following || isCjk(target[target.length - 1]) || !/[\p{L}\p{M}\p{N}]/u.test(following);
+    const leftBound = !previous || isCjk(target.charAt(0)) || !/[\p{L}\p{M}\p{N}]/u.test(previous);
+    const rightBound = prefix || !following || isCjk(target.charAt(target.length - 1)) || !/[\p{L}\p{M}\p{N}]/u.test(following);
     if (leftBound && rightBound) return true;
     start = index + 1;
   }
@@ -246,10 +246,13 @@ export function extractInternationalSignals(input: string): InternationalTaskSig
   // Multiple conflicting locale interpretations are not a basis for a
   // blocking requirement. Favor a candidate with more concrete signals.
   candidates.sort((a, b) => b.evidence.length - a.evidence.length);
-  if (candidates.length > 1 && candidates[0].evidence.length === candidates[1].evidence.length) {
+  const first = candidates[0];
+  if (!first) return undefined;
+  const second = candidates[1];
+  if (second && first.evidence.length === second.evidence.length) {
     return undefined;
   }
-  const { negated: _negated, ...result } = candidates[0];
+  const { negated: _negated, ...result } = first;
   return result;
 }
 
@@ -335,5 +338,5 @@ export function detectInternationalHistoricalRefusal(
       has(response, locale.historical) &&
       has(response, locale.consequence)
   );
-  return candidates.length === 1 ? candidates[0].locale : undefined;
+  return candidates.length === 1 ? candidates[0]?.locale : undefined;
 }

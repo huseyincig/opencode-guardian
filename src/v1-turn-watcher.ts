@@ -43,12 +43,12 @@ export function createV1TurnWatcher(options: {
     new Promise<void>((resolve) => {
       if (current.cancelled) return resolve();
       const timer = setTimeout(() => {
-        current.wake = undefined;
+        delete current.wake;
         resolve();
       }, intervalMs);
       current.wake = () => {
         clearTimeout(timer);
-        current.wake = undefined;
+        delete current.wake;
         resolve();
       };
       // Do not keep OpenCode alive just for an optional compatibility probe.
@@ -97,7 +97,8 @@ export function createV1TurnWatcher(options: {
           if (current.cancelled) return;
           const lastUser = messages.findLastIndex((item) => item.info.role === "user");
           const lastAssistant = messages.findLastIndex((item) => item.info.role === "assistant");
-          const info = lastAssistant > lastUser ? messages[lastAssistant].info : undefined;
+          const assistant = lastAssistant > lastUser ? messages[lastAssistant] : undefined;
+          const info = assistant?.info;
           const time = info?.time as { completed?: unknown } | undefined;
           if (!info || typeof time?.completed !== "number") {
             stableID = undefined;

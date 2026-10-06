@@ -64,11 +64,18 @@ test("V1 strict preflight writes checks and blocked reasons without command text
   assert.ok(!log.includes("ultra-private-file") && !log.includes("secret-session"));
 });
 
-test("V1 default preflight is disabled and is not misrepresented as active", async (t) => {
+test("V1 default preflight remains disabled even when the handoff coordination hook is installed", async (t) => {
   isolated(t);
   const hooks = await Guardian.server({ directory: setupConfig(t, { enabled: true }), client });
-  assert.equal(hooks["tool.execute.before"], undefined);
-  assert.equal(readGuardianStatus().preflight, "disabled");
+  assert.equal(typeof hooks["tool.execute.before"], "function");
+  await hooks["tool.execute.before"](
+    { tool: "bash", sessionID: "session", callID: "call" },
+    { args: { command: "git clean -fd" } },
+  );
+  const status = readGuardianStatus();
+  assert.equal(status.preflight, "disabled");
+  assert.equal(status.inspected, 0);
+  assert.equal(status.blocked, 0);
 });
 
 test("V2 strict preflight records actual pre-execution decisions", async (t) => {

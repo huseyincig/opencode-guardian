@@ -173,7 +173,8 @@ export function literalShellScripts(command: string): string[] {
   const pattern = /^\s*(?:sudo\s+)?(?:env\s+)?(?:sh|bash|zsh|dash)\s+-[a-z]*c[a-z]*\s+(?:'([^']*)'|"((?:\\.|[^"\\])*)")(?=\s|$)/i;
   for (const stage of splitShellStages(command).flat()) {
     const match = pattern.exec(stage);
-    if (match) scripts.push(match[1] ?? match[2]);
+    const script = match?.[1] ?? match?.[2];
+    if (script !== undefined) scripts.push(script);
   }
   return scripts;
 }

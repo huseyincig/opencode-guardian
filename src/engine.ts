@@ -226,21 +226,25 @@ function sanitizeRuleConfig(setting: unknown): GuardRuleConfig {
   }
 
   if (config.customPhrases !== undefined) {
-    config.customPhrases = Array.isArray(config.customPhrases)
-      ? config.customPhrases.filter(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0
-        )
-      : undefined;
+    if (Array.isArray(config.customPhrases)) {
+      config.customPhrases = config.customPhrases.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0
+      );
+    } else {
+      delete config.customPhrases;
+    }
   }
 
   if (config.exceptions !== undefined) {
-    config.exceptions = Array.isArray(config.exceptions)
-      ? config.exceptions.filter(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0
-        )
-      : undefined;
+    if (Array.isArray(config.exceptions)) {
+      config.exceptions = config.exceptions.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0
+      );
+    } else {
+      delete config.exceptions;
+    }
   }
 
   return config;
@@ -264,10 +268,10 @@ export class GuardEngine {
   constructor(config?: GuardConfig) {
     this.config = {
       ...DEFAULT_CONFIG,
-      ...(config ?? {}),
+      ...config,
       rules: {
-        ...(DEFAULT_CONFIG.rules ?? {}),
-        ...(config?.rules ?? {}),
+        ...DEFAULT_CONFIG.rules,
+        ...config?.rules,
       },
     };
     for (const rule of Object.values(BUILTIN_RULES)) {
@@ -292,7 +296,8 @@ export class GuardEngine {
     sessionID: string,
     directory: string,
     messages: SessionMessage[],
-    snapshots?: ReadonlyMap<string, VerificationSnapshot>
+    snapshots?: ReadonlyMap<string, VerificationSnapshot>,
+    options?: { isSubagent?: boolean }
   ): Promise<EngineExecutionResult> {
     if (this.config.enabled === false || messages.length === 0) {
       return { decision: "pass", results: [] };
@@ -305,17 +310,22 @@ export class GuardEngine {
     }
 
     const {
-      isSubagent,
+      isSubagent: inferredSubagent,
       isRemediationResponse,
       currentTurn,
       turnKey,
     } = extractCurrentTurn(messages);
+    const isSubagent = options?.isSubagent ?? inferredSubagent;
+    const firstCurrentMessage = currentTurn[0];
+    if (!firstCurrentMessage) {
+      return { decision: "pass", results: [] };
+    }
 
     const contract = extractTaskContract(currentTurn);
     const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
     const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
     const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
-      ? [currentTurn[0], ...currentTurn.slice(lastGuardianIndex + 1)]
+      ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
       : currentTurn;
     // Reinspect only new work for the other rules; the completion gate alone
     // needs the full human-turn history to evaluate progress across rounds.
@@ -557,7 +567,7 @@ export class GuardEngine {
             if (!rule) { verified = false; break; }
             const checked = await rule.inspect({
               sessionID, directory, messages,
-              currentTurn: [currentTurn[0], {
+              currentTurn: [firstCurrentMessage, {
                 info: { id: "guardian-current-file", role: "assistant" },
                 parts: [{ type: "tool", tool: "write_to_file",
                   state: { status: "completed", input: { path: rel, content } } }],

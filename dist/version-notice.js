@@ -12,8 +12,12 @@ export function newerStableVersion(current, latest) {
     if (!a || !b)
         return false;
     for (let i = 1; i <= 3; i++) {
-        const currentPart = BigInt(a[i]);
-        const latestPart = BigInt(b[i]);
+        const currentText = a[i];
+        const latestText = b[i];
+        if (currentText === undefined || latestText === undefined)
+            return false;
+        const currentPart = BigInt(currentText);
+        const latestPart = BigInt(latestText);
         if (latestPart !== currentPart)
             return latestPart > currentPart;
     }

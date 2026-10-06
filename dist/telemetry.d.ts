@@ -37,6 +37,7 @@ export type GuardianStatus = {
 export declare const GUARDIAN_MAX_LOG_BYTES: number;
 export declare function guardianStateDirectory(directory?: string): string;
 export declare function guardianEventPath(directory?: string): string;
+export declare function sessionFingerprint(value: string): string;
 export declare function sessionFingerprint(value?: string): string | undefined;
 export declare function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryArg?: string): boolean;
 /** Reads at most the newest 2 MiB across the current log and one archive. */

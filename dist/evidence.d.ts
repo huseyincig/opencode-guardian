@@ -26,7 +26,7 @@ export declare class VerificationSnapshotStore {
     forget(sessionID: string): void;
     clear(): void;
 }
-export declare function collectTurnEvidence(currentTurn: SessionMessage[], directory?: string, snapshots?: ReadonlyMap<string, VerificationSnapshot>): TurnEvidence;
+export declare function collectTurnEvidence(currentTurn: SessionMessage[], _directory?: string, snapshots?: ReadonlyMap<string, VerificationSnapshot>): TurnEvidence;
 export declare function latestEvidence(evidence: TurnEvidence | undefined, kind: EvidenceKind): EvidenceRecord | undefined;
 export declare function hasSuccessfulEvidence(evidence: TurnEvidence | undefined, kind: EvidenceKind): boolean;
 export declare function hasSuccessfulVerification(evidence: TurnEvidence | undefined): boolean;

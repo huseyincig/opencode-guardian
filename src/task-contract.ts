@@ -153,6 +153,7 @@ export function extractTaskContract(
     !(kind === "test" && negations.test) &&
     !deniedVerification(body, kind)
   );
+  const signalLocale = directive ? "structured" : international?.locale;
   return {
     turnKey: human.info.id ?? "no-human-user",
     explicitAction: Boolean(directive) ||
@@ -164,7 +165,7 @@ export function extractTaskContract(
         SOURCE_REVIEW.test(body) || international?.requiresSourceReview === true),
     requiredVerifications,
     requiresExplicitCompletion: iterativeReview || requiredVerifications.length > 0,
-    signalLocale: directive ? "structured" : international?.locale,
+    ...(signalLocale ? { signalLocale } : {}),
   };
 }
 

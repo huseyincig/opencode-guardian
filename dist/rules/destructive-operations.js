@@ -35,8 +35,8 @@ function matchesRequestedTargets(request, command) {
             return false;
         const variants = [target, target.replace(/^\.\//, "")];
         return variants.some((literal) => {
-            let pos = -1;
-            while ((pos = request.indexOf(literal, pos + 1)) !== -1) {
+            let pos = request.indexOf(literal);
+            while (pos !== -1) {
                 const before = request[pos - 1];
                 const afterAt = pos + literal.length;
                 const after = request[afterAt];
@@ -45,6 +45,7 @@ function matchesRequestedTargets(request, command) {
                     (after === "." && afterAt + 1 === request.length);
                 if (beforeOK && afterOK)
                     return true;
+                pos = request.indexOf(literal, pos + 1);
             }
             return false;
         });

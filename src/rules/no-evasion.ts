@@ -152,9 +152,9 @@ export const noEvasionRule: GuardRule = {
               description: canBeSupportedByBaseline(pattern)
                 ? `Baseline/pre-existing claim lacks a successful baseline check: "${pattern}" → "${snippet}"`
                 : `Evasion phrase detected: "${pattern}" → "${snippet}"`,
-              evidence: canBeSupportedByBaseline(pattern)
-                ? ["No successful baseline comparison observed in this turn"]
-                : undefined,
+              ...(canBeSupportedByBaseline(pattern) ? {
+                evidence: ["No successful baseline comparison observed in this turn"],
+              } : {}),
               confidence: "high",
             });
             break;

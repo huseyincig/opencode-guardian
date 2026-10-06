@@ -1,6 +1,6 @@
 # Security Benchmark & Synthetic Preflight Test Suite
 
-Documentation for OpenCode Guardian **v0.6.0**.
+Documentation for OpenCode Guardian **v0.6.1**.
 
 Guardian includes a curated suite of synthetic benchmark tests that evaluate preflight shell-risk detection logic without executing destructive commands or mutating files.
 
@@ -28,6 +28,6 @@ The frozen test suite defined in [`tests/security-benchmark.test.mjs`](../tests/
   - [`tests/full-audit-regressions.test.mjs`](../tests/full-audit-regressions.test.mjs): Covers scoped Git operations, recognized MCP shell tools, filesystem formatting signatures, literal fork bombs, and multiple Go dependency blocks.
   - [`sandbox/comprehensive-test.mjs`](../sandbox/comprehensive-test.mjs): Evaluates 18 end-to-end agent failure and recovery scenarios across all 14 rules.
 
-## v0.6.0 Extended Preflight Regressions
+## v0.6.1 Extended Preflight Regressions
 
 The 17-case frozen benchmark above is a limited synthetic corpus, not universal shell protection. Additional `tests/repair-followup.test.mjs` cases cover privileged Node Command execution and structured `process_start` inputs, including literal Windows CMD/PowerShell deletion forms. Strict preflight remains opt-in and does not replace host permissions or OS sandboxing.

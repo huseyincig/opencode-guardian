@@ -15,12 +15,10 @@ import Guardian, {
   VerificationSnapshotStore,
   noCheatRule,
   noShortcutsRule,
-  noSecretsRule,
   noUnverifiedClaimsRule,
   explicitlyAuthorizedTestEdit,
   explicitlyAuthorizedStubOrPlaceholder,
   recordGuardianEvent,
-  readGuardianStatus,
   guardianEventPath,
   sessionFingerprint,
 } from "../dist/index.js";

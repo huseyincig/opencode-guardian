@@ -28,7 +28,7 @@ test("dynamic commands not safely resolved are denied in strict preflight", () =
     "${DYNAMIC_BINARY} arg",
     "bash -c '" + tick + "echo unknown_binary" + tick + " arg'",
     '"$(echo unknown_binary)" arg',
-    '"\${DYNAMIC_BINARY}" arg',
+    '"${DYNAMIC_BINARY}" arg',
   ]) {
     assert.equal(evaluatePreflight("bash", { command }),
       "uninspectable-shell-input", command);

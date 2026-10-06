@@ -48,7 +48,10 @@ export function auditReasons(results) {
         if (!result.findings.length || !Object.hasOwn(RULE_CODES, result.ruleId))
             continue;
         for (const finding of result.findings) {
-            let code = RULE_CODES[result.ruleId];
+            const defaultCode = RULE_CODES[result.ruleId];
+            if (!defaultCode)
+                continue;
+            let code = defaultCode;
             if (result.ruleId === "integrity/no-silent-failure" &&
                 finding.pattern === "masked verification failure") {
                 code = "masked-verification-failure";

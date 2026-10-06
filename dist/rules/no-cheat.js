@@ -143,8 +143,12 @@ function coverageValues(lines) {
     const keyPattern = /\b(fail-under|threshold|branches|functions|statements|lines)\b\s*[:=]?\s*(\d+(?:\.\d+)?)/gi;
     for (const line of lines) {
         for (const match of line.matchAll(keyPattern)) {
-            const key = match[1].toLowerCase();
-            const value = Number(match[2]);
+            const rawKey = match[1];
+            const rawValue = match[2];
+            if (!rawKey || rawValue === undefined)
+                continue;
+            const key = rawKey.toLowerCase();
+            const value = Number(rawValue);
             if (!Number.isFinite(value))
                 continue;
             const current = values.get(key) ?? [];

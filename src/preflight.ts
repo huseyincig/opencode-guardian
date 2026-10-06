@@ -69,16 +69,18 @@ function evaluateProcessStartPreflight(input: unknown): PreflightFinding | undef
         !value.args.every((arg: unknown) => typeof arg === "string")))) {
     return "uninspectable-shell-input";
   }
-  const executable = value.executable.trim().split(/[\\/]/).at(-1)!
-    .toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+  const executableName = value.executable.trim().split(/[\\/]/).at(-1);
+  if (!executableName) return "uninspectable-shell-input";
+  const executable = executableName.toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
   const args: string[] = (value.args as string[] | undefined) ?? [];
   const shells = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish",
     "powershell", "pwsh", "cmd"]);
   if (shells.has(executable)) {
     const option = args.findIndex((arg) =>
       /^-[a-z]*c[a-z]*$/i.test(arg) || /^(?:\/c|-command|-encodedcommand|-enc)$/i.test(arg));
-    if (option < 0 || args.length <= option + 1 ||
-        /^(?:-encodedcommand|-enc)$/i.test(args[option])) {
+    const shellOption = args[option];
+    if (option < 0 || shellOption === undefined || args.length <= option + 1 ||
+        /^(?:-encodedcommand|-enc)$/i.test(shellOption)) {
       return "uninspectable-shell-input";
     }
     return evaluatePreflight("bash", { command: args.slice(option + 1).join(" ") });
@@ -170,7 +172,7 @@ export function evaluatePreflight(
     }
     const args = input as Record<string, unknown>;
     const fields = ["command", "cmd", "script"].filter((key) =>
-      Object.prototype.hasOwnProperty.call(args, key)
+      Object.hasOwn(args, key)
     );
     if (fields.length === 0) return "uninspectable-shell-input";
     const values = fields.map((key) => args[key]);

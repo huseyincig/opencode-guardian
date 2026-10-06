@@ -1,21 +1,23 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.6.0 verification suite** and **dual-mode live-host acceptance** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.6.1 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.6.0`
-- **Release Baseline:** `v0.6.0` (Live-host verified on commit [`0eebe8b`](https://github.com/huseyincig/opencode-guardian/commit/0eebe8bc3057ba52f705c8d3d5f8ace2eb2e423e), consolidated for release)
-- **Automated Test Suite:** **429 / 429 unit and regression tests passed**
+- **Package Version:** OpenCode Guardian `v0.6.1`
+- **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
+- **Current Automated Source Suite:** **439 / 439 unit and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
-- **Live-Host Dual Acceptance Verdict:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`)
+- **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
+
+> v0.6.1 adds strict TypeScript/lint hardening, dependency audit hardening, redundant-confirmation handling, and foreground subagent handoff finalization. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.1 V1/V2 acceptance run.
 
 ---
 
-## Live-Host Dual Acceptance Matrix (v0.6.0)
+## Historical Live-Host Dual Acceptance Matrix (v0.6.0)
 
 Independent live-host acceptance tests were conducted on real host environments without mocks or simulated tool calls:
 
@@ -97,7 +99,7 @@ Independent live-host acceptance tests were conducted on real host environments 
      - `doctor` (`opencode-guardian.doctor`): Configuration validation and event log health.
      - `rules` (`opencode-guardian.rules`): Active severity configuration for all 14 rules.
      - `config` (`opencode-guardian.config`): Safe, redacted configuration overview.
-     - `version` (`opencode-guardian.version`): Current v0.6.0 version and update status.
+     - `version` (`opencode-guardian.version`): Current v0.6.1 version and update status.
      - `reset` (`opencode-guardian.reset`): Confirmed counter reset dialog.
 
 3. **Slash Commands & Dispatcher:**
@@ -120,18 +122,30 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 ---
 
+## v0.6.1 Handoff and Quality Hardening
+
+The v0.6.1 source adds the following verified behaviors on top of the v0.6.0 release baseline:
+
+- **Foreground subagent finalization barrier:** synchronous V1 `task` and V2 `subagent` calls are tracked from execute-before through execute-after. Parent-facing results are withheld while required Guardian remediation runs on the child, and the latest child report replaces the stale first-pass result.
+- **Background behavior preserved:** background subagents remain on the independent idle-remediation path and are not converted into blocking foreground handoffs.
+- **Authoritative child identity:** when supported by the host, child classification uses `session.parentID` instead of relying only on agent-name heuristics.
+- **Redundant-confirmation guard:** an explicit current user action is no longer handed back as an unnecessary "should I proceed?" decision when no concrete blocker exists.
+- **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
+- **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
+
 ## Automated Source Verification Results
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 429 tests across all 14 rules, adapters, telemetry, and preflight | **429 / 429 PASS** |
+| **Unit & Regression Suite** | 439 tests across all 14 rules, adapters, telemetry, and preflight | **439 / 439 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | Package entrypoints, exports, and status CLI | **PASS** |
-| **Typecheck** | Strict TypeScript compilation (`tsc --noEmit`) | **PASS** |
-| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS (5 MD, 19 links, 1 SVG)** |
+| **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
+| **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
+| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS (5 MD, 22 links, 1 SVG)** |
 | **Production Audit** | `npm audit --omit=dev` | **0 vulnerabilities** |
 | **Development Audit** | Full lockfile dependency audit | **0 vulnerabilities** |
-| **Packaging Dry Run** | `npm pack --dry-run` (78 files, complete entrypoint bundle) | **PASS** |
+| **Packaging Dry Run** | `npm pack --dry-run` (78 files, 114,931 B tarball, complete entrypoint bundle) | **PASS** |
 
 ---
 
@@ -151,8 +165,10 @@ Run all local verification checks from the repository root:
 # Install dependencies
 npm ci
 
-# Typecheck and test suite
+# Typecheck, strict type safety, lint and test suite
 npm run typecheck
+npm run typecheck:strict
+npm run lint
 npm test
 
 # Sandbox scenarios and smoke test
@@ -164,6 +180,7 @@ node scripts/check-docs.mjs
 
 # Security and package integrity audits
 npm audit --omit=dev
+npm audit
 node scripts/check-dev-audit.mjs
 npm pack --dry-run
 ```

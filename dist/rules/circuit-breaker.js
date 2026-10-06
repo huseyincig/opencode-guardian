@@ -21,8 +21,9 @@ function commandFamily(record) {
     ];
     for (const pattern of patterns) {
         const match = pattern.exec(cleaned);
-        if (match)
-            return match[1];
+        const family = match?.[1];
+        if (family)
+            return family;
     }
     return cleaned.split(/\s+/).slice(0, 2).join(" ");
 }
@@ -48,7 +49,7 @@ export const circuitBreakerRule = {
         for (const record of records) {
             const family = commandFamily(record);
             if (record.status === "success") {
-                for (const [signature, state] of [...exactCounts.entries()]) {
+                for (const [signature, state] of exactCounts) {
                     if (commandFamily(state.last) === family) {
                         exactCounts.delete(signature);
                     }
@@ -85,7 +86,7 @@ export const circuitBreakerRule = {
         for (const record of records) {
             const family = commandFamily(record);
             if (record.status === "success") {
-                for (const key of [...streaks.keys()]) {
+                for (const key of streaks.keys()) {
                     if (key.startsWith(`${family}::`))
                         streaks.delete(key);
                 }

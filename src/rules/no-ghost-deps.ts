@@ -182,8 +182,10 @@ function parseRequirementName(line: string): string {
   }
 
   if (editable) return "";
-  const match = /^([A-Za-z0-9_.-]+)/.exec(trimmed.split("#", 1)[0].trim());
-  return match ? normalizePackageName(match[1]) : "";
+  const requirement = trimmed.split("#", 1)[0] ?? "";
+  const match = /^([A-Za-z0-9_.-]+)/.exec(requirement.trim());
+  const name = match?.[1];
+  return name ? normalizePackageName(name) : "";
 }
 
 function parseRequirementsFile(
@@ -315,7 +317,7 @@ function parsePythonManifest(text: string, fileName: string): Set<string> {
 
     if (table === "optional") {
       for (const quoteMatch of line.matchAll(/["']([^"']+)["']/g)) {
-        const name = parseRequirementName(quoteMatch[1]);
+        const name = parseRequirementName(quoteMatch[1] ?? "");
         if (name) deps.add(name);
       }
     }
@@ -389,12 +391,15 @@ function loadGoManifest(
     const modules = new Set<string>();
 
     for (const match of text.matchAll(/^\s*require\s+([^\s()]+)\s+v?[^\s]+/gm)) {
-      modules.add(match[1]);
+      const moduleName = match[1];
+      if (moduleName) modules.add(moduleName);
     }
     // go.mod commonly has separate direct and indirect require blocks.
     // Inspect every block, not only the first one.
     for (const block of text.matchAll(/(?:^|\n)\s*require\s*\(([\s\S]*?)\)/g)) {
-      for (const line of block[1].split(/\r?\n/)) {
+      const body = block[1];
+      if (body === undefined) continue;
+      for (const line of body.split(/\r?\n/)) {
         const mod = /^\s*([^\s/][^\s]*)\s+v?[^\s]+/.exec(line)?.[1];
         if (mod) modules.add(mod);
       }
@@ -454,7 +459,7 @@ function getNodePackageName(importPath: string): string {
   if (importPath.startsWith("@")) {
     return importPath.split("/").slice(0, 2).join("/");
   }
-  return importPath.split("/")[0];
+  return importPath.split("/")[0] ?? "";
 }
 
 const JS_IMPORT_REGEXES = [
@@ -525,9 +530,10 @@ function extractJsImports(code: string): string[] {
 
   for (const regex of JS_IMPORT_REGEXES) {
     regex.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(code)) !== null) {
+    let match = regex.exec(code);
+    while (match !== null) {
       if (mask[match.index] === 1 && match[1]) imports.push(match[1]);
+      match = regex.exec(code);
     }
   }
 
@@ -605,14 +611,16 @@ function extractPythonImports(code: string): string[] {
 
     const from = /^from\s+([A-Za-z_][\w.]*)\s+import\b/.exec(line)?.[1];
     if (from && !from.startsWith(".")) {
-      imports.push(from.split(".")[0]);
+      const moduleName = from.split(".")[0];
+      if (moduleName) imports.push(moduleName);
       continue;
     }
 
     const direct = /^import\s+(.+)$/.exec(line)?.[1];
     if (!direct) continue;
     for (const item of direct.split(",")) {
-      const name = item.trim().split(/\s+as\s+/i)[0].split(".")[0];
+      const importHead = item.trim().split(/\s+as\s+/i)[0] ?? "";
+      const name = importHead.split(".")[0] ?? "";
       if (name && /^[A-Za-z_]\w*$/.test(name)) imports.push(name);
     }
   }
@@ -622,10 +630,16 @@ function extractPythonImports(code: string): string[] {
 function extractGoImports(code: string): string[] {
   const imports: string[] = [];
   for (const match of code.matchAll(/\bimport\s+"([^"]+)"/g)) {
-    imports.push(match[1]);
+    const importPath = match[1];
+    if (importPath) imports.push(importPath);
   }
   for (const block of code.matchAll(/\bimport\s*\(([\s\S]*?)\)/g)) {
-    for (const match of block[1].matchAll(/"([^"]+)"/g)) imports.push(match[1]);
+    const body = block[1];
+    if (body === undefined) continue;
+    for (const match of body.matchAll(/"([^"]+)"/g)) {
+      const importPath = match[1];
+      if (importPath) imports.push(importPath);
+    }
   }
   return imports;
 }
@@ -633,10 +647,12 @@ function extractGoImports(code: string): string[] {
 function extractRustCrates(code: string): string[] {
   const crates = new Set<string>();
   for (const match of code.matchAll(/\bextern\s+crate\s+([A-Za-z_][\w]*)\s*;/g)) {
-    crates.add(match[1]);
+    const crate = match[1];
+    if (crate) crates.add(crate);
   }
   for (const match of code.matchAll(/(?:^|\n)\s*use\s+([A-Za-z_][\w]*)::/g)) {
-    crates.add(match[1]);
+    const crate = match[1];
+    if (crate) crates.add(crate);
   }
   return [...crates];
 }
@@ -806,7 +822,7 @@ export const noGhostDepsRule: GuardRule = {
         if (!manifest) return;
 
         for (const importPath of extractGoImports(code)) {
-          const first = importPath.split("/")[0];
+          const first = importPath.split("/")[0] ?? "";
           if (!first.includes(".")) continue;
           if (
             manifest.ownModule &&

@@ -3606,6 +3606,70 @@ test("task/instruction-fidelity permits historical context without refusal and e
   }
 });
 
+test("task/instruction-fidelity blocks redundant choice handoff after an explicit Turkish action", async () => {
+  const engine = new GuardEngine({ enabled: true });
+  const result = await engine.inspect("redundant-handoff-tr", process.cwd(), taskTurn(
+    "Devam et, gerekli kontrolleri yap ve işi tamamla.",
+    [{ type: "text", text: "İstersen bu iki aksiyonu hemen tek sprintte kapatırım, ya da önce SentinelX/RDC tarafını ölçüp karşılaştırırım. Hangisini tercih edersin?" }]
+  ));
+  assert.equal(result.decision, "block");
+  const finding = result.results
+    .find((item) => item.ruleId === "task/instruction-fidelity")?.findings[0];
+  assert.equal(finding?.pattern, "redundant confirmation after explicit action");
+});
+
+test("task/instruction-fidelity blocks redundant English permission request before work starts", () => {
+  const result = instructionFidelityRule.inspect(taskCtx(
+    "Continue with the implementation and finish the task.",
+    [{ type: "text", text: "Would you like me to proceed with the implementation, or should I stop here?" }]
+  ));
+  assert.equal(result.decision, "block");
+  assert.equal(result.findings[0]?.pattern, "redundant confirmation after explicit action");
+});
+
+test("task/instruction-fidelity does not turn exploratory user questions into mandatory action", () => {
+  const result = instructionFidelityRule.inspect(taskCtx(
+    "Should we implement the feature now?",
+    [{ type: "text", text: "Would you like me to compare the two approaches first?" }]
+  ));
+  assert.equal(result.decision, "pass");
+});
+
+test("task/instruction-fidelity permits a real blocker that requires missing credentials or permission", () => {
+  for (const reply of [
+    "I need the deployment token to continue. Please provide it.",
+    "I cannot continue until repository write permission is granted.",
+  ]) {
+    const result = instructionFidelityRule.inspect(taskCtx(
+      "Continue with deployment and finish the task.",
+      [{ type: "text", text: reply }]
+    ));
+    assert.equal(result.decision, "pass", reply);
+  }
+});
+
+test("task/instruction-fidelity permits a genuinely unresolved technical choice", () => {
+  const result = instructionFidelityRule.inspect(taskCtx(
+    "Implement the storage layer now.",
+    [{ type: "text", text: "I need one architectural choice before I can proceed: SQLite and PostgreSQL require different migration paths. Which database should I target?" }]
+  ));
+  assert.equal(result.decision, "pass");
+});
+
+test("task/instruction-fidelity permits optional follow-up questions after observable work", () => {
+  const result = instructionFidelityRule.inspect(taskCtx(
+    "Implement the feature now.",
+    [
+      completedTool("write_to_file", {
+        path: "src/feature.ts",
+        content: "export const feature = true;",
+      }, "saved", 0),
+      { type: "text", text: "Implemented the requested feature. Would you like me to add documentation too?" },
+    ]
+  ));
+  assert.equal(result.decision, "pass");
+});
+
 test("task/completion-gate catches stopping immediately after a fix when a second review was required", () => {
   const result = taskCompletionRule.inspect(taskCtx(
     "Her hata bulduğunda düzelt ve incelemeyi baştan başlat; hata kalmayana kadar devam et.",
@@ -4036,4 +4100,188 @@ test("configuration rejects incorrect security field types", (t) => {
     remediationBudget: 1, rules: { "security/no-secrets": "warn" },
   }));
   assert.equal(loadConfig(dir).enabled, false);
+});
+
+test("OpenCode V2 foreground subagent handoff waits for Guardian remediation and replaces stale parent output", async () => {
+  const hooks = new Map();
+  let releaseIdle;
+  const idleReady = new Promise((resolve) => { releaseIdle = resolve; });
+  let phase = 0;
+  let syntheticCalls = 0;
+  let waitCalls = 0;
+  const remediationTexts = [];
+  let cleanup;
+
+  const initial = [
+    { id: "v2-u-audit", type: "user", text: "Run the security audit completely and report every issue." },
+    { id: "v2-a-audit-1", type: "assistant", agent: "explore",
+      content: [{ type: "text", text: "The remaining test failure is unrelated to this change." }] },
+  ];
+  const finalContext = () => [
+    ...initial,
+    { id: "v2-g-audit", type: "synthetic", text: remediationTexts[0] },
+    { id: "v2-a-audit-2", type: "assistant", agent: "explore",
+      content: [{ type: "text", text: "Re-ran the security audit. Found two additional minor issues and reported both." }] },
+  ];
+
+  const context = {
+    location: { directory: process.cwd() },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await idleReady;
+          yield { type: "session.idle", data: { sessionID: "v2-child-audit" } };
+          await new Promise((resolve) => {
+            if (signal.aborted) return resolve();
+            signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
+      },
+    },
+    tool: {
+      async hook(name, callback) {
+        const list = hooks.get(name) ?? [];
+        list.push(callback);
+        hooks.set(name, list);
+        return { async dispose() {} };
+      },
+    },
+    session: {
+      async hook() { return { async dispose() {} }; },
+      async get({ sessionID }) {
+        if (sessionID === "v2-child-audit") {
+          return { id: sessionID, parentID: "v2-parent-audit", location: { directory: process.cwd() } };
+        }
+        return { id: sessionID, location: { directory: process.cwd() } };
+      },
+      async context({ sessionID }) {
+        assert.equal(sessionID, "v2-child-audit");
+        return phase === 0 ? initial : finalContext();
+      },
+      async synthetic(input) {
+        syntheticCalls++;
+        remediationTexts.push(input.text);
+        phase = 1;
+        return {};
+      },
+      async wait({ sessionID }) {
+        assert.equal(sessionID, "v2-child-audit");
+        waitCalls++;
+      },
+    },
+  };
+
+  try {
+    cleanup = await OpencodeGuardian.setup(context);
+    const before = hooks.get("execute.before");
+    const after = hooks.get("execute.after");
+    assert.ok(before?.length);
+    assert.ok(after?.length);
+
+    for (const callback of before) {
+      await callback({
+        tool: "subagent",
+        sessionID: "v2-parent-audit",
+        agent: "orchestrator",
+        messageID: "v2-parent-message",
+        id: "v2-sub-call",
+        input: { agent: "explore", description: "security audit", prompt: "audit", background: false },
+      });
+    }
+
+    releaseIdle();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(syntheticCalls, 0, "foreground child idle must be deferred to the handoff barrier");
+
+    const event = {
+      tool: "subagent",
+      sessionID: "v2-parent-audit",
+      agent: "orchestrator",
+      messageID: "v2-parent-message",
+      id: "v2-sub-call",
+      input: { agent: "explore", description: "security audit", prompt: "audit", background: false },
+      status: "completed",
+      result: {
+        output: { sessionID: "v2-child-audit", status: "completed",
+          output: "The remaining test failure is unrelated to this change." },
+        content: '<subagent sessionID="v2-child-audit" state="completed">\nThe remaining test failure is unrelated to this change.\n</subagent>',
+        metadata: { sessionID: "v2-child-audit", status: "completed" },
+      },
+    };
+    for (const callback of after) await callback(event);
+
+    assert.equal(syntheticCalls, 1);
+    assert.equal(waitCalls, 1, "handoff barrier must wait for the remediation turn to finish");
+    assert.match(remediationTexts[0], /^\[opencode-guardian remediation\]/);
+    assert.match(event.result.output.output, /Found two additional minor issues/);
+    assert.match(event.result.content, /Found two additional minor issues/);
+    assert.doesNotMatch(event.result.content, /remaining test failure is unrelated/);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("OpenCode V2 background subagent keeps idle remediation outside the foreground barrier", async () => {
+  const hooks = new Map();
+  let releaseIdle;
+  const idleReady = new Promise((resolve) => { releaseIdle = resolve; });
+  let syntheticCalls = 0;
+  let cleanup;
+  const context = {
+    location: { directory: process.cwd() },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await idleReady;
+          yield { type: "session.idle", data: { sessionID: "v2-child-bg" } };
+          await new Promise((resolve) => {
+            if (signal.aborted) return resolve();
+            signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
+      },
+    },
+    tool: {
+      async hook(name, callback) {
+        const list = hooks.get(name) ?? [];
+        list.push(callback);
+        hooks.set(name, list);
+        return { async dispose() {} };
+      },
+    },
+    session: {
+      async hook() { return { async dispose() {} }; },
+      async get({ sessionID }) {
+        if (sessionID === "v2-child-bg") {
+          return { id: sessionID, parentID: "v2-parent-bg", location: { directory: process.cwd() } };
+        }
+        return { id: sessionID, location: { directory: process.cwd() } };
+      },
+      async context() {
+        return [
+          { id: "v2-u-bg", type: "user", text: "Run the audit." },
+          { id: "v2-a-bg", type: "assistant", agent: "explore",
+            content: [{ type: "text", text: "The failure is unrelated to this change." }] },
+        ];
+      },
+      async synthetic() { syntheticCalls++; return {}; },
+    },
+  };
+  try {
+    cleanup = await OpencodeGuardian.setup(context);
+    for (const callback of hooks.get("execute.before") ?? []) {
+      await callback({
+        tool: "subagent", sessionID: "v2-parent-bg", agent: "orchestrator",
+        messageID: "v2-parent-bg-message", id: "v2-sub-bg",
+        input: { agent: "explore", description: "background audit", prompt: "audit", background: true },
+      });
+    }
+    releaseIdle();
+    for (let i = 0; i < 60 && syntheticCalls === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(syntheticCalls, 1, "background child must retain normal idle remediation");
+  } finally {
+    await cleanup?.();
+  }
 });

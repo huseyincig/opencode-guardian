@@ -1,0 +1,28 @@
+{
+  "env": {
+    "node": true
+  },
+  "overrides": [
+    {
+      "files": ["tests/**/*.test.mjs"],
+      "rules": {
+        "require-yield": "off"
+      }
+    },
+    {
+      "files": ["src/evidence.ts"],
+      "rules": {
+        "no-control-regex": "off"
+      }
+    },
+    {
+      "files": [
+        "src/rules/destructive-operations.ts",
+        "src/rules/no-secrets.ts"
+      ],
+      "rules": {
+        "no-useless-escape": "off"
+      }
+    }
+  ]
+}

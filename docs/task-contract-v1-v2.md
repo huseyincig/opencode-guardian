@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.6.0**.
+Documentation for OpenCode Guardian **v0.6.1**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -18,6 +18,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 | **Resolve Project Directory** | Plugin load directory argument | `ctx.session.get().location.directory` / `ctx.location.directory` |
 | **Plugin Teardown** | V1 dispose() cancels outstanding completion probes | AbortController signal and disposer handles |
 | **Pre-Execution Shell Check** | `tool.execute.before` | `ctx.tool.hook("execute.before")` |
+| **Foreground Subagent Finalization** | `task` execute-before/after coordination + `client.session.prompt(...)` | `subagent` execute-before/after coordination + `ctx.session.synthetic(...)` + `ctx.session.wait(...)` |
 | **TUI Sidebar Extension** | `tui(api)` → `api.slots.register({ sidebar_content })` | `setup(ctx)` → `ctx.ui.slot({ append: "sidebar.content" })` |
 | **TUI Commands / Slash** | `api.command.register` (when available) and `/guardian-status` | Global `ctx.keymap.layer` and `/guardian status` dispatcher |
 
@@ -39,6 +40,11 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
    - Continues up to `iterationBudget` (default `3`, max `5`), requiring observable progress on each turn.
 5. **Circuit Breaking:**
    - Detects explicit blockers (unmet dependencies, missing credentials, system errors) and halts automatic retry loops to present a transparent report to the user.
+6. **Foreground Subagent Handoff Finalization:**
+   - A synchronous V1 `task` or V2 `subagent` call is tracked from execute-before to execute-after.
+   - If the child session has blocking Guardian findings, the parent-facing tool result is held while Guardian sends bounded remediation to the child and waits for that turn to finish.
+   - The child is re-inspected before release. When remediation produces a revised final report, that report replaces the stale first-pass child output returned to the parent.
+   - Background subagents do not enter this blocking handoff path; their existing idle-remediation behavior remains independent.
 
 ---
 
@@ -88,8 +94,8 @@ defined local database example password is tolerated only in an example file
 and only on localhost or a reserved example host. Real-looking API tokens,
 strong passwords, and remote credentials are never exempted by filename.
 
-## v0.6.0 Guardian Command Lifecycle
+## v0.6.1 Guardian Command and Handoff Lifecycle
 
 Both adapters share SDK-independent, redacted reporting in `src/commands.ts`. V1 registers palette and slash actions via `api.command.register` when supported and ties disposal to `api.lifecycle.onDispose`. V2 registers a global keymap layer during TUI setup, separate from the additive sidebar slot.
 
-`/guardian-reset` requires confirmation and appends a `statistics-reset` event. Counters restart while security history remains subject to normal bounded rotation; protection and configuration are unchanged. V2 resolves the active project when invoking a command. Unit tests exercise registrations and failure paths; real-host TUI acceptance is verified for both OpenCode V1 and OpenCode V2 host environments (documented in [`verification-report.md`](verification-report.md)).
+`/guardian-reset` requires confirmation and appends a `statistics-reset` event. Counters restart while security history remains subject to normal bounded rotation; protection and configuration are unchanged. V2 resolves the active project when invoking a command. Unit tests exercise registrations, handoff races, failure paths and cleanup. The historical dual-host TUI acceptance baseline for released v0.6.0 remains documented in [`verification-report.md`](verification-report.md); v0.6.1 automated verification covers the new handoff barrier independently of that historical baseline.

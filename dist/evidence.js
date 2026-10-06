@@ -86,7 +86,11 @@ function statusFromPart(part, outputText) {
     const errorText = stringify(state.error).trim();
     const exitCode = parseExitCode(part, outputText);
     if (state.status === "error") {
-        return { status: "failure", exitCode, errorText: errorText || outputText };
+        return {
+            status: "failure",
+            ...(exitCode !== undefined ? { exitCode } : {}),
+            errorText: errorText || outputText,
+        };
     }
     if (exitCode !== undefined) {
         return {
@@ -101,7 +105,7 @@ function statusFromPart(part, outputText) {
         // such as "error" while a grep/audit/test command still succeeds.
         return { status: "success", errorText: "" };
     }
-    return { status: "unknown", exitCode, errorText };
+    return { status: "unknown", errorText };
 }
 function normalizeCommand(command) {
     return command
@@ -207,7 +211,7 @@ function isDestructiveGitClean(command) {
         const argumentsText = segment.slice(invocation.index + invocation[0].length);
         const flags = [
             ...argumentsText.matchAll(/(?:^|\s)(--[a-z-]+|-[a-z]+)(?=\s|$)/gi),
-        ].map((match) => match[1].toLowerCase());
+        ].flatMap((match) => match[1] ? [match[1].toLowerCase()] : []);
         const isDryRun = flags.some((flag) => flag === "--dry-run" || /^-[a-z]*n/.test(flag));
         const hasForce = flags.some((flag) => flag === "--force" || /^-[a-z]*f/.test(flag));
         return hasForce && !isDryRun;
@@ -261,7 +265,10 @@ export function isSimpleFileRemoval(command, depth = 0) {
         const match = /^\s*(?:sudo\s+)?rm\s+(.+)$/i.exec(candidate);
         if (!match)
             return false;
-        const args = match[1].trim().split(/\s+/);
+        const argumentText = match[1];
+        if (!argumentText)
+            return false;
+        const args = argumentText.trim().split(/\s+/);
         if (args.some((arg) => arg === "--help" || arg === "--version"))
             return false;
         return args.some((arg) => arg !== "--" && !arg.startsWith("-"));
@@ -340,31 +347,37 @@ function recordFromPart(part, sequence) {
         const evidenceStatus = maskedVerification || ambiguousVerification
             ? "unknown"
             : commandStatus;
+        const recordError = evidenceStatus === "unknown" && outcome.status === "success"
+            ? isVerificationFailureMask(command)
+                ? "verification exit status was masked"
+                : nonSequentialCompound || pipedWithoutPipefail
+                    ? "compound/piped command cannot prove each verification succeeded"
+                    : "command completed without an explicit exit code"
+            : outcome.errorText || undefined;
+        const errorFingerprint = outcome.status === "failure"
+            ? normalizeErrorFingerprint(outcome.errorText || outputText)
+            : undefined;
         records.push({
             kind,
             status: evidenceStatus,
             sequence,
             toolName,
-            command: command || undefined,
+            ...(command ? { command } : {}),
             signature: `${baseSignature}:${kind}`,
-            output: outputText || undefined,
-            error: evidenceStatus === "unknown" && outcome.status === "success"
-                ? isVerificationFailureMask(command)
-                    ? "verification exit status was masked"
-                    : nonSequentialCompound || pipedWithoutPipefail
-                        ? "compound/piped command cannot prove each verification succeeded"
-                        : "command completed without an explicit exit code"
-                : outcome.errorText || undefined,
-            exitCode: outcome.exitCode,
-            errorFingerprint: outcome.status === "failure"
-                ? normalizeErrorFingerprint(outcome.errorText || outputText)
-                : undefined,
+            ...(outputText ? { output: outputText } : {}),
+            ...(recordError !== undefined ? { error: recordError } : {}),
+            ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
+            ...(errorFingerprint !== undefined ? { errorFingerprint } : {}),
             ambiguousOutcome: outcome.status === "failure" &&
                 verificationKinds.has(kind) &&
                 verificationKindCount > 1,
         });
     }
     if (hasFileMutation(part)) {
+        const filePath = extractMutatedFilePath(part);
+        const mutationErrorFingerprint = outcome.status === "failure"
+            ? normalizeErrorFingerprint(outcome.errorText || outputText)
+            : undefined;
         records.push({
             kind: "file-mutation",
             status: outcome.status === "failure"
@@ -374,15 +387,13 @@ function recordFromPart(part, sequence) {
                     : "unknown",
             sequence,
             toolName,
-            command: command || undefined,
+            ...(command ? { command } : {}),
             signature: `${baseSignature}:mutation`,
-            filePath: extractMutatedFilePath(part),
-            output: outputText || undefined,
-            error: outcome.errorText || undefined,
-            exitCode: outcome.exitCode,
-            errorFingerprint: outcome.status === "failure"
-                ? normalizeErrorFingerprint(outcome.errorText || outputText)
-                : undefined,
+            ...(filePath !== undefined ? { filePath } : {}),
+            ...(outputText ? { output: outputText } : {}),
+            ...(outcome.errorText ? { error: outcome.errorText } : {}),
+            ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
+            ...(mutationErrorFingerprint !== undefined ? { errorFingerprint: mutationErrorFingerprint } : {}),
         });
     }
     return records;
@@ -410,8 +421,9 @@ export function extractMutatedFilePath(part) {
     const patchRaw = input.patchText ?? input.patch;
     if (typeof patchRaw === "string") {
         const match = patchRaw.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
-        if (match && match[1] !== "/dev/null")
-            return match[1].trim();
+        const filePath = match?.[1];
+        if (filePath && filePath !== "/dev/null")
+            return filePath.trim();
     }
     return undefined;
 }
@@ -487,7 +499,9 @@ export class VerificationSnapshotStore {
         }
         // Bound the call table even in very long sessions.
         if (session.snapshots.size > 512) {
-            session.snapshots.delete(session.snapshots.keys().next().value);
+            const oldest = session.snapshots.keys().next().value;
+            if (oldest !== undefined)
+                session.snapshots.delete(oldest);
         }
     }
     snapshots(sessionID) {
@@ -496,7 +510,7 @@ export class VerificationSnapshotStore {
     forget(sessionID) { this.sessions.delete(sessionID); }
     clear() { this.sessions.clear(); }
 }
-export function collectTurnEvidence(currentTurn, directory, snapshots) {
+export function collectTurnEvidence(currentTurn, _directory, snapshots) {
     const records = [];
     const mutatedFiles = new Set();
     let sequence = 0;

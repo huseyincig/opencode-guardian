@@ -23,14 +23,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run typecheck:strict
+      - run: npm run lint
       - run: node scripts/check-docs.mjs
       - run: npm test
       - run: node sandbox/smoke-test.mjs
       - run: node sandbox/comprehensive-test.mjs
       # Published runtime dependencies must have no known advisories.
       - run: npm audit --omit=dev
-      # The full dev audit remains visible and blocks any new advisory.
-      # One OpenCode SDK upstream chain currently has no patched release.
+      # The full dev audit remains visible and fails on any unexpected advisory.
       - run: node scripts/check-dev-audit.mjs
       - run: npm pack --dry-run
 

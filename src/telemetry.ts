@@ -90,6 +90,8 @@ export function guardianEventPath(directory?: string): string {
   }
   return path.join(dir, "guardian-events.jsonl");
 }
+export function sessionFingerprint(value: string): string;
+export function sessionFingerprint(value?: string): string | undefined;
 export function sessionFingerprint(value?: string): string | undefined {
   return value ? createHash("sha256").update(value).digest("hex").slice(0, 16) : undefined;
 }
@@ -190,7 +192,7 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
     } finally {
       if (fd !== -1) fs.closeSync(fd);
     }
-  } catch (error) {
+  } catch {
     if (!reportedWriteFailure) {
       reportedWriteFailure = true;
       // Do not print error objects (which can contain private paths) into the TUI.

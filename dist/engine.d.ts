@@ -31,5 +31,7 @@ export declare class GuardEngine {
     registerRule(rule: GuardRule): void;
     forgetSession(sessionID: string): void;
     rollbackInspection(sessionID: string): void;
-    inspect(sessionID: string, directory: string, messages: SessionMessage[], snapshots?: ReadonlyMap<string, VerificationSnapshot>): Promise<EngineExecutionResult>;
+    inspect(sessionID: string, directory: string, messages: SessionMessage[], snapshots?: ReadonlyMap<string, VerificationSnapshot>, options?: {
+        isSubagent?: boolean;
+    }): Promise<EngineExecutionResult>;
 }

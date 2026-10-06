@@ -82,25 +82,25 @@ test("reporting differentiates verified, failed and unverified work without fabr
   recordGuardianEvent({ kind: "remediation-verified", rules: ["task/completion-gate"] }, dir);
   recordGuardianEvent({ kind: "remediation-failed", rules: ["task/completion-gate"] }, dir);
   recordGuardianEvent({ kind: "remediation-unverified", rules: ["task/completion-gate"] }, dir);
-  const status = await guardianCommandReport("status", dir, "0.6.0");
+  const status = await guardianCommandReport("status", dir, "0.6.1");
   assert.match(status.message, /Verified \/ failed \/ unverified: 1 \/ 1 \/ 1/);
-  const activity = await guardianCommandReport("activity", dir, "0.6.0");
+  const activity = await guardianCommandReport("activity", dir, "0.6.1");
   assert.match(activity.message, /remediation-verified/);
-  const doctor = await guardianCommandReport("doctor", dir, "0.6.0");
+  const doctor = await guardianCommandReport("doctor", dir, "0.6.1");
   assert.match(doctor.message, /live hook health requires a host test/);
-  const config = await guardianCommandReport("config", dir, "0.6.0");
+  const config = await guardianCommandReport("config", dir, "0.6.1");
   assert.match(config.message, /Sensitive configuration values are not displayed/);
-  const rules = await guardianCommandReport("rules", dir, "0.6.0");
+  const rules = await guardianCommandReport("rules", dir, "0.6.1");
   assert.match(rules.message, /task\/completion-gate/);
 });
 
 test("configuration diagnostics fail safely without showing private file contents", async (t) => {
   const dir = isolated(t);
   fs.writeFileSync(path.join(dir, "opencode-guardian.json"), '{"enabled": "TOP_SECRET_VALUE"}');
-  const report = await guardianCommandReport("doctor", dir, "0.6.0");
+  const report = await guardianCommandReport("doctor", dir, "0.6.1");
   assert.match(report.message, /Configuration: invalid/);
   assert.doesNotMatch(report.message, /TOP_SECRET_VALUE/);
-  const config = await guardianCommandReport("config", dir, "0.6.0");
+  const config = await guardianCommandReport("config", dir, "0.6.1");
   assert.doesNotMatch(config.message, /TOP_SECRET_VALUE/);
 });
 
@@ -202,7 +202,7 @@ test("effective rule severities retain the built-in fallback with partial projec
   const dir = isolated(t);
   fs.writeFileSync(path.join(dir, "opencode-guardian.json"),
     JSON.stringify({ enabled: true, preflight: { enabled: false } }));
-  const result = await guardianCommandReport("rules", dir, "0.6.0");
+  const result = await guardianCommandReport("rules", dir, "0.6.1");
   assert.match(result.message, /safety\/destructive-operations: warn/);
   assert.match(result.message, /security\/no-secrets: error/);
 });

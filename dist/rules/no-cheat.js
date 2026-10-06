@@ -255,9 +255,34 @@ export const noCheatRule = {
         const blocking = [];
         const seen = new Set();
         const blockSnapshotUpdates = context.ruleConfig.blockSnapshotUpdates === true;
-        const hasFailedTestEvidence = Boolean(context.eviden
-…[nc: wire response truncated]…
-struction);
+        const hasFailedTestEvidence = Boolean(context.evidence?.records.some((record) => record.kind === "test" && record.status === "failure"));
+        const blockStructuralTestChanges = context.ruleConfig.blockStructuralTestChanges === true ||
+            hasFailedTestEvidence;
+        const userInstruction = extractUserInstruction(context);
+        const authorizedTestModification = explicitlyAuthorizedTestEdit(userInstruction);
+        const specificallyAuthorized = (finding) => {
+            const pattern = finding.pattern;
+            if (!authorizedTestModification)
+                return false;
+            // A prohibition ("do not skip") is never an authorization to skip.
+            if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:skip|ignore|delete|weaken|remove|only)\b|\b(?:atlama|silme|kaldırma|zayıflatma)\b/iu.test(userInstruction))
+                return false;
+            const namedFile = / in ([\w./-]+\.(?:test|spec)\.[a-z]+)/iu.exec(finding.description)?.[1];
+            const requestedFiles = userInstruction.match(/[\w./-]+\.(?:test|spec)\.[a-z]+/giu) ?? [];
+            if (namedFile && requestedFiles.length &&
+                !requestedFiles.some((requested) => namedFile.toLowerCase().endsWith(requested.toLowerCase())))
+                return false;
+            // Permission to edit tests is NOT permission to bypass them. Each
+            // integrity-reducing operation needs explicit authorization.
+            if (/skip|xit|xtest|ignore|todo/i.test(pattern)) {
+                return /\bskip\b|\batla\b|\bignore\b/i.test(userInstruction);
+            }
+            if (/focus|only/i.test(pattern))
+                return /\bonly\b|\bfocus\b/i.test(userInstruction);
+            if (/assertion weakened/i.test(pattern))
+                return /\bweaken\b|\bgevşet\b/i.test(userInstruction);
+            if (/coverage threshold reduced/i.test(pattern))
+                return /(?:lower|reduce|düşür|azalt)[^\n.!?]{0,45}(?:coverage|threshold|kapsam|eşik)/iu.test(userInstruction);
             if (/test file deleted/i.test(pattern))
                 return /(?:delete|remove|sil|kaldır)[^\n.!?]{0,45}\btests?\b|\btests?\b[^\n.!?]{0,45}(?:delete|remove|sil|kaldır)/iu.test(userInstruction);
             if (/CI test step removed/i.test(pattern))

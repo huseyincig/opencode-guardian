@@ -270,9 +270,81 @@ function GuardianSidebar(props) {
       },
       get children() {
         var _el$12 = _$createElement("text"),
-          _el$13 = _$createElement("b
-…[nc: wire response truncated]…
-rn props.colors.muted;
+          _el$13 = _$createElement("b");
+        _$insertNode(_el$12, _el$13);
+        _$insertNode(_el$13, _$createTextNode(` (↑)`));
+        _$effect(_$p => _$setProp(_el$12, "fg", successColor(), _$p));
+        return _el$12;
+      }
+    }), null);
+    _$insert(_el$5, _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!hasUpdate())() && latestVersion();
+      },
+      get children() {
+        return _$createComponent(StatRow, {
+          label: "Update available",
+          get value() {
+            return `v${latestVersion()}`;
+          },
+          get valueColor() {
+            return successColor();
+          },
+          get muted() {
+            return props.colors.muted;
+          },
+          get text() {
+            return props.colors.text;
+          }
+        });
+      }
+    }), null);
+    _$insert(_el$5, _$createComponent(Show, {
+      get when() {
+        return !open();
+      },
+      get children() {
+        return [_$createComponent(StatRow, {
+          label: "Status",
+          get value() {
+            return statusLabel();
+          },
+          get valueColor() {
+            return statusColor();
+          },
+          get muted() {
+            return props.colors.muted;
+          },
+          get text() {
+            return props.colors.text;
+          }
+        }), _$createComponent(StatRow, {
+          label: "Interventions",
+          get value() {
+            return `${status().warnings}w · ${status().remediations}r`;
+          },
+          get muted() {
+            return props.colors.muted;
+          },
+          get text() {
+            return props.colors.text;
+          }
+        })];
+      }
+    }), null);
+    _$insert(_el$5, _$createComponent(Show, {
+      get when() {
+        return open();
+      },
+      get children() {
+        return [_$createComponent(StatRow, {
+          label: "Mode",
+          value: "Autonomous",
+          get valueColor() {
+            return props.colors.accent;
+          },
+          get muted() {
+            return props.colors.muted;
           },
           get text() {
             return props.colors.text;

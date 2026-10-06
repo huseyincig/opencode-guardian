@@ -21,15 +21,15 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic combines the current **v0.6.1 automated verification** with the historical **v0.6.0 dual-host acceptance baseline**. The v0.6.1 source tree has 439/439 automated tests passing; the full V1/V2 live-host matrix below remains the last completed dual-host baseline.
+> The graphic combines the current **v0.6.5 automated verification** with the historical **v0.6.0 dual-host acceptance baseline**. The v0.6.5 source tree has 474/474 automated tests passing; the full V1/V2 live-host matrix below remains the last completed dual-host baseline.
 
-Guardian **v0.6.1** is validated as follows:
+Guardian **v0.6.5** is validated as follows:
 
-- **Current Automated Verification:** **439 / 439** unit and regression tests passing.
+- **Current Automated Verification:** **474 / 474** unit and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
 - **Static Analysis:** standard and strict TypeScript gates pass; Oxlint reports **0 warnings / 0 errors**.
 - **Dependency Security:** **0 vulnerabilities** across production and development dependency audits.
-- **Historical Dual-Host Baseline:** **4 / 4 — ACCEPTED** on real OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for released v0.6.0. v0.6.1 adds targeted foreground-subagent handoff hardening on top of that baseline.
+- **Historical Dual-Host Baseline:** **4 / 4 — ACCEPTED** on real OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for released v0.6.0. v0.6.5 adds targeted foreground-subagent handoff hardening and Smart Questions protocol integration on top of that baseline.
 
 Read the comprehensive [Verification and Acceptance Report](docs/verification-report.md) for reproduction steps, methodology, evidence boundaries, and the historical live-host matrix.
 
@@ -115,7 +115,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.6.1
+▶ Guardian                 v0.6.5
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -129,7 +129,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.6.1
+▼ Guardian                 v0.6.5
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0
@@ -355,9 +355,9 @@ flowchart TD
     Outcome -->|Evidence insufficient| Unverified[remediation-unverified]
 ```
 
-The diagram illustrates the v0.6.1 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
+The diagram illustrates the v0.6.5 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
 
-For foreground delegated work (`task` on V1, `subagent` on V2), v0.6.1 adds a bounded handoff barrier. Child-session findings are inspected before the parent tool result settles; if remediation is required, Guardian resumes the child, waits for the remediation turn to finish, re-inspects it, and replaces the parent-facing tool result with the latest child report. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
+For foreground delegated work (`task` on V1, `subagent` on V2), v0.6.5 adds a bounded handoff barrier. Child-session findings are inspected before the parent tool result settles; if remediation is required, Guardian resumes the child, waits for the remediation turn to finish, re-inspects it, and replaces the parent-facing tool result with the latest child report. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
 
 ---
 

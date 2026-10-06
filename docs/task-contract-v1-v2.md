@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.6.1**.
+Documentation for OpenCode Guardian **v0.6.5**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -94,8 +94,8 @@ defined local database example password is tolerated only in an example file
 and only on localhost or a reserved example host. Real-looking API tokens,
 strong passwords, and remote credentials are never exempted by filename.
 
-## v0.6.1 Guardian Command and Handoff Lifecycle
+## v0.6.5 Guardian Command and Handoff Lifecycle
 
 Both adapters share SDK-independent, redacted reporting in `src/commands.ts`. V1 registers palette and slash actions via `api.command.register` when supported and ties disposal to `api.lifecycle.onDispose`. V2 registers a global keymap layer during TUI setup, separate from the additive sidebar slot.
 
-`/guardian-reset` requires confirmation and appends a `statistics-reset` event. Counters restart while security history remains subject to normal bounded rotation; protection and configuration are unchanged. V2 resolves the active project when invoking a command. Unit tests exercise registrations, handoff races, failure paths and cleanup. The historical dual-host TUI acceptance baseline for released v0.6.0 remains documented in [`verification-report.md`](verification-report.md); v0.6.1 automated verification covers the new handoff barrier independently of that historical baseline.
+`/guardian-reset` requires confirmation and appends a `statistics-reset` event. Counters restart while security history remains subject to normal bounded rotation; protection and configuration are unchanged. V2 resolves the active project when invoking a command. Unit tests exercise registrations, handoff races, failure paths and cleanup. The historical dual-host TUI acceptance baseline for released v0.6.0 remains documented in [`verification-report.md`](verification-report.md); v0.6.5 automated verification covers the new handoff barrier independently of that historical baseline.

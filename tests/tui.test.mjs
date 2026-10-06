@@ -142,11 +142,11 @@ test("Guardian sidebar is compact by default and contains expandable details", a
   assert.doesNotMatch(runtime, /@opentui\/solid\/jsx-runtime/);
 });
 
-test("dual-mode SDK entrypoints and Node 24 package contract", async () => {
+test("dual-mode SDK entrypoints and Node package contract", async () => {
   const { readFileSync } = await import("node:fs");
   const { readFile } = await import("node:fs/promises");
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(pkg.engines.node, ">=24.0.0");
+  assert.equal(pkg.engines.node, ">=22.0.0");
   const v1 = readFileSync(new URL(import.meta.resolve("@opencode-ai/plugin/tui")), "utf8");
   const v2 = readFileSync(new URL(import.meta.resolve("@opencode/plugin/tui")), "utf8");
   assert.equal(typeof v1, "string");

@@ -5,7 +5,7 @@
 [![OpenCode: v1 & v2](https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20Dual--Mode-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
 [![Live baseline: v0.6.0 4/4](https://img.shields.io/badge/Live%20Baseline-v0.6.0%204%2F4-10b981?logo=checkmarx&logoColor=white)](docs/verification-report.md)
 [![Tests: 439/439 Passing](https://img.shields.io/badge/Tests-439%2F439%20Passing-339933?logo=githubactions&logoColor=white)](docs/verification-report.md)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

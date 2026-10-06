@@ -37,6 +37,6 @@ The mappings above are continuously validated through automated test suites:
 - [`tests/owasp-scope-regression.test.mjs`](../tests/owasp-scope-regression.test.mjs): Path scoping and `sudo` privilege escalation tests.
 - [`sandbox/comprehensive-test.mjs`](../sandbox/comprehensive-test.mjs): 18 end-to-end failure mode and recovery scenarios.
 
-## v0.6.5 Operational Visibility
+## v0.6.7 Operational Visibility
 
 The TUI adds project-scoped, redacted status, activity and diagnostics commands. Reset requires confirmation and preserves audit events subject to normal rotation. These are operational features, not new cryptographic controls or proof of OWASP-wide protection; live-host V1/V2 acceptance is independently verified and documented in [Verification Report](verification-report.md).

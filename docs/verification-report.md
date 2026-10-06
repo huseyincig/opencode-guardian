@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.6.5 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.6.7 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.6.5`
+- **Package Version:** OpenCode Guardian `v0.6.7`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **474 / 474 unit and regression tests passed**
+- **Current Automated Source Suite:** **484 / 484 unit and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.6.5 adds strict TypeScript/lint hardening, dependency audit hardening, redundant-confirmation handling, foreground subagent handoff finalization, and the verified Smart Questions handoff protocol (`[OPENCODE_HANDOFF:v1]`). The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.5 V1/V2 acceptance run.
+> v0.6.7 adds capability-aware subagent remediation isolation, strict TypeScript/lint hardening, dependency audit hardening, redundant-confirmation handling, foreground subagent handoff finalization, and the verified Smart Questions handoff protocol (`[OPENCODE_HANDOFF:v1]`). The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.7 V1/V2 acceptance run.
 
 ---
 
@@ -122,10 +122,11 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 ---
 
-## v0.6.5 Handoff and Quality Hardening
+## v0.6.7 Handoff, Quality, and Capability-Aware Hardening
 
-The v0.6.5 source adds the following verified behaviors on top of the v0.6.0 release baseline:
+The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 release baseline:
 
+- **Capability-aware subagent remediation policy:** resolves host-evaluated agent mutation profiles (`read_only`, `write_allowed`, `write_requires_approval`, `unknown`). Read-only subagents (reviewers, oracles, explorers) receive zero synthetic remediation prompts (`remediationCount: 0`) and never enter redundant review loops upon completing their analysis; write-allowed subagents (fixers, editors) retain bounded remediation support with controlled retry limits (`maxRounds: 6`).
 - **Foreground subagent finalization barrier:** synchronous V1 `task` and V2 `subagent` calls are tracked from execute-before through execute-after. Parent-facing results are withheld while required Guardian remediation runs on the child, and the latest child report replaces the stale first-pass result.
 - **Smart Questions handoff protocol:** decoupled, versioned `[OPENCODE_HANDOFF:v1]` protocol integration with strict native question tool validation and rule-delegated handoff requirements.
 - **Background behavior preserved:** background subagents remain on the independent idle-remediation path and are not converted into blocking foreground handoffs.
@@ -138,7 +139,7 @@ The v0.6.5 source adds the following verified behaviors on top of the v0.6.0 rel
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 474 tests across all 14 rules, adapters, telemetry, handoff protocol and preflight | **474 / 474 PASS** |
+| **Unit & Regression Suite** | 484 tests across all 14 rules, adapters, telemetry, handoff protocol and preflight | **484 / 484 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | Package entrypoints, exports, and status CLI | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |

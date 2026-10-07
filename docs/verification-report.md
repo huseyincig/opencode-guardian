@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.6.9 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.7.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.6.9`
+- **Package Version:** OpenCode Guardian `v0.7.0`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **521 / 521 unit, security, and regression tests passed**
+- **Current Automated Source Suite:** **522 / 522 unit, security, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.6.9 enforces strict concrete failure remediation invariants (eliminating task-completion early pass on tool failures for write-capable agents), high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, and maintains multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.9 V1/V2 acceptance run.
+> v0.7.0 enforces strict concrete failure remediation invariants (eliminating task-completion early pass on tool failures for write-capable agents), high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, lifecycle reverse-splice disposal, and maintains multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.7.0 V1/V2 acceptance run.
 
 ---
 
@@ -121,6 +121,18 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.7.0 Lifecycle Reverse-Splice Disposal, Turn Budget Scope, and Preflight Parity
+
+The v0.7.0 release addresses line-by-line plugin contract findings and hardens runtime safety:
+
+- **Lifecycle Reverse-Splice Idempotent Disposal (`index`):**
+  - Replaced all in-place `registrations.reverse()` calls with `registrations.splice(0).reverse()` across all error and teardown blocks, adhering to the verified OpenCode plugin lifecycle specification.
+- **Accurately Scoped Turn Remediation Budgeting (`engine` & `state`):**
+  - Scoped the `remediationMessagesCount >= budget` check strictly behind `isRemediationResponse`, preventing premature `pass` decisions on new/unexhausted rules occurring later in the turn while preserving loop guard when retrying identical failures.
+  - Removed premature `state.fingerprints.has(fingerprint)` early-return in `canRemediate()`, allowing multi-attempt budgeting (`budget > 1`) to function properly.
+- **V2 Preflight Safety Parity (`index`):**
+  - Integrated `assessCommandPreflight` checks into V2 `execute.before` hook when `!strictPreflight`, ensuring shell safety evaluation parity with V1.
 
 ## v0.6.9 Concrete Failure Invariants, Instruction Fidelity, and Fingerprint Remediation Budgeting
 

@@ -2804,6 +2804,35 @@ test("Guardian remediation marker remains the loop-guard authority", async () =>
   assert.equal(result.decision, "pass");
 });
 
+test("new substantive failure on different rule receives remediation even after prior remediation in turn", async () => {
+  const engine = new GuardEngine({ enabled: true });
+  const messages1 = [
+    { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "write the function" }] },
+    {
+      info: { id: "a1", role: "assistant" },
+      parts: [{ type: "text", text: "This basic implementation is good enough for now." }],
+    },
+  ];
+  const res1 = await engine.inspect("s1", process.cwd(), messages1);
+  assert.equal(res1.decision, "block");
+  assert.ok(res1.results.some((r) => r.ruleId === "quality/no-shortcuts"));
+
+  const messages2 = [
+    ...messages1,
+    {
+      info: { id: "rem1", role: "user" },
+      parts: [{ type: "text", text: REMEDIATION_MARKER + "\nFix shortcuts." }],
+    },
+    {
+      info: { id: "a2", role: "assistant" },
+      parts: [{ type: "text", text: "This is unrelated to this change." }],
+    },
+  ];
+  const res2 = await engine.inspect("s1", process.cwd(), messages2);
+  assert.equal(res2.decision, "block");
+  assert.ok(res2.results.some((r) => r.ruleId === "discipline/no-evasion"));
+});
+
 
 test("quality/no-shortcuts does not flag shortcut words inside identifiers or string literals", () => {
   const context = makeEvidenceContext([

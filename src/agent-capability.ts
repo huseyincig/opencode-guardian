@@ -322,7 +322,7 @@ export function canSubagentRemediate(profile: AgentMutationProfile): boolean {
 
 export function isWriteCapableAgent(context: {
   isSubagent?: boolean;
-  agentCapability?: AgentMutationCapability;
+  agentCapability?: AgentMutationCapability | undefined;
 }): boolean {
   if (context.isSubagent) {
     return context.agentCapability === "write-allowed";

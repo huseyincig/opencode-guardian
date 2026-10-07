@@ -109,7 +109,7 @@ export interface TurnInspectionContext {
     messages: SessionMessage[];
     currentTurn: SessionMessage[];
     isSubagent?: boolean;
-    agentCapability?: AgentMutationCapability;
+    agentCapability?: AgentMutationCapability | undefined;
     ruleConfig: GuardRuleConfig;
     evidence?: TurnEvidence;
 }

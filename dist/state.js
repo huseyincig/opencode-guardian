@@ -44,8 +44,6 @@ export class SessionStateStore {
         const count = state.fingerprintCounts?.get(fingerprint) ?? 0;
         if (count >= budget)
             return false;
-        if (state.fingerprints.has(fingerprint))
-            return false;
         return true;
     }
     hasExhaustedRule(sessionID, turnKey, rules, budget) {

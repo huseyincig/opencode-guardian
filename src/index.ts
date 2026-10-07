@@ -1046,7 +1046,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   // immediately so a stale foreground marker can never suppress idle handling.
   if (sanitizerOpts && typeof context.tool?.hook !== "function") {
     controller.abort();
-    for (const registration of registrations.reverse()) {
+    for (const registration of registrations.splice(0).reverse()) {
       try { await registration.dispose(); } catch {}
     }
     throw new Error("[opencode-guardian secrets] V2 execute.after hook is unavailable; POST redaction cannot be enabled safely.");
@@ -1061,11 +1061,18 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     try {
       if (canFinalizeSubagent) {
         const before = await context.tool.hook("execute.before", (event) => {
-          if (controller.signal.aborted || event.tool !== "subagent") return;
+          if (controller.signal.aborted) return;
           const input =
             event.input && typeof event.input === "object" && !Array.isArray(event.input)
               ? event.input as Record<string, unknown>
               : {};
+          if (!strictPreflight) {
+            const cmd = input.command ?? input.cmd;
+            if (cmd) {
+              assessCommandPreflight(cmd);
+            }
+          }
+          if (event.tool !== "subagent") return;
           if (input.background === true) return;
           markForegroundHandoff(foregroundHandoffs, event.sessionID, event.id);
         });
@@ -1222,7 +1229,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         rules: ["verification-snapshot-unavailable"] }, directory);
       if (sanitizerOpts) {
         controller.abort();
-        for (const registration of registrations.reverse()) {
+        for (const registration of registrations.splice(0).reverse()) {
           try { await registration.dispose(); } catch {}
         }
         throw new Error("[opencode-guardian secrets] V2 execute.after security hook registration failed; POST redaction cannot be enabled safely.", { cause: error });
@@ -1232,7 +1239,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
   if (sanitizerOpts && typeof context.session.hook !== "function") {
     controller.abort();
-    for (const registration of registrations.reverse()) {
+    for (const registration of registrations.splice(0).reverse()) {
       try { await registration.dispose(); } catch {}
     }
     throw new Error("[opencode-guardian secrets] V2 session.context hook is unavailable; FINAL context redaction cannot be enabled safely.");
@@ -1293,7 +1300,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       recordGuardianEvent({ kind: "inspection-error" }, directory);
       if (sanitizerOpts) {
         controller.abort();
-        for (const registration of registrations.reverse()) {
+        for (const registration of registrations.splice(0).reverse()) {
           try { await registration.dispose(); } catch {}
         }
         throw new Error("[opencode-guardian secrets] V2 session context security hook registration failed; FINAL context redaction cannot be enabled safely.", { cause: error });
@@ -1451,7 +1458,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     verificationStore.clear();
     foregroundHandoffs.clear();
     clearAllAgentCapabilities();
-    for (const registration of registrations.reverse()) {
+    for (const registration of registrations.splice(0).reverse()) {
       try { await registration.dispose(); } catch {
         // An optional disposer failing must not prevent remaining cleanup.
       }

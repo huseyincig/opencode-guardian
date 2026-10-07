@@ -348,7 +348,7 @@ export class GuardEngine {
     directory: string,
     messages: SessionMessage[],
     snapshots?: ReadonlyMap<string, VerificationSnapshot>,
-    options?: { isSubagent?: boolean; agentCapability?: AgentMutationCapability }
+    options?: { isSubagent?: boolean; agentCapability?: AgentMutationCapability | undefined }
   ): Promise<EngineExecutionResult> {
     if (this.config.enabled === false || messages.length === 0) {
       return { decision: "pass", results: [] };
@@ -580,6 +580,7 @@ export class GuardEngine {
           (rule) =>
             this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
             (!contract?.iterativeReview &&
+              isRemediationResponse &&
               remediationMessagesCount >= budget &&
               (pendingRules.length === 0 || pendingRules.includes(rule)))
         );

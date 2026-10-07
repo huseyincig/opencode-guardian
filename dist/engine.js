@@ -469,6 +469,7 @@ export class GuardEngine {
             const rulesExhausted = blockingRuleIds.length > 0 &&
                 blockingRuleIds.every((rule) => this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
                     (!contract?.iterativeReview &&
+                        isRemediationResponse &&
                         remediationMessagesCount >= budget &&
                         (pendingRules.length === 0 || pendingRules.includes(rule))));
             if ((failedPendingRule && this.sessionState.hasExhaustedRule(sessionID, turnKey, pendingRules, budget)) ||

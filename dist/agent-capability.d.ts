@@ -39,7 +39,7 @@ export declare function evaluateAgentMutationProfile(input: NormalizedAgentInput
 export declare function canSubagentRemediate(profile: AgentMutationProfile): boolean;
 export declare function isWriteCapableAgent(context: {
     isSubagent?: boolean;
-    agentCapability?: AgentMutationCapability;
+    agentCapability?: AgentMutationCapability | undefined;
 }): boolean;
 export declare function getCachedAgentCapability(sessionID: string): AgentMutationProfile | undefined;
 export declare function cacheAgentCapability(sessionID: string, profile: AgentMutationProfile): void;

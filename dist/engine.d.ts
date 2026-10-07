@@ -35,6 +35,6 @@ export declare class GuardEngine {
     rollbackInspection(sessionID: string): void;
     inspect(sessionID: string, directory: string, messages: SessionMessage[], snapshots?: ReadonlyMap<string, VerificationSnapshot>, options?: {
         isSubagent?: boolean;
-        agentCapability?: AgentMutationCapability;
+        agentCapability?: AgentMutationCapability | undefined;
     }): Promise<EngineExecutionResult>;
 }

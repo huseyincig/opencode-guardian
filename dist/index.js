@@ -910,7 +910,7 @@ const setup = async (context) => {
     // immediately so a stale foreground marker can never suppress idle handling.
     if (sanitizerOpts && typeof context.tool?.hook !== "function") {
         controller.abort();
-        for (const registration of registrations.reverse()) {
+        for (const registration of registrations.splice(0).reverse()) {
             try {
                 await registration.dispose();
             }
@@ -927,11 +927,19 @@ const setup = async (context) => {
         try {
             if (canFinalizeSubagent) {
                 const before = await context.tool.hook("execute.before", (event) => {
-                    if (controller.signal.aborted || event.tool !== "subagent")
+                    if (controller.signal.aborted)
                         return;
                     const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
                         ? event.input
                         : {};
+                    if (!strictPreflight) {
+                        const cmd = input.command ?? input.cmd;
+                        if (cmd) {
+                            assessCommandPreflight(cmd);
+                        }
+                    }
+                    if (event.tool !== "subagent")
+                        return;
                     if (input.background === true)
                         return;
                     markForegroundHandoff(foregroundHandoffs, event.sessionID, event.id);
@@ -1074,7 +1082,7 @@ const setup = async (context) => {
                 rules: ["verification-snapshot-unavailable"] }, directory);
             if (sanitizerOpts) {
                 controller.abort();
-                for (const registration of registrations.reverse()) {
+                for (const registration of registrations.splice(0).reverse()) {
                     try {
                         await registration.dispose();
                     }
@@ -1086,7 +1094,7 @@ const setup = async (context) => {
     }
     if (sanitizerOpts && typeof context.session.hook !== "function") {
         controller.abort();
-        for (const registration of registrations.reverse()) {
+        for (const registration of registrations.splice(0).reverse()) {
             try {
                 await registration.dispose();
             }
@@ -1150,7 +1158,7 @@ const setup = async (context) => {
             recordGuardianEvent({ kind: "inspection-error" }, directory);
             if (sanitizerOpts) {
                 controller.abort();
-                for (const registration of registrations.reverse()) {
+                for (const registration of registrations.splice(0).reverse()) {
                     try {
                         await registration.dispose();
                     }
@@ -1301,7 +1309,7 @@ const setup = async (context) => {
         verificationStore.clear();
         foregroundHandoffs.clear();
         clearAllAgentCapabilities();
-        for (const registration of registrations.reverse()) {
+        for (const registration of registrations.splice(0).reverse()) {
             try {
                 await registration.dispose();
             }

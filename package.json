@@ -73,7 +73,7 @@
     "typescript": "^5.8.0"
   },
   "bin": {
-    "opencode-guardian-status": "./scripts/guardian-status.mjs"
+    "opencode-guardian-status": "scripts/guardian-status.mjs"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.5.8",

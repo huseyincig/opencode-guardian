@@ -9,6 +9,7 @@ import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV1AgentCapability, resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
 import { assessCommandPreflight, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
+import { createGuardianToastNotifier, } from "./toast.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -39,6 +40,7 @@ export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
+export * from "./toast.js";
 function sanitizeV2ToolError(error, options) {
     const fallback = () => {
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
@@ -223,7 +225,7 @@ function latestAssistantText(messages) {
         .trim();
     return text || undefined;
 }
-function recordInspectionOutcome(result, sessionID, directory) {
+function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
     const findings = result.results.filter((item) => item.findings.length > 0);
     if (result.remediationStatus === "verified") {
         const verifiedRules = result.pendingRemediationRules?.length
@@ -261,6 +263,10 @@ function recordInspectionOutcome(result, sessionID, directory) {
             rules: findings.map((item) => item.ruleId),
             reasons: auditReasons(findings),
         }, directory);
+        toastNotifier?.notify({
+            kind: "warning",
+            ruleIds: findings.map((item) => item.ruleId),
+        });
     }
     return findings;
 }
@@ -309,7 +315,7 @@ async function finalizeSubagentHandoff(input) {
             }, input.directory);
             throw new Error("[opencode-guardian handoff] subagent inspection failed.");
         }
-        const findings = recordInspectionOutcome(result, input.sessionID, input.directory);
+        const findings = recordInspectionOutcome(result, input.sessionID, input.directory, input.toastNotifier);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
             if (agentCapability !== "write-allowed") {
                 return latestAssistantText(messages);
@@ -327,6 +333,10 @@ async function finalizeSubagentHandoff(input) {
                     rules: findings.map((item) => item.ruleId),
                     reasons: auditReasons(findings),
                 }, input.directory);
+                input.toastNotifier?.notify({
+                    kind: "remediation",
+                    ruleIds: findings.map((item) => item.ruleId),
+                });
             }
             catch {
                 result.rollback?.();
@@ -354,7 +364,7 @@ async function finalizeSubagentHandoff(input) {
 /**
  * Common handler to process session.idle events across v1 and v2.
  */
-async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability) {
+async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability, toastNotifier) {
     let stage = "message-fetch";
     try {
         if (signal?.aborted)
@@ -384,7 +394,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             result.rollback?.();
             return;
         }
-        const findings = recordInspectionOutcome(result, sessionID, directory);
+        const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
             if (effectiveIsSubagent && agentCapability !== "write-allowed") {
                 return;
@@ -399,6 +409,10 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 if (signal?.aborted)
                     return;
                 recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
+                toastNotifier?.notify({
+                    kind: "remediation",
+                    ruleIds: findings.map((item) => item.ruleId),
+                });
             }
             catch (promptError) {
                 result.rollback?.();
@@ -425,7 +439,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
     }
 }
 /** Records only recognized shell/file calls and a rule code, never raw commands. */
-function inspectPreflight(tool, args, sessionID, directory, additionalTools = []) {
+function inspectPreflight(tool, args, sessionID, directory, additionalTools = [], toastNotifier) {
     if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool))
         return;
     const finding = evaluatePreflight(tool, args, additionalTools);
@@ -437,8 +451,14 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
         ...(safeTool ? { tool: safeTool } : {}),
         ...(finding ? { rules: [finding] } : {}),
     }, directory);
-    if (finding)
+    if (finding) {
+        toastNotifier?.notify({
+            kind: "preflight-blocked",
+            ruleId: finding,
+            ...(safeTool ? { tool: safeTool } : {}),
+        });
         throw new GuardianPreflightError(finding);
+    }
 }
 const server = async ({ client, directory }, pluginOptions) => {
     registerGuardianCapability();
@@ -456,6 +476,9 @@ const server = async ({ client, directory }, pluginOptions) => {
     const mergedConfig = {
         ...config,
         ...(typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+        ...(rawOptions.notifications && typeof rawOptions.notifications === "object"
+            ? { notifications: rawOptions.notifications }
+            : {}),
         secrets: {
             ...config.secrets,
             ...(rawOptions.secrets && typeof rawOptions.secrets === "object" ? rawOptions.secrets : {}),
@@ -465,6 +488,11 @@ const server = async ({ client, directory }, pluginOptions) => {
         },
     };
     const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
+    const toastNotifier = createGuardianToastNotifier({
+        client,
+        directory,
+        enabled: mergedConfig.notifications?.enabled !== false,
+    });
     const engine = new GuardEngine(mergedConfig);
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
@@ -544,7 +572,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                         cacheAgentCapability(sessionID, p);
                         return p;
                     }
-                    : undefined);
+                    : undefined, toastNotifier);
             },
             onError: (sessionID, _error) => {
                 // The V1 host can render console output over its interactive prompt.
@@ -582,7 +610,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                 markForegroundHandoff(foregroundHandoffs, input.sessionID, input.callID);
             }
             if (strictPreflight) {
-                inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools);
+                inspectPreflight(input.tool, output.args, input.sessionID, directory, config.preflight?.shellTools, toastNotifier);
             }
         },
         "tool.execute.after": async (input, output) => {
@@ -656,6 +684,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                                     }
                                 },
                                 snapshots: () => verificationStore.snapshots(childID),
+                                toastNotifier,
                             });
                             if (revised !== undefined) {
                                 output.output = renderV1TaskResult(childID, revised);
@@ -801,7 +830,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                     cacheAgentCapability(sessionID, p);
                     return p;
                 }
-                : undefined);
+                : undefined, toastNotifier);
         },
     };
 };
@@ -820,6 +849,9 @@ const setup = async (context) => {
     const mergedConfig = {
         ...config,
         ...(rawOptions && typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+        ...(rawOptions?.notifications && typeof rawOptions.notifications === "object"
+            ? { notifications: rawOptions.notifications }
+            : {}),
         secrets: {
             ...config.secrets,
             ...(rawOptions?.secrets && typeof rawOptions.secrets === "object" ? rawOptions.secrets : {}),
@@ -843,6 +875,11 @@ const setup = async (context) => {
         }
         return;
     }
+    const toastNotifier = createGuardianToastNotifier({
+        context,
+        directory,
+        enabled: mergedConfig.notifications?.enabled !== false,
+    });
     const controller = new AbortController();
     let events;
     try {
@@ -893,7 +930,7 @@ const setup = async (context) => {
                 if (cmd) {
                     assessCommandPreflight(cmd);
                 }
-                inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools);
+                inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools, toastNotifier);
             });
             if (!registration || typeof registration.dispose !== "function") {
                 throw new Error("V2 tool hook did not return a valid registration.");
@@ -1040,6 +1077,7 @@ const setup = async (context) => {
                                 },
                                 snapshots: () => verificationStore.snapshots(childID),
                                 signal: controller.signal,
+                                toastNotifier,
                             });
                             if (revised !== undefined) {
                                 event.result = {
@@ -1246,7 +1284,7 @@ const setup = async (context) => {
                             cacheAgentCapability(sessionID, p);
                             return p;
                         }
-                        : undefined);
+                        : undefined, toastNotifier);
                 }
                 if (controller.signal.aborted)
                     return;

@@ -29,6 +29,10 @@ import {
   sanitizeString,
   sanitizeToolResult,
 } from "./secrets/index.js";
+import {
+  createGuardianToastNotifier,
+  type GuardianToastNotifier,
+} from "./toast.js";
 
 export * from "./types.js";
 export * from "./engine.js";
@@ -60,6 +64,7 @@ export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
+export * from "./toast.js";
 
 function sanitizeV2ToolError<T>(
   error: T,
@@ -277,7 +282,8 @@ function latestAssistantText(messages: readonly SessionMessage[]): string | unde
 function recordInspectionOutcome(
   result: EngineExecutionResult,
   sessionID: string,
-  directory: string
+  directory: string,
+  toastNotifier?: GuardianToastNotifier
 ) {
   const findings = result.results.filter((item) => item.findings.length > 0);
 
@@ -316,6 +322,10 @@ function recordInspectionOutcome(
       rules: findings.map((item) => item.ruleId),
       reasons: auditReasons(findings),
     }, directory);
+    toastNotifier?.notify({
+      kind: "warning",
+      ruleIds: findings.map((item) => item.ruleId),
+    });
   }
 
   return findings;
@@ -331,6 +341,7 @@ async function finalizeSubagentHandoff(input: {
   signal?: AbortSignal | undefined;
   agentName?: string | undefined;
   resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined;
+  toastNotifier?: GuardianToastNotifier | undefined;
 }): Promise<string | undefined> {
   let remediated = false;
   let resolvedCapability: AgentMutationProfile | undefined;
@@ -383,7 +394,7 @@ async function finalizeSubagentHandoff(input: {
       throw new Error("[opencode-guardian handoff] subagent inspection failed.");
     }
 
-    const findings = recordInspectionOutcome(result, input.sessionID, input.directory);
+    const findings = recordInspectionOutcome(result, input.sessionID, input.directory, input.toastNotifier);
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
       if (agentCapability !== "write-allowed") {
@@ -402,6 +413,10 @@ async function finalizeSubagentHandoff(input: {
           rules: findings.map((item) => item.ruleId),
           reasons: auditReasons(findings),
         }, input.directory);
+        input.toastNotifier?.notify({
+          kind: "remediation",
+          ruleIds: findings.map((item) => item.ruleId),
+        });
       } catch {
         result.rollback?.();
         recordGuardianEvent({
@@ -441,7 +456,8 @@ async function handleSessionIdle(
   snapshots?: ReadonlyMap<string, VerificationSnapshot> | undefined,
   signal?: AbortSignal | undefined,
   isSubagent?: boolean | undefined,
-  resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined
+  resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined,
+  toastNotifier?: GuardianToastNotifier | undefined
 ): Promise<void> {
   let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   try {
@@ -472,7 +488,7 @@ async function handleSessionIdle(
       { isSubagent: effectiveIsSubagent, ...(agentCapability ? { agentCapability } : {}) }
     );
     if (signal?.aborted) { result.rollback?.(); return; }
-    const findings = recordInspectionOutcome(result, sessionID, directory);
+    const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
       if (effectiveIsSubagent && agentCapability !== "write-allowed") {
@@ -484,6 +500,10 @@ async function handleSessionIdle(
         await sendPrompt(result.combinedRemediationPrompt);
         if (signal?.aborted) return;
         recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
+        toastNotifier?.notify({
+          kind: "remediation",
+          ruleIds: findings.map((item) => item.ruleId),
+        });
       } catch (promptError) {
         result.rollback?.();
         throw promptError;
@@ -511,7 +531,8 @@ async function handleSessionIdle(
 /** Records only recognized shell/file calls and a rule code, never raw commands. */
 function inspectPreflight(
   tool: string, args: unknown, sessionID?: string, directory?: string,
-  additionalTools: readonly string[] = []
+  additionalTools: readonly string[] = [],
+  toastNotifier?: GuardianToastNotifier
 ): void {
   if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool)) return;
   const finding = evaluatePreflight(tool, args, additionalTools);
@@ -523,7 +544,14 @@ function inspectPreflight(
     ...(safeTool ? { tool: safeTool } : {}),
     ...(finding ? { rules: [finding] } : {}),
   }, directory);
-  if (finding) throw new GuardianPreflightError(finding);
+  if (finding) {
+    toastNotifier?.notify({
+      kind: "preflight-blocked",
+      ruleId: finding,
+      ...(safeTool ? { tool: safeTool } : {}),
+    });
+    throw new GuardianPreflightError(finding);
+  }
 }
 
 const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptions) => {
@@ -542,6 +570,9 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   const mergedConfig: GuardConfig = {
     ...config,
     ...(typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+    ...(rawOptions.notifications && typeof rawOptions.notifications === "object"
+      ? { notifications: rawOptions.notifications as Record<string, unknown> }
+      : {}),
     secrets: {
       ...config.secrets,
       ...(rawOptions.secrets && typeof rawOptions.secrets === "object" ? (rawOptions.secrets as Record<string, unknown>) : {}),
@@ -551,6 +582,11 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     },
   };
   const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
+  const toastNotifier = createGuardianToastNotifier({
+    client,
+    directory,
+    enabled: mergedConfig.notifications?.enabled !== false,
+  });
   const engine = new GuardEngine(mergedConfig);
   const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
@@ -638,7 +674,8 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
                 cacheAgentCapability(sessionID, p);
                 return p;
               }
-            : undefined
+            : undefined,
+          toastNotifier
         );
       },
       onError: (sessionID, _error) => {
@@ -686,7 +723,8 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
           output.args,
           input.sessionID,
           directory,
-          config.preflight?.shellTools
+          config.preflight?.shellTools,
+          toastNotifier
         );
       }
     },
@@ -765,6 +803,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
                   }
                 },
                 snapshots: () => verificationStore.snapshots(childID),
+                toastNotifier,
               });
               if (revised !== undefined) {
                 output.output = renderV1TaskResult(childID, revised);
@@ -926,7 +965,8 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
               cacheAgentCapability(sessionID, p);
               return p;
             }
-          : undefined
+          : undefined,
+        toastNotifier
       );
     },
   };
@@ -949,6 +989,9 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const mergedConfig: GuardConfig = {
     ...config,
     ...(rawOptions && typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+    ...(rawOptions?.notifications && typeof rawOptions.notifications === "object"
+      ? { notifications: rawOptions.notifications as Record<string, unknown> }
+      : {}),
     secrets: {
       ...config.secrets,
       ...(rawOptions?.secrets && typeof rawOptions.secrets === "object" ? (rawOptions.secrets as Record<string, unknown>) : {}),
@@ -974,6 +1017,12 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     }
     return;
   }
+
+  const toastNotifier = createGuardianToastNotifier({
+    context,
+    directory,
+    enabled: mergedConfig.notifications?.enabled !== false,
+  });
 
   const controller = new AbortController();
   let events: AsyncIterable<unknown>;
@@ -1029,7 +1078,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (cmd) {
           assessCommandPreflight(cmd);
         }
-        inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools);
+        inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools, toastNotifier);
       });
       if (!registration || typeof registration.dispose !== "function") {
         throw new Error("V2 tool hook did not return a valid registration.");
@@ -1180,6 +1229,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 },
                 snapshots: () => verificationStore.snapshots(childID),
                 signal: controller.signal,
+                toastNotifier,
               });
 
               if (revised !== undefined) {
@@ -1397,7 +1447,8 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 cacheAgentCapability(sessionID, p);
                 return p;
               }
-            : undefined
+            : undefined,
+          toastNotifier
         );
         }
         if (controller.signal.aborted) return;

@@ -31,6 +31,7 @@ export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
+export * from "./toast.js";
 /**
  * Converts OpenCode v2 session.context() records into the stable internal
  * message shape consumed by the rules and engine.

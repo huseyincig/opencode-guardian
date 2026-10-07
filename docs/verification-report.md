@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.7.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.8.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.7.0`
+- **Package Version:** OpenCode Guardian `v0.8.0`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **522 / 522 unit, security, and regression tests passed**
+- **Current Automated Source Suite:** **534 / 534 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.7.0 enforces strict concrete failure remediation invariants (eliminating task-completion early pass on tool failures for write-capable agents), high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, lifecycle reverse-splice disposal, and maintains multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.7.0 V1/V2 acceptance run.
+> v0.8.0 introduces visible color-coded user-facing toast notifications across V1 and V2 host channels, strict rule sanitization preventing code/secret leaks, and maintains strict concrete failure remediation invariants, high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, lifecycle reverse-splice disposal, and multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.8.0 V1/V2 acceptance run.
 
 ---
 
@@ -121,6 +121,20 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.8.0 Visible Color-Coded Toast Interventions, Rule Sanitization, and Multi-Channel Parity
+
+The v0.8.0 release restores immediate user visibility for Guardian runtime interventions:
+
+- **Visible Color-Coded Toast Notifications (`toast`):**
+  - **Red / Error:** Preflight blocks (`preflight-blocked`) and synthetic remediations (`remediation`), providing immediate notification that an unsafe action was prevented or agent corrected.
+  - **Yellow / Warning:** Advisory warnings (`warning`) on non-blocking policy findings.
+  - **Info:** Version announcements and system notices.
+- **Strict Rule Sanitization & Privacy Safety:**
+  - `sanitizeToastRuleId` whitelist-checks rule names, preventing raw terminal commands, code snippets, or secrets from being reflected in UI toasts.
+- **Dual-Host V1 & V2 Parity:**
+  - Dispatches across V1 `client.tui.showToast`, V2 `context.ui.toast.show`, `context.client.tui.showToast`, and active TUI in-memory listeners.
+  - 600ms deduplication window prevents spam during rapid tool calls.
 
 ## v0.7.0 Lifecycle Reverse-Splice Disposal, Turn Budget Scope, and Preflight Parity
 

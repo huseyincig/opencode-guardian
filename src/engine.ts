@@ -103,7 +103,7 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
         (typeof value[name] !== "number" || !Number.isInteger(value[name]) ||
          (value[name] as number) < 0 || (value[name] as number) > 5)) fail(name);
   }
-  for (const name of ["preflight", "updateNotice"] as const) {
+  for (const name of ["preflight", "updateNotice", "notifications"] as const) {
     const item = value[name];
     if (item !== undefined && (!item || typeof item !== "object" ||
         Array.isArray(item) || ((item as Record<string, unknown>).enabled !== undefined &&

@@ -86,7 +86,7 @@ function validateConfig(value) {
                 value[name] < 0 || value[name] > 5))
             fail(name);
     }
-    for (const name of ["preflight", "updateNotice"]) {
+    for (const name of ["preflight", "updateNotice", "notifications"]) {
         const item = value[name];
         if (item !== undefined && (!item || typeof item !== "object" ||
             Array.isArray(item) || (item.enabled !== undefined &&

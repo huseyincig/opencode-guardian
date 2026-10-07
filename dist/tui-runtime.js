@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { readGuardianStatus } from "./telemetry.js";
 import { loadConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
+import { registerToastListener } from "./toast.js";
 import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport } from "./commands.js";
 const guardianVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function StatRow(props) {
@@ -499,8 +500,21 @@ const v2Plugin = {
         duration: 5000
       }));
     }
+    let unregisterToast;
+    if (config.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
+      unregisterToast = registerToastListener(toast => {
+        try {
+          context.ui.toast.show({
+            title: toast.title,
+            message: toast.message,
+            variant: toast.variant,
+            duration: toast.duration
+          });
+        } catch {}
+      });
+    }
     // Append: never override Magic Context, AFT, or built-in sidebar sections.
-    return context.ui.slot({
+    const slotDisposer = context.ui.slot({
       append: "sidebar.content",
       render: () => _$createComponent(GuardianSidebar, {
         directory: directory,
@@ -521,6 +535,17 @@ const v2Plugin = {
         }
       })
     });
+    if (unregisterToast) {
+      return () => {
+        try {
+          unregisterToast?.();
+        } catch {}
+        try {
+          slotDisposer?.();
+        } catch {}
+      };
+    }
+    return slotDisposer;
   }
 };
 
@@ -530,6 +555,19 @@ const v1Tui = async api => {
   const config = loadConfig(directory);
   if (config.enabled === false) return;
   registerGuardianV1Commands(api);
+  if (config.notifications?.enabled !== false && typeof api.ui?.toast === "function") {
+    const unregisterToast = registerToastListener(toast => {
+      try {
+        api.ui.toast({
+          title: toast.title,
+          message: toast.message,
+          variant: toast.variant,
+          duration: toast.duration
+        });
+      } catch {}
+    });
+    api.lifecycle?.onDispose?.(unregisterToast);
+  }
   api.slots.register({
     order: 600,
     slots: {

@@ -7,6 +7,7 @@ import type { RGBA } from "@opentui/core";
 import { readGuardianStatus } from "./telemetry.js";
 import { loadConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
+import { registerToastListener } from "./toast.js";
 import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport,
   type GuardianCommand, type GuardianReport } from "./commands.js";
 
@@ -343,8 +344,21 @@ const v2Plugin: Plugin.Definition = {
         title: "OpenCode Guardian — New version", message: `v${current} → v${latest} (update manually)`, variant: "info", duration: 5000,
       }));
     }
+    let unregisterToast: (() => void) | undefined;
+    if (config.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
+      unregisterToast = registerToastListener((toast) => {
+        try {
+          context.ui.toast.show({
+            title: toast.title,
+            message: toast.message,
+            variant: toast.variant,
+            duration: toast.duration,
+          });
+        } catch {}
+      });
+    }
     // Append: never override Magic Context, AFT, or built-in sidebar sections.
-    return context.ui.slot({
+    const slotDisposer = context.ui.slot({
       append: "sidebar.content",
       render: () => <GuardianSidebar directory={directory}
         currentDirectory={() => v2CommandDirectory(context, directory)}
@@ -358,6 +372,13 @@ const v2Plugin: Plugin.Definition = {
         error: context.theme.status?.error?.base,
       }} />,
     });
+    if (unregisterToast) {
+      return () => {
+        try { unregisterToast?.(); } catch {}
+        try { slotDisposer?.(); } catch {}
+      };
+    }
+    return slotDisposer;
   },
 };
 
@@ -367,6 +388,19 @@ const v1Tui: TuiPlugin = async (api: TuiPluginApi) => {
   const config = loadConfig(directory);
   if (config.enabled === false) return;
   registerGuardianV1Commands(api);
+  if (config.notifications?.enabled !== false && typeof api.ui?.toast === "function") {
+    const unregisterToast = registerToastListener((toast) => {
+      try {
+        api.ui.toast({
+          title: toast.title,
+          message: toast.message,
+          variant: toast.variant,
+          duration: toast.duration,
+        });
+      } catch {}
+    });
+    api.lifecycle?.onDispose?.(unregisterToast);
+  }
   api.slots.register({
     order: 600,
     slots: {

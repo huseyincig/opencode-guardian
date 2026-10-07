@@ -320,6 +320,16 @@ export function canSubagentRemediate(profile: AgentMutationProfile): boolean {
   return profile.capability === "write-allowed";
 }
 
+export function isWriteCapableAgent(context: {
+  isSubagent?: boolean;
+  agentCapability?: AgentMutationCapability;
+}): boolean {
+  if (context.isSubagent) {
+    return context.agentCapability === "write-allowed";
+  }
+  return context.agentCapability !== "read-only" && context.agentCapability !== "write-requires-approval";
+}
+
 // Session-scoped capability cache
 const sessionCapabilityCache = new Map<string, AgentMutationProfile>();
 

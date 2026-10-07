@@ -251,7 +251,7 @@ for (const [index, [locale, request, forbiddenTest]] of REPORTS.entries()) {
   });
 }
 
-test("multilingual historical refusal stays advisory when relevant file work was observed", async () => {
+test("multilingual historical refusal blocks even when relevant file work was observed", async () => {
   const { instructionFidelityRule } = await import("../dist/rules/instruction-fidelity.js");
   const currentTurn = [
     { info: { id: "human", role: "user" }, parts: [{ type: "text", text: REPORTS[0][1] }] },
@@ -268,8 +268,8 @@ test("multilingual historical refusal stays advisory when relevant file work was
     messages: currentTurn, currentTurn, ruleConfig: {},
     evidence: collectTurnEvidence(currentTurn),
   });
-  assert.equal(result.decision, "pass");
-  assert.equal(result.findings[0].confidence, "medium");
+  assert.equal(result.decision, "block");
+  assert.equal(result.findings[0].confidence, "high");
 });
 
 test("quoted foreign-language examples cannot silently become the user's task", () => {

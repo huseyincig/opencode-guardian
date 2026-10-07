@@ -45,12 +45,6 @@ export const instructionFidelityRule: GuardRule = {
       };
     }
 
-    // If the agent actually modified files, a multilingual refusal might
-    // refer to a different part of the work. Report it, do not auto-retry.
-    const performedAction = context.evidence?.fileMutations.some(
-      (record) => record.status === "success"
-    ) ?? false;
-    const advisory = Boolean(signals.internationalLocale && performedAction);
     const finding: RuleFinding = {
       ruleId: this.id,
       pattern: signals.internationalLocale
@@ -58,15 +52,13 @@ export const instructionFidelityRule: GuardRule = {
         : "past decision overrides current instruction",
       messageSnippet: prose.slice(0, 200),
       description: "The assistant explicitly declined the current requested action on the basis of an earlier user decision. The latest explicit instruction must be considered; an actual conflict should be explained rather than silently changing scope.",
-      confidence: advisory ? "medium" : "high",
+      confidence: "high",
     };
     return {
       ruleId: this.id,
-      decision: advisory ? "pass" : "block",
+      decision: "block",
       findings: [finding],
-      ...(advisory ? {} : {
-        remediationPrompt: "Re-evaluate the current explicit user request. Do not treat an earlier pause or deferral as a permanent prohibition. Perform the requested work if otherwise permitted; if a genuine conflict prevents it, identify the conflicting instruction precisely and ask the user rather than silently declining.",
-      }),
+      remediationPrompt: "Re-evaluate the current explicit user request. Do not treat an earlier pause or deferral as a permanent prohibition. Perform the requested work if otherwise permitted; if a genuine conflict prevents it, identify the conflicting instruction precisely and ask the user rather than silently declining.",
     };
   },
 };

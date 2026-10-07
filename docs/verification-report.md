@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.6.8 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.6.9 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.6.8`
+- **Package Version:** OpenCode Guardian `v0.6.9`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
 - **Current Automated Source Suite:** **521 / 521 unit, security, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.6.8 adds multi-layer secret protection & output redaction (PRE, POST, and FINAL gates), genuinely language-agnostic policy and evidence verification, subagent topology hardening (agent-name neutral), capability-aware subagent remediation isolation, and strict TypeScript/lint hardening. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.8 V1/V2 acceptance run.
+> v0.6.9 enforces strict concrete failure remediation invariants (eliminating task-completion early pass on tool failures for write-capable agents), high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, and maintains multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.9 V1/V2 acceptance run.
 
 ---
 
@@ -121,6 +121,19 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.6.9 Concrete Failure Invariants, Instruction Fidelity, and Fingerprint Remediation Budgeting
+
+The v0.6.9 release resolves softening regressions and restores uncompromising runtime safety:
+
+- **Concrete Failure Invariant (`task-completion`):**
+  - Completely eliminated the `(hasToolFailure && !report.isClosing)` early pass bypass. Write-capable agents with concrete tool errors or failed verification checks (`isFailedCheck`) must block and remediate; admitting failure without claiming completion is no longer a loophole.
+  - Read-only, approval-required, and unknown child subagents continue to fail-safe by reporting unresolved blockers to the parent without un-executable synthetic loops.
+- **Instruction Fidelity Confidence (`instruction-fidelity`):**
+  - Removed automatic downgrading to `advisory` (`pass`) when file mutations were observed. Refusals contradicting explicit user instructions consistently trigger `block` decisions with high confidence.
+- **Fingerprint and Rule Remediation Budgeting (`engine` & `state`):**
+  - Replaced flat global turn cutoffs (`remediationMessagesCount >= budget`) with per-rule fingerprint budget counters (`getRuleRemediationCount`, `hasExhaustedRule`).
+  - Repetition of the same violation continues to be bounded to avoid infinite loops, but new and distinct substantive errors occurring later in the same turn receive remediation up to the turn ceiling.
 
 ## v0.6.8 Multi-Layer Secret Protection, Language-Agnostic Policy, and Subagent Topology Hardening
 

@@ -472,6 +472,7 @@ export class GuardEngine {
         messages,
         currentTurn: isCompletionGate ? currentTurn : freshTurn,
         isSubagent,
+        agentCapability: options?.agentCapability,
         ruleConfig,
         evidence: isCompletionGate ? evidence : freshEvidence,
       };
@@ -545,7 +546,12 @@ export class GuardEngine {
           ? Math.floor(this.config.remediationBudget)
           : 1;
       const budget = Math.max(0, Math.min(5, configuredBudget));
-      const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
+      if (budget === 0) {
+        return {
+          decision: "pass",
+          results,
+        };
+      }
       const fingerprint = blockingResults
         .map((result) => {
           const findingKey = result.findings
@@ -557,13 +563,37 @@ export class GuardEngine {
         .sort()
         .join("||");
 
+      const blockingRuleIds = blockingResults.map((r) => r.ruleId);
+      const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
+
+      const failedPendingRule =
+        isRemediationResponse &&
+        blockingResults.some((result) => pendingRules.includes(result.ruleId));
+
+      const maxTurnRemediations = contract?.iterativeReview
+        ? Math.max(5, this.config.iterationBudget ?? 3)
+        : Math.max(3, budget * 2);
+
+      const rulesExhausted =
+        blockingRuleIds.length > 0 &&
+        blockingRuleIds.every(
+          (rule) =>
+            this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
+            (!contract?.iterativeReview &&
+              remediationMessagesCount >= budget &&
+              (pendingRules.length === 0 || pendingRules.includes(rule)))
+        );
+
       if (
-        (!contract?.iterativeReview && remediationMessagesCount >= budget) ||
+        (failedPendingRule && this.sessionState.hasExhaustedRule(sessionID, turnKey, pendingRules, budget)) ||
+        rulesExhausted ||
         !this.sessionState.canRemediate(
           sessionID,
           turnKey,
           fingerprint,
-          budget
+          blockingRuleIds,
+          budget,
+          maxTurnRemediations
         )
       ) {
         this.sessionState.clearPendingRemediation(sessionID);
@@ -576,12 +606,11 @@ export class GuardEngine {
             : {}),
         };
       }
-
-      this.sessionState.recordRemediation(sessionID, turnKey, fingerprint);
+      this.sessionState.recordRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
       this.sessionState.setPendingRemediation(
         sessionID,
         turnKey,
-        blockingResults.map((r) => r.ruleId),
+        blockingRuleIds,
         [...(evidence.mutatedFiles ?? [])]
       );
       const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
@@ -602,7 +631,7 @@ export class GuardEngine {
         combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
         rollback: () => {
           this.inspectedMessages.delete(sessionID);
-          this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint);
+          this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
           this.sessionState.clearPendingRemediation(sessionID);
           if (handoff) this.sessionState.clearActiveHandoff(sessionID);
         },

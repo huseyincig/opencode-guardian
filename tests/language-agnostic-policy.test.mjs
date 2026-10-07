@@ -126,28 +126,41 @@ test("Suite 2A: Unknown/unsupported language prompt does not invent duties or cr
   }
 });
 
-test("Suite 2B: Assistant blocker report in unsupported language must fail-safe without retry loop", () => {
+test("Suite 2B: Assistant blocker report in unsupported language must fail-safe for read-only agents and block for write-capable agents", () => {
   // Structured directive requests review
   const prompt = '@guardian-task {"mode": "iterative-review", "review": "checks", "verify": ["test"]}\nWork';
   // Assistant is BLOCKED in an unsupported language (e.g. Polish, Greek, Czech, Swedish)
-  // When the assistant encounters a failed command or states a blocker, Guardian must not loop!
+  // When a read-only subagent encounters a failed command or states a blocker, Guardian must not loop!
   const polishBlockerTurn = makeTurn(prompt, [
     fileMutation,
     failedTestTool,
     { type: "text", text: "Nie mogę kontynuować pracy. Brak uprawnień do bazy danych i testy nie przechodzą." },
   ]);
 
-  const result = taskCompletionRule.inspect({
+  const readOnlyResult = taskCompletionRule.inspect({
     sessionID: "polish-blocker-session",
+    directory: process.cwd(),
+    messages: polishBlockerTurn,
+    currentTurn: polishBlockerTurn,
+    isSubagent: true,
+    agentCapability: "read-only",
+    ruleConfig: {},
+    evidence: collectTurnEvidence(polishBlockerTurn),
+  });
+
+  // Read-only subagents reporting failure fail-safe to pass without synthetic retry loop
+  assert.equal(readOnlyResult.decision, "pass", "Read-only agent blocker with failed tool must fail-safe to pass (no synthetic loop)");
+
+  // Write-capable agents with concrete failed test checks cannot bypass completion gate with an early pass
+  const writeCapableResult = taskCompletionRule.inspect({
+    sessionID: "polish-blocker-write-session",
     directory: process.cwd(),
     messages: polishBlockerTurn,
     currentTurn: polishBlockerTurn,
     ruleConfig: {},
     evidence: collectTurnEvidence(polishBlockerTurn),
   });
-
-  // When a tool failed and the report is not claiming completion, Guardian must not block with synthetic remediation retry!
-  assert.equal(result.decision, "pass", "Unsupported language blocker with failed tool must fail-safe to pass (no synthetic loop)");
+  assert.equal(writeCapableResult.decision, "block", "Write-capable agent with failed test verification must block and remediate");
 });
 
 // -----------------------------------------------------------------------------

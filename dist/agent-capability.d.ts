@@ -37,6 +37,10 @@ export interface NormalizedAgentInput {
  */
 export declare function evaluateAgentMutationProfile(input: NormalizedAgentInput): AgentMutationProfile;
 export declare function canSubagentRemediate(profile: AgentMutationProfile): boolean;
+export declare function isWriteCapableAgent(context: {
+    isSubagent?: boolean;
+    agentCapability?: AgentMutationCapability;
+}): boolean;
 export declare function getCachedAgentCapability(sessionID: string): AgentMutationProfile | undefined;
 export declare function cacheAgentCapability(sessionID: string, profile: AgentMutationProfile): void;
 export declare function clearAgentCapability(sessionID: string): void;

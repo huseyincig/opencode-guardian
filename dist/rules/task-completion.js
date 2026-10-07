@@ -2,6 +2,7 @@ import { sanitizeProseForInspection } from "../prose.js";
 import { classifyAgentReport } from "../locale-intents.js";
 import { extractTaskContract } from "../task-contract.js";
 import { evaluateTaskPolicy } from "../task-policy.js";
+import { isWriteCapableAgent } from "../agent-capability.js";
 function latestAssistantProse(context) {
     const last = context.currentTurn.findLast((message) => message.info.role === "assistant");
     if (!last)
@@ -31,12 +32,20 @@ export const taskCompletionRule = {
         if (!contract?.requiresExplicitCompletion || !evidence || !prose) {
             return { ruleId: this.id, decision: "pass", findings };
         }
+        const writeCapable = isWriteCapableAgent(context);
         const report = classifyAgentReport(prose);
         const hasToolFailure = evidence.records.some((record) => record.status === "failure");
-        // Transparent incomplete work, real blockers, and observable tool failures
-        // are passed to the user unless the assistant contradicts itself by claiming completion.
-        const hasBlocker = report.hasClearBlocker || (hasToolFailure && !report.isClosing);
-        if (!report.isClosing && hasBlocker) {
+        // For non-modifying agents (read-only, approval-required, or unknown subagents):
+        // reporting transparent incomplete work, a blocker, or a tool failure without
+        // claiming completion passes to the parent/user rather than initiating an un-executable
+        // self-remediation loop.
+        if (!writeCapable && !report.isClosing && (report.hasClearBlocker || hasToolFailure)) {
+            return { ruleId: this.id, decision: "pass", findings };
+        }
+        // For write-capable agents: a clear blocker only passes without remediation when
+        // there are no unresolved tool failures and the agent did not claim completion.
+        // Concrete tool failures on write-capable agents NEVER bypass completion evaluation.
+        if (writeCapable && !hasToolFailure && !report.isClosing && report.hasClearBlocker) {
             return { ruleId: this.id, decision: "pass", findings };
         }
         const policy = evaluateTaskPolicy(contract, evidence);
@@ -58,7 +67,7 @@ export const taskCompletionRule = {
             if (verification.status === "passed")
                 continue;
             // Concrete tool failure means the requested check failed.
-            const isFailedCheck = verification.status === "failed" && !hasBlocker;
+            const isFailedCheck = verification.status === "failed";
             const isContradictory = report.isClosing || isFailedCheck;
             if (!isContradictory) {
                 findings.push({
@@ -75,7 +84,9 @@ export const taskCompletionRule = {
                 pattern: `${verification.kind} verification not confirmed`,
                 messageSnippet: prose.slice(0, 160),
                 description: verification.status === "failed"
-                    ? `The task is reported as complete although the latest requested ${verification.kind} check failed.`
+                    ? (report.isClosing
+                        ? `The task is reported as complete although the latest requested ${verification.kind} check failed.`
+                        : `The requested ${verification.kind} verification failed with unresolved errors.`)
                     : report.hasClearBlocker
                         ? `The task is reported as complete while contradictory unfinished/blocker statements were made and ${verification.kind} check was not confirmed.`
                         : `The user requested ${verification.kind} verification, but a successful result after the last change is not visible.`,
@@ -84,6 +95,28 @@ export const taskCompletionRule = {
             findings.push(finding);
             if (verification.status === "failed" || report.hasClearBlocker) {
                 blocking.push(finding);
+            }
+        }
+        if (writeCapable) {
+            const unresolvedFailures = evidence.failures.filter((failure) => {
+                const hasLaterSuccess = evidence.records.some((later) => later.sequence > failure.sequence &&
+                    later.status === "success" &&
+                    (later.kind === failure.kind || later.toolName === failure.toolName));
+                return !hasLaterSuccess;
+            });
+            for (const failure of unresolvedFailures) {
+                const alreadyCovered = policy.verifications.some((v) => v.kind === failure.kind && v.status === "failed");
+                if (!alreadyCovered) {
+                    const finding = {
+                        ruleId: this.id,
+                        pattern: `unresolved ${failure.kind} failure`,
+                        messageSnippet: failure.errorFingerprint || failure.error || failure.command || prose.slice(0, 160),
+                        description: `A concrete ${failure.kind} execution failed and was not resolved before stopping.`,
+                        confidence: "high",
+                    };
+                    findings.push(finding);
+                    blocking.push(finding);
+                }
             }
         }
         return {

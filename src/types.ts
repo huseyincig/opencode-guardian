@@ -2,6 +2,8 @@
  * opencode-guardian: Core Type Definitions
  */
 
+import type { AgentMutationCapability } from "./agent-capability.js";
+
 export type Severity = "error" | "warn" | "off";
 
 export interface GuardRuleConfig {
@@ -126,6 +128,7 @@ export interface TurnInspectionContext {
   messages: SessionMessage[];
   currentTurn: SessionMessage[];
   isSubagent?: boolean;
+  agentCapability?: AgentMutationCapability;
   ruleConfig: GuardRuleConfig;
   evidence?: TurnEvidence;
 }

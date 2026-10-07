@@ -8,6 +8,8 @@ interface SessionState {
     turnKey: string;
     remediationCount: number;
     fingerprints: Set<string>;
+    fingerprintCounts?: Map<string, number>;
+    ruleRemediationCounts?: Map<string, number>;
     continuationCount: number;
     continuationKeys: Set<string>;
     pendingRemediationRules?: string[];
@@ -18,9 +20,12 @@ interface SessionState {
 export declare class SessionStateStore {
     private readonly sessions;
     beginTurn(sessionID: string, turnKey: string): SessionState;
-    canRemediate(sessionID: string, turnKey: string, fingerprint: string, budget: number): boolean;
-    recordRemediation(sessionID: string, turnKey: string, fingerprint: string): void;
-    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string): void;
+    getTurnRemediationCount(sessionID: string, turnKey: string): number;
+    getRuleRemediationCount(sessionID: string, turnKey: string, ruleId: string): number;
+    canRemediate(sessionID: string, turnKey: string, fingerprint: string, rules: string[], budget: number, maxTurnBudget?: number): boolean;
+    hasExhaustedRule(sessionID: string, turnKey: string, rules: string[], budget: number): boolean;
+    recordRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
+    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
     canContinue(sessionID: string, turnKey: string, progressKey: string, budget: number): boolean;
     recordContinuation(sessionID: string, turnKey: string, progressKey: string): void;
     rollbackContinuation(sessionID: string, turnKey: string, progressKey: string): void;

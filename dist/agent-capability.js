@@ -225,6 +225,12 @@ export function evaluateAgentMutationProfile(input) {
 export function canSubagentRemediate(profile) {
     return profile.capability === "write-allowed";
 }
+export function isWriteCapableAgent(context) {
+    if (context.isSubagent) {
+        return context.agentCapability === "write-allowed";
+    }
+    return context.agentCapability !== "read-only" && context.agentCapability !== "write-requires-approval";
+}
 // Session-scoped capability cache
 const sessionCapabilityCache = new Map();
 export function getCachedAgentCapability(sessionID) {

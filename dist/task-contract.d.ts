@@ -1,4 +1,5 @@
 import type { SessionMessage, TurnEvidence } from "./types.js";
+export { isExploratoryPrompt } from "./locale-intents.js";
 /** Explicit user requirements only. No LLM classification or inferred goals. */
 export interface TaskContract {
     turnKey: string;
@@ -11,8 +12,6 @@ export interface TaskContract {
     signalLocale?: string;
 }
 export declare function currentHumanMessage(messages: readonly SessionMessage[]): SessionMessage | undefined;
-/** Questions about a possible workflow are not instructions to execute it. */
-export declare function isExploratoryPrompt(text: string): boolean;
 /** Optional, human-authored typed protocol when free-form intent is unclear. */
 export interface ExplicitTaskDirective {
     mode: "iterative-review" | "one-pass";

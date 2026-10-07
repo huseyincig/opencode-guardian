@@ -1,3 +1,4 @@
+import type { EvidenceKind } from "./types.js";
 /**
  * Multilingual signals only; never a safety-policy decision by themselves.
  * Tasks, permissions, and verification outcomes are evaluated through the
@@ -34,3 +35,52 @@ export declare const SUPPORTED_SIGNAL_LOCALES: readonly string[];
 export type AgentReportState = "completed" | "blocked" | "unknown";
 export declare function classifyInternationalAgentReport(input: string): AgentReportState;
 export declare function detectInternationalHistoricalRefusal(userInstruction: string, assistantResponse: string): string | undefined;
+export declare function classifyAgentReport(input: string): {
+    state: AgentReportState;
+    hasClearBlocker: boolean;
+    isClosing: boolean;
+};
+export declare function isExploratoryPrompt(text: string): boolean;
+export declare function deniedVerification(text: string, kind: VerificationKind): boolean;
+export interface AdvisoryTaskSignals {
+    explicitAction: boolean;
+    iterativeReview: boolean;
+    requiresSourceReview: boolean;
+    requiredVerifications: VerificationKind[];
+    negatedLoop: boolean;
+    exploratory: boolean;
+    signalLocale?: string;
+}
+export declare function extractAdvisoryTaskSignals(body: string): AdvisoryTaskSignals;
+export interface InstructionFidelitySignals {
+    hasViolation: boolean;
+    type?: "historical-refusal" | "redundant-handoff";
+    internationalLocale?: string;
+}
+export declare function detectInstructionFidelitySignals(instruction: string, prose: string, observableWork: boolean): InstructionFidelitySignals;
+export interface AdvisoryClaimPattern {
+    name: string;
+    kind?: EvidenceKind;
+    regex: RegExp;
+    mode?: "verification";
+}
+export declare function isUncertaintyClaim(sentence: string): boolean;
+export declare function getClaimPatterns(): AdvisoryClaimPattern[];
+export declare function isAuthorizedGitClean(cleanRequest: string, command: string): boolean;
+export declare function isImperativeExecutionRequest(request: string): boolean;
+export declare function isDeleteTargetRequested(request: string): boolean;
+export declare function isWholeWorkspaceDeleteRequested(request: string): boolean;
+export declare function isExplicitlyAllowedSudo(request: string): boolean;
+export declare function isSqlDestructionRequested(request: string): boolean;
+export declare const SQL_TARGET_CONTEXT_REGEX: RegExp;
+export declare function isAuthorizedTestEdit(text?: string): boolean;
+export declare function isTestBypassProhibited(userInstruction: string): boolean;
+export declare function isSpecificTestBypassAuthorized(userInstruction: string, pattern: string): boolean;
+export declare function isAuthorizedStubOrPlaceholder(text?: string): boolean;
+export declare function isPlaceholderProhibited(userInstruction: string): boolean;
+export declare function isCodePlaceholderRequested(userInstruction: string): boolean;
+export interface ApologyPattern {
+    name: string;
+    regex: RegExp;
+}
+export declare function getApologyPatterns(): ApologyPattern[];

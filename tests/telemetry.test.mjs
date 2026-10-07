@@ -80,7 +80,11 @@ test("V1 default preflight remains disabled even when the handoff coordination h
 
 test("V2 strict preflight records actual pre-execution decisions", async (t) => {
   isolated(t);
-  const directory = setupConfig(t, { enabled: true, preflight: { enabled: true } });
+  const directory = setupConfig(t, {
+    enabled: true,
+    preflight: { enabled: true },
+    secrets: { enabled: false },
+  });
   let before;
   const controller = { context: {
     location: { directory },

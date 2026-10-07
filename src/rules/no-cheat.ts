@@ -5,6 +5,7 @@ import type {
   TurnInspectionContext,
 } from "../types.js";
 import { extractLikelyShellMutation } from "../tool-input.js";
+import { isAuthorizedTestEdit, isTestBypassProhibited, isSpecificTestBypassAuthorized } from "../locale-intents.js";
 
 /**
  * High-confidence patterns that directly disable or bypass tests.
@@ -293,8 +294,7 @@ function snapshotUpdateCommand(command: string): boolean {
 }
 
 export function explicitlyAuthorizedTestEdit(text?: string): boolean {
-  if (!text || typeof text !== "string") return false;
-  return /(?:\b(?:update|rewrite|modify|refactor|fix|change|adjust|delete|remove|skip)\b[^\n.!?]{0,50}\btests?\b|\btests?\b[^\n.!?]{0,50}\b(?:update|rewrite|modify|modification|refactor|fix|change)\b|\b(?:testleri?|testi)\b[^\n.!?]{0,50}\b(?:güncelle|düzelt|yeniden\s+yaz|değiştir|kaldır|sil|atla)\b|\b(?:skip|atla)\b[^\n.!?]{0,50}\b(?:test|testleri)\b)/iu.test(text);
+  return isAuthorizedTestEdit(text);
 }
 
 function extractUserInstruction(context: TurnInspectionContext): string {
@@ -341,23 +341,14 @@ export const noCheatRule: GuardRule = {
       const pattern = finding.pattern;
       if (!authorizedTestModification) return false;
       // A prohibition ("do not skip") is never an authorization to skip.
-      if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:skip|ignore|delete|weaken|remove|only)\b|\b(?:atlama|silme|kaldırma|zayıflatma)\b/iu.test(userInstruction)) return false;
+      if (isTestBypassProhibited(userInstruction)) return false;
       const namedFile = / in ([\w./-]+\.(?:test|spec)\.[a-z]+)/iu.exec(finding.description)?.[1];
       const requestedFiles = userInstruction.match(/[\w./-]+\.(?:test|spec)\.[a-z]+/giu) ?? [];
       if (namedFile && requestedFiles.length &&
           !requestedFiles.some((requested) => namedFile.toLowerCase().endsWith(requested.toLowerCase()))) return false;
       // Permission to edit tests is NOT permission to bypass them. Each
       // integrity-reducing operation needs explicit authorization.
-      if (/skip|xit|xtest|ignore|todo/i.test(pattern)) {
-        return /\bskip\b|\batla\b|\bignore\b/i.test(userInstruction);
-      }
-      if (/focus|only/i.test(pattern)) return /\bonly\b|\bfocus\b/i.test(userInstruction);
-      if (/assertion weakened/i.test(pattern)) return /\bweaken\b|\bgevşet\b/i.test(userInstruction);
-      if (/coverage threshold reduced/i.test(pattern)) return /(?:lower|reduce|düşür|azalt)[^\n.!?]{0,45}(?:coverage|threshold|kapsam|eşik)/iu.test(userInstruction);
-      if (/test file deleted/i.test(pattern)) return /(?:delete|remove|sil|kaldır)[^\n.!?]{0,45}\btests?\b|\btests?\b[^\n.!?]{0,45}(?:delete|remove|sil|kaldır)/iu.test(userInstruction);
-      if (/CI test step removed/i.test(pattern)) return /(?:remove|delete|kaldır|sil)[^\n.!?]{0,45}\bCI\b/i.test(userInstruction);
-      if (/snapshot update/i.test(pattern)) return /\bsnapshot\b[^\n.!?]{0,45}(?:update|güncelle)/iu.test(userInstruction);
-      return false;
+      return isSpecificTestBypassAuthorized(userInstruction, pattern);
     };
 
     const addFinding = (finding: RuleFinding, shouldBlock = true) => {

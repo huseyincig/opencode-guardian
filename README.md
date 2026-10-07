@@ -4,16 +4,16 @@
 [![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![OpenCode: v1 & v2](https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20Dual--Mode-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
 [![Live Acceptance: V1 & V2 Passed](https://img.shields.io/badge/Live%20Acceptance-V1%20%26%20V2%20Passed-10b981?logo=checkmarx&logoColor=white)](docs/acceptance-v1.md)
-[![Tests: 484/484 Passing](https://img.shields.io/badge/Tests-484%2F484%20Passing-339933?logo=githubactions&logoColor=white)](docs/verification-report.md)
+[![Tests: 514/514 Passing](https://img.shields.io/badge/Tests-514%2F514%20Passing-339933?logo=githubactions&logoColor=white)](docs/verification-report.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Installation](#installation) · [Rules](#the-14-guardrail-rules) · [Configuration](#configuration-opencode-guardianjson) · [TUI Interface](#tui-sidebar-interface) · [Architecture](#architecture--turn-lifecycle) · [Smart Questions Coordination](#-smart-questions-coordination-protocol) · [Verification](#verification--live-acceptance)
+[Installation](#installation) · [Rules](#the-14-guardrail-rules) · [Secret Protection](#-multi-layer-secret-protection--post-execution-redaction) · [Configuration](#configuration-opencode-guardianjson) · [TUI Interface](#tui-sidebar-interface) · [Architecture](#architecture--turn-lifecycle) · [Smart Questions Coordination](#-smart-questions-coordination-protocol) · [Verification](#verification--live-acceptance)
 
 A high-performance, deterministic quality, safety, and verification plugin for **OpenCode** AI coding agents.
 
-OpenCode Guardian continuously supervises agent turns: guiding model execution before calls, correlating tool results at session idle, intercepting recognized destructive shell actions and secret-bearing file writes, and requiring verifiable tool evidence before agents declare tasks complete.
+OpenCode Guardian continuously supervises agent turns: guiding model execution before calls, correlating tool results at session idle, intercepting recognized destructive shell actions and secret-bearing file writes, redacting sensitive tool outputs before model visibility, and requiring verifiable tool evidence before agents declare tasks complete.
 
 ---
 
@@ -21,11 +21,11 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic combines the current **v0.6.7 automated verification** with the real-host acceptance runs across **OpenCode V1 (`1.18.34`)** and **OpenCode V2 (`2.0.24`)** executed on real host with `opencode-go/mimo-v2.6-flash`.
+> The graphic combines the current **v0.6.8 automated verification** with the real-host acceptance runs across **OpenCode V1 (`1.18.34`)** and **OpenCode V2 (`2.0.24`)** executed on real host with `opencode-go/mimo-v2.6-flash`.
 
-Guardian **v0.6.7** is validated as follows:
+Guardian **v0.6.8** is validated as follows:
 
-- **Current Automated Verification:** **484 / 484** unit and regression tests passing.
+- **Current Automated Verification:** **521 / 521** unit, security, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
 - **Static Analysis:** standard and strict TypeScript gates pass; Oxlint reports **0 warnings / 0 errors**.
 - **Dependency Security:** **0 vulnerabilities** across production and development dependency audits.
@@ -116,7 +116,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.6.7
+▶ Guardian                 v0.6.8
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -130,7 +130,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.6.7
+▼ Guardian                 v0.6.8
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0
@@ -292,6 +292,32 @@ Standard MCP tool IDs ending in recognized shell actions (for example `mcp__prov
 
 ---
 
+## 🔐 Multi-Layer Secret Protection & Post-Execution Redaction
+
+Guardian provides an end-to-end secret protection pipeline operating across all tool outputs and model context:
+
+```text
+Guardian Pipeline
+   │
+   ├─ PRE: Command/input security & broad environment dump assessment
+   │
+   ├─ TOOL EXECUTION (Host runtime)
+   │
+   ├─ POST: Deterministic secret redaction (stdout, stderr, tool result objects, MCP)
+   │
+   └─ FINAL CONTEXT GATE: Secret-free LLM context (session messages & parts transform)
+```
+
+### What It Protects
+- **Post-Execution Output Redaction:** Any command output dumping environment variables or sensitive files (`docker exec ... env`, `printenv`, `cat .env`, `docker inspect`, container logs) has secret values deterministically replaced with `[REDACTED]`.
+- **Known Credential Formats:** OpenAI, Anthropic, GitHub (classic & fine-grained), Slack, AWS, Google, Stripe, npm, GitLab tokens.
+- **Connection Strings & Hashes:** Database URIs (`postgres://`, `mysql://`, `mongodb://`, `redis://`) have embedded passwords redacted while preserving host and database structure. Hashes (bcrypt, argon2, scrypt, sha512-crypt) and multiline PEM private key blocks are cleanly sanitized.
+- **Runtime Environment Discovery:** Discovers and registers sensitive keys and credentials active in the process environment, preventing raw values from leaking into model context even if emitted without key names.
+- **Final LLM Context Gatekeeper:** Hooks into `experimental.chat.messages.transform` (v1) and `session.hook("context")` (v2) to guarantee raw sensitive values never enter the prompt or turn history fed to the model.
+- **Safe Keys Untouched:** Preserves standard system environment variables (`PATH`, `HOME`, `PORT`, `NODE_ENV`, `USER`, `SHELL`, `PWD`, etc.).
+
+---
+
 ## 📈 Telemetry & CLI Status
 
 Guardian maintains a private, redacted log of local events:
@@ -356,9 +382,9 @@ flowchart TD
     Outcome -->|Evidence insufficient| Unverified[remediation-unverified]
 ```
 
-The diagram illustrates the v0.6.7 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
+The diagram illustrates the v0.6.8 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
 
-For delegated subagent work (`task` on V1, `subagent` on V2), v0.6.7 enforces capability-aware remediation isolation. Read-only subagents (reviewers, oracles, explorers) do not receive synthetic remediation and never enter redundant review loops upon completing their findings; write-allowed subagents (fixers, editors) retain bounded remediation support with controlled retries. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
+For delegated subagent work (`task` on V1, `subagent` on V2), v0.6.8 enforces capability-aware remediation isolation. Read-only subagents (reviewers, oracles, explorers) do not receive synthetic remediation and never enter redundant review loops upon completing their findings; write-allowed subagents (fixers, editors) retain bounded remediation support with controlled retries. The barrier is limited to foreground delegation and does not convert background subagents into blocking handoffs.
 
 ---
 

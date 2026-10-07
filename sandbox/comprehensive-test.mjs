@@ -428,6 +428,7 @@ for (const sc of SCENARIOS) {
 
   const mockClient = {
     session: {
+      get: async () => ({ data: { id: "sandbox-session-001" } }),
       messages: async () => ({ data: sc.messages, error: undefined }),
       promptAsync: async ({ body }) => {
         promptSent = body.parts?.[0]?.text;

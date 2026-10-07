@@ -658,7 +658,13 @@ test("GuardEngine passes isSubagent flag to inspection context", async () => {
     },
   ];
 
-  await engine.inspect("sess-sub", "/tmp", messages);
+  await engine.inspect(
+    "sess-sub",
+    "/tmp",
+    messages,
+    undefined,
+    { isSubagent: true, agentCapability: "unknown" }
+  );
   assert.equal(capturedIsSubagent, true);
 });
 
@@ -1254,6 +1260,7 @@ test("OpenCode v2 setup consumes the async event stream and sends synthetic reme
   const remediated = new Promise((resolve) => {
     const context = {
       location: { directory: process.cwd() },
+      options: { secrets: { enabled: false } },
       event: {
         subscribe(options) {
           subscribeOptions = options;
@@ -1265,6 +1272,9 @@ test("OpenCode v2 setup consumes the async event stream and sends synthetic reme
         },
       },
       session: {
+        async get({ sessionID }) {
+          return { id: sessionID, parentID: undefined, location: { directory: process.cwd() } };
+        },
         async context({ sessionID }) {
           contextCalls += 1;
           assert.equal(sessionID, "v2-session");
@@ -1315,12 +1325,14 @@ test("OpenCode v2 setup silently no-ops on partial v2 contexts", async () => {
   try {
     const missingEvent = await OpencodeGuardian.setup({
       location: { directory: process.cwd() },
+      options: { secrets: { enabled: false } },
       session: {},
     });
     assert.equal(missingEvent, undefined);
 
     const nonIterableSubscription = await OpencodeGuardian.setup({
       location: { directory: process.cwd() },
+      options: { secrets: { enabled: false } },
       event: {
         subscribe() {
           return {};
@@ -3777,6 +3789,9 @@ test("OpenCode V1 chat.message and system.transform preserve explicit task guida
     directory: process.cwd(),
     client: {
       session: {
+        get: async ({ path: requestPath }) => ({
+          data: { id: requestPath.id, parentID: undefined },
+        }),
         messages: async () => ({ data: messages }),
         promptAsync: async (input) => { injected.push(input.body.parts[0].text); },
       },
@@ -3813,6 +3828,7 @@ test("OpenCode V2 prompt/context hooks and idle subscription use real domain sig
   let eventController;
   const context = {
     location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
     event: {
       subscribe({ signal }) {
         eventController = signal;

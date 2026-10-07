@@ -110,6 +110,9 @@ test("V1 rejected promptAsync response rolls back remediation and a later idle r
   const directory = tempProject(t);
   let attempts = 0;
   const hooks = await Guardian.server({ directory, client: { session: {
+    async get({ path: requestPath }) {
+      return { data: { id: requestPath.id, parentID: undefined } };
+    },
     async messages() { return { data: failedAssistant() }; },
     async promptAsync() {
       attempts++;
@@ -132,6 +135,9 @@ test("V1 completion watcher also rejects an API error instead of recording a del
   const directory = tempProject(t);
   let attempts = 0;
   const hooks = await Guardian.server({ directory, client: { session: {
+    async get({ path: requestPath }) {
+      return { data: { id: requestPath.id, parentID: undefined } };
+    },
     async status() { return { data: {} }; },
     async messages() { return { data: failedAssistant(true) }; },
     async promptAsync() {

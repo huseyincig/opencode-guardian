@@ -219,6 +219,9 @@ test("guardian-sq handoff: V1 remediation transport stamps synthetic Guardian pr
     directory,
     client: {
       session: {
+        async get({ path: requestPath }) {
+          return { data: { id: requestPath.id, parentID: undefined } };
+        },
         async messages() {
           return { data: messages };
         },

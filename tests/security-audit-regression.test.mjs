@@ -41,8 +41,68 @@ test("V2 strict preflight never silently skips incomplete or invalid host setup"
   }
 });
 
-test("V2 partial transition contexts remain tolerated unless strict preflight was requested", async (t) => {
-  const dir = configDir(t, { enabled: true, preflight: { enabled: false } });
+test("V2 secret protection fails closed when mandatory security hook surfaces are unavailable", async (t) => {
+  const dir = configDir(t, {
+    enabled: true,
+    preflight: { enabled: false },
+    secrets: { enabled: true },
+  });
+
+  await assert.rejects(
+    Guardian.setup({ location: { directory: dir }, event: {}, session: {} }),
+    /secret|sanitiz|security/i,
+    "Guardian must not load with secret protection enabled when FINAL/POST hooks cannot be registered"
+  );
+});
+
+test("V2 secret protection fails closed when the FINAL context hook registration fails", async (t) => {
+  const dir = configDir(t, {
+    enabled: true,
+    preflight: { enabled: false },
+    secrets: { enabled: true },
+  });
+  let disposed = 0;
+  const context = {
+    location: { directory: dir },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await new Promise((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
+      },
+    },
+    tool: {
+      async hook() {
+        return { dispose() { disposed++; } };
+      },
+    },
+    session: {
+      async context() { return []; },
+      async synthetic() {},
+      async hook(name) {
+        if (name === "prompt") return { dispose() { disposed++; } };
+        throw new Error("context hook unavailable");
+      },
+    },
+  };
+
+  await assert.rejects(
+    Guardian.setup(context),
+    /secret|sanitiz|context.*hook/i,
+    "A missing FINAL context gate must abort plugin setup"
+  );
+  assert.ok(disposed >= 1, "partial security registrations must be rolled back");
+});
+
+test("V2 partial transition contexts remain tolerated only when strict preflight and secret protection are disabled", async (t) => {
+  const dir = configDir(t, {
+    enabled: true,
+    preflight: { enabled: false },
+    secrets: { enabled: false },
+  });
   assert.equal(await Guardian.setup({ location: { directory: dir }, event: {}, session: {} }), undefined);
   assert.equal(await Guardian.setup({ location: { directory: dir }, event: { subscribe() { return null; } }, session: {
     async context() { return []; }, async synthetic() {},

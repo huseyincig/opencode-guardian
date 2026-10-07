@@ -18,6 +18,9 @@ test("OpenCode V1 task hooks preserve a Spanish iterative task and request a bou
   const hooks = await Guardian.server({
     directory: process.cwd(),
     client: { session: {
+      async get({ path: requestPath }) {
+        return { data: { id: requestPath.id, parentID: undefined } };
+      },
       async messages() {
         return { data: [
           { info: { id: "user-es", role: "user" }, parts: [{ type: "text", text: ES }] },
@@ -47,6 +50,7 @@ test("OpenCode V2 typed prompt/context and idle path preserve Chinese task requi
   let releaseEvent;
   const context = {
     location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
     event: {
       subscribe({ signal }) {
         return (async function* () {

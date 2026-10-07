@@ -1,5 +1,6 @@
 import { gitCleanInvocation, isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "../evidence.js";
 import { hasFindDeletion } from "../shell-risk.js";
+import { isAuthorizedGitClean, isDeleteTargetRequested, isExplicitlyAllowedSudo, isImperativeExecutionRequest, isSqlDestructionRequested, isWholeWorkspaceDeleteRequested, SQL_TARGET_CONTEXT_REGEX, } from "../locale-intents.js";
 function latestHumanRequest(context) {
     const user = context.currentTurn.findLast((message) => message.info.role === "user" &&
         !message.parts.some((part) => part.synthetic === true));
@@ -12,9 +13,7 @@ function latestHumanRequest(context) {
         .toLowerCase();
 }
 function explicitlyAllowedSudo(request) {
-    const forbidden = /\b(?:without|no|never|avoid|do\s+not|don\x27t|dont)\s+(?:(?:using|use|running|run)\s+)?sudo\b/i.test(request) ||
-        /\bsudo\b[^.!?\n]{0,40}\b(?:kullanma|kullanmayın|yapma|olmadan)\b/iu.test(request);
-    return /\bsudo\b/i.test(request) && !forbidden;
+    return isExplicitlyAllowedSudo(request);
 }
 /** Require literal target matches before treating a scoped deletion as authorized. */
 function matchesRequestedTargets(request, command) {
@@ -206,17 +205,10 @@ function explicitlyAuthorized(request, command) {
         if (/[;&|\n`]/.test(command) ||
             /\$(?:\(|\{|[A-Za-z_])|<\(|>\(/.test(command) ||
             !gitCleanInvocation(cleanRequest) ||
-            /\b(?:do\s+not|don't|dont|never|avoid|without)\s+(?:(?:run|running|execute|executing|use|using)\s+)?git\s+clean\b/i.test(cleanRequest) ||
-            /\b(?:instead\s+of|rather\s+than)\s+(?:(?:running|using)\s+)?git\s+clean\b/i.test(cleanRequest) ||
-            /\bgit\s+clean\b[^.!?\n]{0,60}\b(?:yapma|yapmayın|kullanma|kullanmayın|uygulama|uygulamayın|çalıştırma|çalıştırmayın|çalıştırmamalısın|istemiyorum|yerine)\b/iu.test(cleanRequest) ||
-            !(/\b(?:run|execute|use|apply)\s+(?:the\s+)?git\s+clean\b/i.test(cleanRequest) ||
-                /\bgit\s+clean\b[^.!?\n]{0,80}\b(?:yap|yapın|uygula|uygulayın|çalıştır|çalıştırın|kullan|kullanın)\b/iu.test(cleanRequest) ||
-                request.trim() === command.trim().toLowerCase())) {
+            !isAuthorizedGitClean(cleanRequest, command)) {
             return false;
         }
-        const ignoredFiles = /(?:^|\s)-[a-z]*[xX][a-z]*(?=\s|$)|--(?:exclude-standard|ignored)(?=\s|$)/.test(command);
-        return (!ignoredFiles ||
-            /(?:^|\s)-[a-z]*[xX][a-z]*(?=\s|$)|\b(?:ignored\s+files?|gitignored\s+files?|yok\s+sayılan\s+dosyalar|ignore\s+edilen\s+dosyalar)\b/iu.test(request));
+        return true;
     }
     if (/(?:^|[;&|]\s*)(?:sudo\s+)?rm\b/i.test(command)) {
         if (/[;&|\n\x60$<>]/.test(command))
@@ -224,12 +216,12 @@ function explicitlyAuthorized(request, command) {
         if (/^\s*sudo\s+/i.test(command) && !explicitlyAllowedSudo(request))
             return false;
         const direct = request.trim() === command.trim().toLowerCase();
-        const imperative = /^\s*(?:please\s+)?(?:run|execute|çalıştır|çalıştırın)\b/iu.test(request) &&
+        const imperative = isImperativeExecutionRequest(request) &&
             !/\b(?:not|instead\s+of|rather\s+than|never|avoid)\b/iu.test(request) &&
             request.includes(command.trim().toLowerCase());
         if (direct || (imperative && matchesRequestedTargets(request, command)))
             return true;
-        const deleteRequested = /\b(?:delete|remove|wipe|sil|silin|sileyim|kaldır|kaldırın)\b/iu.test(request);
+        const deleteRequested = isDeleteTargetRequested(request);
         if (!deleteRequested)
             return false;
         const broadTarget = /(?:^|\s)(?:\.{1,2}\/?|\/|~\/?|\*|\.\/\*|\.\.\/\*)\s*(?:$|[;&|])/i.test(command);
@@ -238,17 +230,13 @@ function explicitlyAuthorized(request, command) {
         const targets = command.trim().toLowerCase().split(/\s+/).filter((token) => token !== "sudo" && token !== "rm" && !token.startsWith("-"));
         if (targets.length !== 1)
             return false;
-        return (/\brm\s+-rf\s+\.\/?(?:\s|$)/i.test(request) ||
-            /\b(?:delete|remove|wipe|destroy)\s+(?:the\s+)?(?:entire|whole)\s+(?:project|repo|repository|directory|folder|workspace)\b/iu.test(request) ||
-            /\b(?:entire|whole)\s+(?:project|repo|repository|directory|folder|workspace)\b[^.!?]*\b(?:delete|remove|wipe|destroy)\b/iu.test(request) ||
-            /\b(?:tüm|bütün|komple)\s+(?:projeyi|depoyu|klasörü|dizini|çalışma\s+alanını)\s+(?:sil|silin|sıfırla|sıfırlayın)\b/iu.test(request) ||
-            /\b(?:projenin|deponun|klasörün|dizinin)\s+tamamını\s+(?:sil|silin)\b/iu.test(request));
+        return isWholeWorkspaceDeleteRequested(request);
     }
     if (/\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b/i.test(command)) {
         const targets = sqlDestructiveTargets(command);
         return (targets.length > 0 &&
-            /\b(?:drop|truncate|delete|remove|sil|kaldır)\b/iu.test(request) &&
-            targets.every((target) => targetNearContext(request, target, /\b(?:drop|truncate|delete|remove|sil|kaldır|tables?|databases?|schemas?|tablolar?|veritabanı|şema)\b/iu)));
+            isSqlDestructionRequested(request) &&
+            targets.every((target) => targetNearContext(request, target, SQL_TARGET_CONTEXT_REGEX)));
     }
     if (/\bterraform\s+destroy\b/i.test(command)) {
         const actionAuthorized = /\b(?:terraform\s+destroy|destroy\s+(?:the\s+)?(?:stack|infra|infrastructure)|altyapıyı\s+(?:sil|yok\s+et))\b/iu.test(request);

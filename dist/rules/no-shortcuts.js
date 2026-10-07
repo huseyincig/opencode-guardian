@@ -1,6 +1,7 @@
 import { sanitizeProseForInspection } from "../prose.js";
 import { extractLikelyShellMutation } from "../tool-input.js";
 import { extractGitCommitMessage } from "../preflight.js";
+import { isAuthorizedStubOrPlaceholder, isCodePlaceholderRequested, isPlaceholderProhibited, } from "../locale-intents.js";
 export const DEFAULT_HEDGING_PATTERNS = [
     // Deferred work
     "for now",
@@ -172,9 +173,7 @@ function isWithinException(text, pos, len, exceptions) {
     return false;
 }
 export function explicitlyAuthorizedStubOrPlaceholder(text) {
-    if (!text || typeof text !== "string")
-        return false;
-    return /(?:\b(?:add|create|use|put|write|leave)\b[^\n.!?]{0,50}\b(?:stub|mock|placeholder|todo|fixme)\b|\b(?:stub|mock|placeholder|todo|fixme|taslak|yer\s+tutucu)\b[^\n.!?]{0,50}\b(?:ekle|oluştur|yaz|kullan|bırak)\b)/iu.test(text);
+    return isAuthorizedStubOrPlaceholder(text);
 }
 function extractUserInstruction(context) {
     const messages = context.messages?.length ? context.messages : context.currentTurn;
@@ -198,11 +197,11 @@ export const noShortcutsRule = {
         const isAuthorizedMarker = (marker, targetFile) => {
             if (!authorized)
                 return false;
-            if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:todo|fixme|hack|stub|placeholder|mock)\b|\b(?:todo|fixme|hack|taslak)\s+(?:ekleme|bırakma|yazma)\b/iu.test(userInstruction))
+            if (isPlaceholderProhibited(userInstruction))
                 return false;
             const instruction = userInstruction.toLowerCase();
             // A request for mocks does not permit arbitrary TODOs in production.
-            const wantsCodePlaceholder = /\b(?:stub|placeholder|todo|fixme|hack|taslak|yer\s*tutucu)\b/iu.test(instruction);
+            const wantsCodePlaceholder = isCodePlaceholderRequested(instruction);
             if (!wantsCodePlaceholder)
                 return false;
             if (/TODO|FIXME|HACK/i.test(marker) && !wantsCodePlaceholder)

@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.6.7 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.6.8 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.6.7`
+- **Package Version:** OpenCode Guardian `v0.6.8`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **484 / 484 unit and regression tests passed**
+- **Current Automated Source Suite:** **521 / 521 unit, security, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.6.7 adds capability-aware subagent remediation isolation, strict TypeScript/lint hardening, dependency audit hardening, redundant-confirmation handling, foreground subagent handoff finalization, and the verified Smart Questions handoff protocol (`[OPENCODE_HANDOFF:v1]`). The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.7 V1/V2 acceptance run.
+> v0.6.8 adds multi-layer secret protection & output redaction (PRE, POST, and FINAL gates), genuinely language-agnostic policy and evidence verification, subagent topology hardening (agent-name neutral), capability-aware subagent remediation isolation, and strict TypeScript/lint hardening. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.6.8 V1/V2 acceptance run.
 
 ---
 
@@ -122,6 +122,18 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 ---
 
+## v0.6.8 Multi-Layer Secret Protection, Language-Agnostic Policy, and Subagent Topology Hardening
+
+The v0.6.8 release integrates comprehensive secret redaction and runtime safety:
+
+- **Multi-layer secret protection and post-execution redaction:** implements deterministic redaction across all surfaces:
+  - **PRE:** Command preflight flags high-risk environment dump commands (`docker exec ... env`, `printenv`, `docker inspect`).
+  - **POST:** Sanitizes tool results (`output`, `metadata`, `stdout`, `stderr`) and `Tool.Error` shapes (`message`, `stack`, `error`/raw defect, `metadata`) immediately upon execution.
+  - **FINAL:** Context gates intercept outgoing `messages` and `system` transforms before model context.
+  - **Fail-Closed:** Errors during sanitization suppress sensitive content (`[OUTPUT REDACTED: sanitization failure]`); missing V2 security hooks fail closed to ensure raw outputs never leak.
+- **Language-agnostic policy & verification:** policy decisions are made through structured runtime evidence, execution traces, and protocol markers rather than expanding brittle natural-language regexes.
+- **Authoritative subagent topology:** root vs subagent decisions rely exclusively on actual session parent relations (`parentID`), never inferring topology from agent names. Unknown topology fails safe without unauthorized root remediation.
+
 ## v0.6.7 Handoff, Quality, and Capability-Aware Hardening
 
 The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 release baseline:
@@ -139,7 +151,7 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 484 tests across all 14 rules, adapters, telemetry, handoff protocol and preflight | **484 / 484 PASS** |
+| **Unit & Regression Suite** | 521 tests across all 14 rules, secret redaction, adapters, telemetry, handoff protocol and preflight | **521 / 521 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | Package entrypoints, exports, and status CLI | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
@@ -147,7 +159,7 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS (5 MD, 22 links, 1 SVG)** |
 | **Production Audit** | `npm audit --omit=dev` | **0 vulnerabilities** |
 | **Development Audit** | Full lockfile dependency audit | **0 vulnerabilities** |
-| **Packaging Dry Run** | `npm pack --dry-run` (78 files, 114,931 B tarball, complete entrypoint bundle) | **PASS** |
+| **Packaging Dry Run** | `npm pack --dry-run` (complete entrypoint bundle) | **PASS** |
 
 ---
 

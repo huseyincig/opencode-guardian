@@ -15,7 +15,10 @@ async function eventually(check, limit = 1500) {
 
 function fixture(t, subscribe) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v2-event-"));
-  fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({ enabled: true }));
+  fs.writeFileSync(
+    path.join(directory, "opencode-guardian.json"),
+    JSON.stringify({ enabled: true, secrets: { enabled: false } })
+  );
   const original = process.env.OPENCODE_GUARDIAN_STATE_DIR;
   process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
   t.after(() => {

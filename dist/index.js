@@ -8,6 +8,7 @@ import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV1AgentCapability, resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
+import { assessCommandPreflight, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -37,6 +38,40 @@ export * from "./version-notice.js";
 export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
 export * from "./agent-capability.js";
+export * from "./secrets/index.js";
+function sanitizeV2ToolError(error, options) {
+    const fallback = () => {
+        const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
+        if (error && typeof error === "object") {
+            try {
+                Object.setPrototypeOf(safe, Object.getPrototypeOf(error));
+            }
+            catch { }
+        }
+        return safe;
+    };
+    try {
+        if (!error || typeof error !== "object") {
+            return sanitizeToolResult(error, options);
+        }
+        const source = error;
+        const snapshot = { ...source };
+        if (typeof source.message === "string")
+            snapshot.message = source.message;
+        if (typeof source.stack === "string")
+            snapshot.stack = source.stack;
+        if (typeof source.name === "string")
+            snapshot.name = source.name;
+        const sanitized = sanitizeObject(snapshot, options).sanitized;
+        if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
+            return fallback();
+        }
+        return Object.assign(Object.create(Object.getPrototypeOf(error)), sanitized);
+    }
+    catch {
+        return fallback();
+    }
+}
 function stringifyV2ToolContent(content) {
     if (!Array.isArray(content))
         return "";
@@ -328,8 +363,11 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
         if (signal?.aborted)
             return;
         stage = "engine-inspect";
+        // Unknown topology is not permission to treat a session as root. Fail safe
+        // as a non-self-remediating child until the host proves parent/root state.
+        const effectiveIsSubagent = isSubagent ?? true;
         let resolvedCapability;
-        if (isSubagent && resolveCapability) {
+        if (effectiveIsSubagent && resolveCapability) {
             try {
                 resolvedCapability = await resolveCapability();
             }
@@ -340,17 +378,15 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 };
             }
         }
-        const agentCapability = resolvedCapability?.capability ?? (isSubagent ? "unknown" : undefined);
-        const result = await engine.inspect(sessionID, directory, messages, snapshots, isSubagent === undefined
-            ? undefined
-            : { isSubagent, ...(agentCapability ? { agentCapability } : {}) });
+        const agentCapability = resolvedCapability?.capability ?? (effectiveIsSubagent ? "unknown" : undefined);
+        const result = await engine.inspect(sessionID, directory, messages, snapshots, { isSubagent: effectiveIsSubagent, ...(agentCapability ? { agentCapability } : {}) });
         if (signal?.aborted) {
             result.rollback?.();
             return;
         }
         const findings = recordInspectionOutcome(result, sessionID, directory);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
-            if (isSubagent && agentCapability !== "write-allowed") {
+            if (effectiveIsSubagent && agentCapability !== "write-allowed") {
                 return;
             }
             stage = "prompt-send";
@@ -404,7 +440,7 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
     if (finding)
         throw new GuardianPreflightError(finding);
 }
-const server = async ({ client, directory }) => {
+const server = async ({ client, directory }, pluginOptions) => {
     registerGuardianCapability();
     const config = loadConfig(directory);
     if (config.enabled === false) {
@@ -416,7 +452,20 @@ const server = async ({ client, directory }) => {
             event: async () => { },
         };
     }
-    const engine = new GuardEngine(config);
+    const rawOptions = (pluginOptions && typeof pluginOptions === "object" ? pluginOptions : {});
+    const mergedConfig = {
+        ...config,
+        ...(typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+        secrets: {
+            ...config.secrets,
+            ...(rawOptions.secrets && typeof rawOptions.secrets === "object" ? rawOptions.secrets : {}),
+            ...(typeof rawOptions.replacement === "string" ? { replacement: rawOptions.replacement } : {}),
+            ...(Array.isArray(rawOptions.customSensitiveKeys) ? { customSensitiveKeys: rawOptions.customSensitiveKeys } : {}),
+            ...(Array.isArray(rawOptions.customSecretValues) ? { customSecretValues: rawOptions.customSecretValues } : {}),
+        },
+    };
+    const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
+    const engine = new GuardEngine(mergedConfig);
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
     let promptSequence = 0;
@@ -522,6 +571,10 @@ const server = async ({ client, directory }) => {
             const args = output.args && typeof output.args === "object" && !Array.isArray(output.args)
                 ? output.args
                 : {};
+            const cmd = args.command ?? args.cmd;
+            if (cmd) {
+                assessCommandPreflight(cmd);
+            }
             if (input.tool === "task" &&
                 typeof input.sessionID === "string" &&
                 typeof input.callID === "string" &&
@@ -610,6 +663,19 @@ const server = async ({ client, directory }) => {
                         }
                     }
                 }
+                if (sanitizerOpts && output) {
+                    if (typeof output.output === "string") {
+                        const sanitized = sanitizeString(output.output, sanitizerOpts);
+                        output.output = sanitized.sanitized;
+                    }
+                    else if (output.output && typeof output.output === "object") {
+                        output.output = sanitizeToolResult(output.output, sanitizerOpts);
+                    }
+                    if (output.metadata && typeof output.metadata === "object") {
+                        const sanitizedMeta = sanitizeObject(output.metadata, sanitizerOpts);
+                        output.metadata = sanitizedMeta.sanitized;
+                    }
+                }
                 verificationStore.observe(input.sessionID, input.callID, input.tool, args, output.output, output.metadata && typeof output.metadata === "object"
                     ? output.metadata
                     : {}, directory);
@@ -637,6 +703,9 @@ const server = async ({ client, directory }) => {
             watcher?.watch(input.sessionID);
         },
         "experimental.chat.system.transform": async (input, output) => {
+            if (sanitizerOpts && Array.isArray(output.system)) {
+                output.system = output.system.map((part) => sanitizeString(part, sanitizerOpts).sanitized);
+            }
             if (!input.sessionID)
                 return;
             const contract = contracts.get(input.sessionID);
@@ -645,6 +714,11 @@ const server = async ({ client, directory }) => {
             const guidance = taskGuidance(contract);
             if (guidance && !output.system.includes(guidance)) {
                 output.system.push(guidance);
+            }
+        },
+        "experimental.chat.messages.transform": async (_input, output) => {
+            if (sanitizerOpts && output && Array.isArray(output.messages)) {
+                output.messages = sanitizeMessages(output.messages, sanitizerOpts);
             }
         },
         event: async ({ event }) => {
@@ -742,6 +816,19 @@ const setup = async (context) => {
         recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
         return;
     }
+    const rawOptions = context?.options;
+    const mergedConfig = {
+        ...config,
+        ...(rawOptions && typeof rawOptions.enabled === "boolean" ? { enabled: rawOptions.enabled } : {}),
+        secrets: {
+            ...config.secrets,
+            ...(rawOptions?.secrets && typeof rawOptions.secrets === "object" ? rawOptions.secrets : {}),
+            ...(typeof rawOptions?.replacement === "string" ? { replacement: rawOptions.replacement } : {}),
+            ...(Array.isArray(rawOptions?.customSensitiveKeys) ? { customSensitiveKeys: rawOptions.customSensitiveKeys } : {}),
+            ...(Array.isArray(rawOptions?.customSecretValues) ? { customSecretValues: rawOptions.customSecretValues } : {}),
+        },
+    };
+    const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
     const strictPreflight = config.preflight?.enabled === true;
     if (!context ||
         typeof context !== "object" ||
@@ -750,6 +837,9 @@ const setup = async (context) => {
         typeof context.session?.synthetic !== "function") {
         if (strictPreflight) {
             throw new Error("[opencode-guardian preflight] V2 host context is unavailable; strict preflight cannot be enabled.");
+        }
+        if (sanitizerOpts) {
+            throw new Error("[opencode-guardian secrets] V2 host context is unavailable; secret protection cannot be enabled safely.");
         }
         return;
     }
@@ -766,6 +856,9 @@ const setup = async (context) => {
             if (strictPreflight) {
                 throw new Error("[opencode-guardian preflight] V2 event subscription is unavailable; strict preflight cannot be enabled.");
             }
+            if (sanitizerOpts) {
+                throw new Error("[opencode-guardian secrets] V2 event subscription is unavailable; secret protection cannot be enabled safely.");
+            }
             return;
         }
         events = candidate;
@@ -775,9 +868,12 @@ const setup = async (context) => {
         if (strictPreflight) {
             throw new Error("[opencode-guardian preflight] V2 event subscription failed; strict preflight cannot be enabled.", { cause: error });
         }
+        if (sanitizerOpts) {
+            throw new Error("[opencode-guardian secrets] V2 event subscription failed; secret protection cannot be enabled safely.", { cause: error });
+        }
         return;
     }
-    const engine = new GuardEngine(config);
+    const engine = new GuardEngine(mergedConfig);
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
     const foregroundHandoffs = new Map();
@@ -790,6 +886,13 @@ const setup = async (context) => {
         }
         try {
             const registration = await context.tool.hook("execute.before", (event) => {
+                const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
+                    ? event.input
+                    : {};
+                const cmd = input.command ?? input.cmd;
+                if (cmd) {
+                    assessCommandPreflight(cmd);
+                }
                 inspectPreflight(event.tool, event.input, event.sessionID, directory, config.preflight?.shellTools);
             });
             if (!registration || typeof registration.dispose !== "function") {
@@ -805,6 +908,16 @@ const setup = async (context) => {
     // Verification and foreground subagent finalization share one atomic
     // registration group. If either hook cannot be installed, dispose the other
     // immediately so a stale foreground marker can never suppress idle handling.
+    if (sanitizerOpts && typeof context.tool?.hook !== "function") {
+        controller.abort();
+        for (const registration of registrations.reverse()) {
+            try {
+                await registration.dispose();
+            }
+            catch { }
+        }
+        throw new Error("[opencode-guardian secrets] V2 execute.after hook is unavailable; POST redaction cannot be enabled safely.");
+    }
     if (typeof context.tool?.hook === "function") {
         const toolRegistrations = [];
         const canFinalizeSubagent = typeof context.session.get === "function" &&
@@ -829,7 +942,17 @@ const setup = async (context) => {
                 toolRegistrations.push(before);
             }
             const after = await context.tool.hook("execute.after", async (event) => {
-                if (controller.signal.aborted || typeof context.session.get !== "function")
+                if (controller.signal.aborted)
+                    return;
+                if (sanitizerOpts) {
+                    if (event.status === "completed") {
+                        event.result = sanitizeToolResult(event.result, sanitizerOpts);
+                    }
+                    else if (event.status === "error") {
+                        event.error = sanitizeV2ToolError(event.error, sanitizerOpts);
+                    }
+                }
+                if (typeof context.session.get !== "function")
                     return;
                 const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
                     ? event.input
@@ -944,12 +1067,32 @@ const setup = async (context) => {
             toolRegistrations.push(after);
             registrations.push(...toolRegistrations);
         }
-        catch {
+        catch (error) {
             foregroundHandoffs.clear();
             await Promise.allSettled(toolRegistrations.map((registration) => Promise.resolve().then(() => registration.dispose())));
             recordGuardianEvent({ kind: "verification-unavailable",
                 rules: ["verification-snapshot-unavailable"] }, directory);
+            if (sanitizerOpts) {
+                controller.abort();
+                for (const registration of registrations.reverse()) {
+                    try {
+                        await registration.dispose();
+                    }
+                    catch { }
+                }
+                throw new Error("[opencode-guardian secrets] V2 execute.after security hook registration failed; POST redaction cannot be enabled safely.", { cause: error });
+            }
         }
+    }
+    if (sanitizerOpts && typeof context.session.hook !== "function") {
+        controller.abort();
+        for (const registration of registrations.reverse()) {
+            try {
+                await registration.dispose();
+            }
+            catch { }
+        }
+        throw new Error("[opencode-guardian secrets] V2 session.context hook is unavailable; FINAL context redaction cannot be enabled safely.");
     }
     if (typeof context.session.hook === "function") {
         const taskRegistrations = [];
@@ -971,6 +1114,21 @@ const setup = async (context) => {
             }
             taskRegistrations.push(promptRegistration);
             const contextRegistration = await context.session.hook("context", (event) => {
+                if (sanitizerOpts) {
+                    if (Array.isArray(event.messages)) {
+                        event.messages = sanitizeMessages(event.messages, sanitizerOpts);
+                    }
+                    if (Array.isArray(event.system)) {
+                        const sanitizedSystem = sanitizeObject(event.system, sanitizerOpts).sanitized;
+                        event.system = Array.isArray(sanitizedSystem)
+                            ? sanitizedSystem
+                            : [{
+                                    type: "text",
+                                    text: "[OUTPUT REDACTED: sanitization failure]",
+                                    metadata: { "opencode-guardian": true },
+                                }];
+                    }
+                }
                 const contract = contracts.get(event.sessionID);
                 if (!contract)
                     return;
@@ -985,12 +1143,21 @@ const setup = async (context) => {
             taskRegistrations.push(contextRegistration);
             registrations.push(...taskRegistrations);
         }
-        catch {
-            // Beta hosts may support only one hook. Undo partial registration now,
-            // rather than leaving an orphaned prompt hook until plugin shutdown.
+        catch (error) {
+            // Never leave a partial task/security hook group installed.
             await Promise.allSettled(taskRegistrations.map((registration) => Promise.resolve().then(() => registration.dispose())));
             contracts.clear();
             recordGuardianEvent({ kind: "inspection-error" }, directory);
+            if (sanitizerOpts) {
+                controller.abort();
+                for (const registration of registrations.reverse()) {
+                    try {
+                        await registration.dispose();
+                    }
+                    catch { }
+                }
+                throw new Error("[opencode-guardian secrets] V2 session context security hook registration failed; FINAL context redaction cannot be enabled safely.", { cause: error });
+            }
         }
     }
     const eventLoop = async () => {

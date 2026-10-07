@@ -559,7 +559,11 @@ test("A live test snapshot detects same-size edits with preserved timestamps", (
 test("V1 and V2 host adapters register and dispose live evidence hooks", async (t) => {
   const project = isolated(t);
   fs.writeFileSync(path.join(project, "opencode-guardian.json"),
-    JSON.stringify({ enabled: true, preflight: { enabled: false } }));
+    JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
   const v1 = await Guardian.server({ client: { session: {} }, directory: project });
   assert.equal(typeof v1["tool.execute.after"], "function");
   await v1["tool.execute.after"]({

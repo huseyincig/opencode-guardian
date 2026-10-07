@@ -1,57 +1,9 @@
 import { sanitizeProseForInspection } from "../prose.js";
+import { getApologyPatterns } from "../locale-intents.js";
 /**
- * Universal multi-lingual apology and sycophancy patterns.
- * Matches root stems and expressions across English, Turkish, German, French,
- * Spanish, Italian, Portuguese, Russian, and Dutch with zero false-positives
- * on technical nouns/verbs.
+ * Universal multi-lingual apology and sycophancy patterns, centralized in the locale adapter.
  */
-export const MULTILINGUAL_APOLOGY_PATTERNS = [
-    // English
-    {
-        name: "English",
-        regex: /(?<!\p{L})(?:(?:i(?:'m| am)?\s+)?(?:deeply|sincerely|terribly|truly|so)?\s*(?:apologiz\p{L}*|apologis\p{L}*|sorr(?:y|ier))|(?:my|our|sincere|deepest)\s+apolog\p{L}*|apologies\s+for|pardon(?:\s+me)?|forgive\s+me|excuse\s+my\s+mistake|my\s+bad|my\s+fault)(?!\p{L})/iu,
-    },
-    // Turkish
-    {
-        name: "Turkish",
-        regex: /(?<!\p{L})(?:(?:çok\s+|binlerce\s+kez\s+)?özür\s*(?:diler(?:im|iz)?|diliyor(?:um|uz)?|dileyerek)|kusur(?:a|uma)?\s*bakma(?:yın|yınız)?|affeder(?:im|siniz)?|afeder(?:im|siniz)?|bağışla(?:yın)?)(?!\p{L})/iu,
-    },
-    // German
-    {
-        name: "German",
-        regex: /(?<!\p{L})(?:entschuldig\p{L}*|es\s+tut\s+mir\s+leid|verzeih\p{L}*)(?!\p{L})/iu,
-    },
-    // French
-    {
-        name: "French",
-        regex: /(?<!\p{L})(?:désol[ée]\p{L}*|pardon(?:nez-moi)?|excuse[zr]?-moi|veuillez\s+m'excuser|navr[ée]\p{L}*|mille\s+excuses)(?!\p{L})/iu,
-    },
-    // Spanish
-    {
-        name: "Spanish",
-        regex: /(?<!\p{L})(?:disculp\p{L}*|perd[oó]n\p{L}*|lo\s+siento|mil\s+disculpas)(?!\p{L})/iu,
-    },
-    // Italian
-    {
-        name: "Italian",
-        regex: /(?<!\p{L})(?:scus\p{L}*|spiacente|chiedo\s+scusa|perdon\p{L}*)(?!\p{L})/iu,
-    },
-    // Portuguese
-    {
-        name: "Portuguese",
-        regex: /(?<!\p{L})(?:desculp\p{L}*|perd[aã]o|sinto\s+muito|peço\s+desculpas)(?!\p{L})/iu,
-    },
-    // Russian
-    {
-        name: "Russian",
-        regex: /(?<!\p{L})(?:извини\p{L}*|прости\p{L}*|сожале\p{L}*|прошу\s+прощения)(?!\p{L})/iu,
-    },
-    // Dutch
-    {
-        name: "Dutch",
-        regex: /(?<!\p{L})(?:het\s+spijt\s+me|verontschuldig\p{L}*)(?!\p{L})/iu,
-    },
-];
+export const MULTILINGUAL_APOLOGY_PATTERNS = getApologyPatterns();
 function isReportedApologyToken(text, matchIndex) {
     const prefix = text.slice(Math.max(0, matchIndex - 100), matchIndex);
     return (/\b(?:return(?:ed|s)?|report(?:ed|s)?|contain(?:ed|s)?|emit(?:ted|s)?|print(?:ed|s)?|say|says|said)\s+(?:the\s+(?:word|text)\s+)?$/i.test(prefix) ||

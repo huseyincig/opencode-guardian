@@ -106,6 +106,9 @@ test("V1 server fallback inspects a completed turn when host drops session.idle"
   let messagesCalls = 0;
   let remediation = 0;
   const client = { session: {
+    async get({ path: requestPath }) {
+      return { data: { id: requestPath.id, parentID: undefined } };
+    },
     async status() { statusCalls++; return { data: {} }; },
     async messages() {
       messagesCalls++;
@@ -136,6 +139,9 @@ test("V1 native session.idle cancels its fallback and avoids duplicate remediati
   let statusCalls = 0;
   let remediation = 0;
   const client = { session: {
+    async get({ path: requestPath }) {
+      return { data: { id: requestPath.id, parentID: undefined } };
+    },
     async status() { statusCalls++; return { data: {} }; },
     async messages() { return { data: [
       { info: { id: "u1", role: "user" },

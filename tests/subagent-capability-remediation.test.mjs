@@ -558,8 +558,71 @@ test("Scenario 9: Bounded retry respects limits for write-allowed, 0 rounds for 
   assert.ok(simulatedPrompts >= 1, "Write-allowed subagent undergoes bounded remediation");
 });
 
-// Scenario 10: V1 and V2 parity across normalized capability states
-test("Scenario 10: V1 and V2 parity across normalized capability evaluation", async () => {
+test("Agent names never determine session topology", async () => {
+  const { extractCurrentTurn } = await import("../dist/engine.js");
+  const makeMessages = (agent) => [
+    {
+      info: { id: "u-name-neutral", role: "user" },
+      parts: [{ type: "text", text: "Inspect the repository." }],
+    },
+    {
+      info: { id: "a-name-neutral", role: "assistant", agent },
+      parts: [{ type: "text", text: "Inspection result." }],
+    },
+  ];
+
+  assert.equal(extractCurrentTurn(makeMessages("orchestrator")).isSubagent, false);
+  assert.equal(
+    extractCurrentTurn(makeMessages("arbitrary-worker-name")).isSubagent,
+    false,
+    "A different agent name must not manufacture child-session topology"
+  );
+});
+
+// Scenario 10: Unknown topology must fail safe without using agent names
+test("Scenario 10: V1 unknown session topology never infers root/child from agent name", async () => {
+  let promptCalls = 0;
+  const client = {
+    session: {
+      // No session.get(): topology is genuinely unavailable.
+      messages: async () => ({
+        data: [
+          {
+            info: { id: "u-unknown-topology", role: "user" },
+            parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
+          },
+          {
+            // Adversarial name: policy must not infer root from this string.
+            info: { id: "a-unknown-topology", role: "assistant", agent: "orchestrator" },
+            parts: [{ type: "text", text: "Done without running tests." }],
+          },
+        ],
+      }),
+      promptAsync: async () => {
+        promptCalls++;
+        return { data: {} };
+      },
+    },
+  };
+
+  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
+  await plugin.event({
+    event: {
+      type: "session.idle",
+      properties: { sessionID: "topology-unknown" },
+    },
+  });
+  await plugin.dispose();
+
+  assert.equal(
+    promptCalls,
+    0,
+    "Unknown topology must fail safe and must not become root solely because of an agent name"
+  );
+});
+
+// Scenario 11: V1 and V2 parity across normalized capability states
+test("Scenario 11: V1 and V2 parity across normalized capability evaluation", async () => {
   // 1. Read-only (edit: deny, bash: deny)
   const v1ReadOnly = evaluateAgentMutationProfile({
     name: "v1-agent",

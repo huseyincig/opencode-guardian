@@ -8,7 +8,11 @@ import Guardian from "../dist/index.js";
 function host(t, onHook) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v2-hook-lifecycle-"));
   fs.writeFileSync(path.join(directory, "opencode-guardian.json"),
-    JSON.stringify({ enabled: true, preflight: { enabled: false } }));
+    JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
   const original = process.env.OPENCODE_GUARDIAN_STATE_DIR;
   process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
   t.after(() => {

@@ -1,3 +1,5 @@
+import type { EvidenceKind } from "./types.js";
+
 /**
  * Multilingual signals only; never a safety-policy decision by themselves.
  * Tasks, permissions, and verification outcomes are evaluated through the
@@ -339,4 +341,373 @@ export function detectInternationalHistoricalRefusal(
       has(response, locale.consequence)
   );
   return candidates.length === 1 ? candidates[0]?.locale : undefined;
+}
+
+// -----------------------------------------------------------------------------
+// ADVISORY PARSING & COMPATIBILITY REGEXES (English, Turkish, etc.)
+// Centralized here so core engine and guard rules have ZERO language-specific phrases.
+// -----------------------------------------------------------------------------
+
+const CLOSING_REGEX =
+  /\b(?:completed?|finished|all\s+done|task\s+done|that's\s+it|no\s+(?:more|further)\s+(?:issues?|errors?|bugs?)|nothing\s+(?:else|left)\s+to\s+fix)\b|\b(?:tamamlandı|tamamladım|iş\s+bitti|denetim\s+bitti|inceleme\s+tamamlandı|hata\s+kalmadı|sorun\s+kalmadı|başka\s+hata\s+yok)\b/iu;
+
+const CLEAR_BLOCKER_REGEX =
+  /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|\b(?:engellendi|ilerleyemiyorum|doğrulayamıyorum|çalıştıramıyorum|tamamlanmadı|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum)\b/iu;
+
+export function classifyAgentReport(input: string): {
+  state: AgentReportState;
+  hasClearBlocker: boolean;
+  isClosing: boolean;
+} {
+  const internationalReport = classifyInternationalAgentReport(input);
+  const hasClearBlocker = CLEAR_BLOCKER_REGEX.test(input) || internationalReport === "blocked";
+  const proseWithoutBlockers = hasClearBlocker ? input.replace(CLEAR_BLOCKER_REGEX, " ") : input;
+  const isClosing = CLOSING_REGEX.test(proseWithoutBlockers) || internationalReport === "completed";
+  const state: AgentReportState =
+    hasClearBlocker && !isClosing
+      ? "blocked"
+      : isClosing
+        ? "completed"
+        : "unknown";
+  return { state, hasClearBlocker, isClosing };
+}
+
+// Task Contract extraction helpers
+const ITERATION =
+  /(?:\b(?:repeat|restart|rerun|re-run|again|until|every\s+(?:time|round)|each\s+(?:time|round))\b|\b(?:tekrar|yeniden|baştan|her\s+(?:turda|tura|seferinde|hata|bir\s+hata)|hata\s+kalmayana|bulmayana|sıfır\s+hata)\b)/iu;
+const REVIEW =
+  /(?:\b(?:audit|review|inspect|debug|scan|check|test|pass|iteration|issue|bug|error|defect|fix)\b|\b(?:denetim|incele|kontrol|debug|test|tur|hata|sorun|düzelt|bulgu)\b)/iu;
+const CONTINUE =
+  /(?:\b(?:until|restart|repeat|rerun|re-run|again|each\s+(?:time|round)|every\s+(?:time|round))\b|\b(?:tekrar|yeniden|baştan|her\s+(?:turda|tura|seferinde|hata)|kalmayana|bulmayana)\b)/iu;
+const NEGATED_LOOP =
+  /(?:\b(?:do\s+not|don't|dont|never|without|stop)\s+(?:repeat|restart|rerun|re-run|again)\b|\b(?:tekrarlama|tekrarlamayın|tekrar\s+etme|tekrar\s+başla(?:t)?ma|yeniden\s+başla(?:t)?ma|baştan\s+başla(?:t)?ma)\b)/iu;
+const SOURCE_REVIEW =
+  /(?:\b(?:full|entire|whole|from\s+scratch|restart)\b[^.!?]{0,70}\b(?:review|inspect|scan|audit|source|code)\b|(?:\b(?:review|inspect|scan)\b|\b(?:incele|denet|tara)\p{L}*)[^.!?]{0,70}\b(?:again|from\s+the\s+start|baştan|yeniden|tekrar)\b|\b(?:baştan|yeniden|tüm|bütün|satır\s+satır)\b[^.!?]{0,70}\b(?:incele|denet|tara|kod)\w*)/iu;
+const ACTION_REQUEST =
+  /\b(?:implement|fix|change|modify|build|develop|resume|continue|write|create|add|update|complete|run|execute|start)\b|\b(?:yap|yapın|uygula|uygulayın|düzelt|düzeltin|geliştir|geliştirin|devam\s+et|başla|başlayın|ekle|ekleyin|oluştur|tamamla|tamamlayın|yaz|yazın|çalıştır|çalıştırın)\b/iu;
+
+const VERIFICATION_REQUESTS: Array<{
+  kind: VerificationKind;
+  expression: RegExp;
+}> = [
+  { kind: "test", expression: /(?:\b(?:run|execute|rerun|re-run)\s+(?:the\s+|all\s+)?tests?\b|\b(?:testleri?|testleri\s+)?(?:çalıştır|çalıştırın|koştur|koşturun)\b)/iu },
+  { kind: "build", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?build\b|\b(?:build|derleme)(?:i|ı|yi|yı)?\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
+  { kind: "typecheck", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?typecheck\b|\btypecheck\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
+  { kind: "lint", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?lint\b|\blint\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
+  { kind: "audit", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?(?:security\s+)?audit\b|\b(?:npm\s+audit|güvenlik\s+denetimi)\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
+];
+
+export function isExploratoryPrompt(text: string): boolean {
+  return /^\s*(?:should\s+we|would\s+we|could\s+we|what\s+if|do\s+you\s+think\s+we\s+should|sence|acaba|ne\s+olur\s+eğer)\b/iu.test(text);
+}
+
+export function deniedVerification(text: string, kind: VerificationKind): boolean {
+  const target = kind === "test" ? "tests?" : kind;
+  const denied = new RegExp(
+    `\\b(?:do\\s+not|don't|dont|without|never)\\s+(?:run|execute)\\s+(?:the\\s+)?${target}\\b|\\b${kind === "test" ? "testleri?" : kind}\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın)\\b`,
+    "iu"
+  );
+  const negations = extractInternationalNegations(text);
+  return denied.test(text) || (kind === "test" && negations.test);
+}
+
+export interface AdvisoryTaskSignals {
+  explicitAction: boolean;
+  iterativeReview: boolean;
+  requiresSourceReview: boolean;
+  requiredVerifications: VerificationKind[];
+  negatedLoop: boolean;
+  exploratory: boolean;
+  signalLocale?: string;
+}
+
+export function extractAdvisoryTaskSignals(body: string): AdvisoryTaskSignals {
+  const exploratory = isExploratoryPrompt(body);
+  const international = extractInternationalSignals(body);
+  const negations = extractInternationalNegations(body);
+  const negatedLoop = NEGATED_LOOP.test(body) || negations.iteration;
+
+  const iterativeReview =
+    !exploratory &&
+    !negatedLoop &&
+    (international?.iterativeReview === true ||
+      (ITERATION.test(body) && REVIEW.test(body) && CONTINUE.test(body)));
+
+  const regexVerifications = VERIFICATION_REQUESTS
+    .filter(({ kind, expression }) => expression.test(body) && !deniedVerification(body, kind))
+    .map(({ kind }) => kind);
+
+  const requestedVerifications = exploratory
+    ? []
+    : [...new Set([...regexVerifications, ...(international?.requiredVerifications ?? [])])]
+        .filter((kind) => !deniedVerification(body, kind));
+
+  return {
+    explicitAction: (!exploratory && ACTION_REQUEST.test(body)) || (international?.explicitAction ?? false) || iterativeReview,
+    iterativeReview,
+    requiresSourceReview: iterativeReview && (SOURCE_REVIEW.test(body) || international?.requiresSourceReview === true),
+    requiredVerifications: requestedVerifications,
+    negatedLoop,
+    exploratory,
+    ...(international?.locale ? { signalLocale: international.locale } : {}),
+  };
+}
+
+// Instruction fidelity helpers
+const ACTION_FIDELITY =
+  /\b(?:implement|fix|change|modify|build|develop|resume|continue|write|create|add|update|complete|do|start)\b|\b(?:yap|yapın|uygula|uygulayın|düzelt|düzeltin|geliştir|geliştirin|devam\s+et|başla|başlayın|ekle|ekleyin|oluştur|tamamla|tamamlayın|yaz|yazın)\b/iu;
+const NEGATED_ACTION_FIDELITY =
+  /\b(?:do\s+not|don't|dont|never)\s+(?:implement|fix|change|build|develop|resume|continue|write|create|add|update|complete|do|start)\b|\b(?:yapma|yapmayın|uygulama|uygulamayın|düzeltme|düzeltmeyin|geliştirme|geliştirmeyin)\b/iu;
+const PREVIOUS_DECISION =
+  /\b(?:previously|earlier|before|last\s+time|already)\b[^.!?]{0,120}\b(?:pause|paused|suspend(?:ed)?|defer(?:red)?|postpone(?:d)?|cancel(?:ed)?|on\s+hold)\b|\b(?:önceden|daha\s+önce|eskiden)\b[^.!?]{0,120}\b(?:askıya\s+al|erteled|durdur|iptal|vazgeç)\w*/iu;
+const REFUSAL =
+  /\b(?:so|therefore|hence|thus|because|as\s+a\s+result)\b[^.!?]{0,100}\b(?:won't|will\s+not|cannot|can't|not\s+going\s+to|skip(?:ping)?)\b|\b(?:bu\s+yüzden|dolayısıyla|o\s+nedenle|bu\s+sebeple)\b[^.!?]{0,120}\b(?:yapmıyorum|yapmayacağım|uygulamıyorum|atlıyorum|devam\s+etmiyorum|yapamam)\b/iu;
+const REDUNDANT_HANDOFF =
+  /\b(?:would\s+you\s+like\s+me\s+to|do\s+you\s+want\s+me\s+to|should\s+i)\s+(?:proceed|continue|implement|fix|apply|run|finish|complete|start|do)\b|\b(?:devam\s+edeyim|yapayım|uygulayayım|düzelteyim|başlayayım|tamamlayayım)\s+m[ıiuü]\b|\bhangisini\s+(?:tercih\s+edersin|isters?in)\b|\bistersen\b[^.!?]{0,180}\b(?:yaparım|uygularım|düzeltirim|devam\s+ederim|başlarım|kapatırım|tamamlarım|çalıştırırım)\b/iu;
+const REAL_BLOCKER_OR_REQUIRED_CHOICE =
+  /\b(?:need|require|requires|required|missing|lack(?:ing)?|without)\b[^.!?]{0,120}\b(?:access|permission|credential|token|key|password|secret|information|details|input|decision|choice)\b|\b(?:cannot|can't|unable\s+to)\s+(?:continue|proceed)\b|\b(?:erişim|izin|yetki|kimlik\s+bilgisi|token|anahtar|parola|bilgi|detay|girdi|karar|tercih)\b[^.!?]{0,120}\b(?:gerekiyor|gerekli|eksik|olmadan|yok)\b/iu;
+
+export interface InstructionFidelitySignals {
+  hasViolation: boolean;
+  type?: "historical-refusal" | "redundant-handoff";
+  internationalLocale?: string;
+}
+
+export function detectInstructionFidelitySignals(
+  instruction: string,
+  prose: string,
+  observableWork: boolean
+): InstructionFidelitySignals {
+  const international = detectInternationalHistoricalRefusal(instruction, prose);
+  const explicitCurrentAction =
+    ACTION_FIDELITY.test(instruction) &&
+    !isExploratoryPrompt(instruction) &&
+    !NEGATED_ACTION_FIDELITY.test(instruction);
+  const originalPattern =
+    explicitCurrentAction &&
+    PREVIOUS_DECISION.test(prose) &&
+    REFUSAL.test(prose);
+  const redundantHandoff =
+    explicitCurrentAction &&
+    !observableWork &&
+    REDUNDANT_HANDOFF.test(prose) &&
+    !REAL_BLOCKER_OR_REQUIRED_CHOICE.test(prose);
+
+  if (redundantHandoff) {
+    return { hasViolation: true, type: "redundant-handoff" };
+  }
+  if (originalPattern || international) {
+    return {
+      hasViolation: true,
+      type: "historical-refusal",
+      ...(international ? { internationalLocale: international } : {}),
+    };
+  }
+  return { hasViolation: false };
+}
+
+// Unverified claims helpers
+export interface AdvisoryClaimPattern {
+  name: string;
+  kind?: EvidenceKind;
+  regex: RegExp;
+  mode?: "verification";
+}
+
+const UNCERTAINTY_REGEX =
+  /\b(?:probably|likely|possibly|maybe|should|seems?|appears?|i\s+(?:think|suspect|assume)|not\s+verified|unverified|haven't\s+run|have\s+not\s+run|didn't\s+run|did\s+not\s+run|cannot\s+verify|can't\s+verify|couldn't\s+verify|sanırım|muhtemelen|belki|büyük\s+ihtimal(?:le)?|doğrulamadım|doğrulanmadı|çalıştırmadım|kontrol\s+etmedim)\b/iu;
+
+export function isUncertaintyClaim(sentence: string): boolean {
+  return UNCERTAINTY_REGEX.test(sentence);
+}
+
+export function getClaimPatterns(): AdvisoryClaimPattern[] {
+  return [
+    {
+      name: "tests passing",
+      kind: "test",
+      regex:
+        /\b(?:(?:all|the)\s+)?tests?(?:\s+suite)?\s+(?:all\s+)?(?:pass(?:ed|es|ing)?|succeed(?:ed|s)?|are\s+(?:green|passing))\b|\btüm\s+testler\s+(?:geçti|başarılı)\b|\btestler\s+(?:geçti|başarılı)\b/iu,
+    },
+    {
+      name: "build successful",
+      kind: "build",
+      regex:
+        /\b(?:the\s+)?build\s+(?:pass(?:ed|es)?|is\s+successful|succeed(?:ed|s)?|completed\s+successfully)\b|\bderleme\s+(?:başarılı|geçti)\b/iu,
+    },
+    {
+      name: "typecheck successful",
+      kind: "typecheck",
+      regex:
+        /\btype\s*-?check(?:ing)?\s+(?:pass(?:ed|es)?|is\s+clean|succeed(?:ed|s)?)\b|\btypecheck\s+(?:başarılı|geçti)\b/iu,
+    },
+    {
+      name: "lint successful",
+      kind: "lint",
+      regex:
+        /\blint(?:ing)?\s+(?:pass(?:ed|es)?|is\s+clean|succeed(?:ed|s)?)\b|\blint\s+(?:başarılı|geçti)\b/iu,
+    },
+    {
+      name: "audit clean",
+      kind: "audit",
+      regex:
+        /\b(?:audit\s+(?:is\s+)?clean|no\s+vulnerabilit(?:y|ies)|0\s+vulnerabilit(?:y|ies))\b|\b(?:güvenlik\s+)?açığı\s+yok\b/iu,
+    },
+    {
+      name: "push successful",
+      kind: "git-push",
+      regex:
+        /\b(?:push(?:ed)?\s+(?:successfully|to\s+(?:github|origin|remote))|successfully\s+pushed)\b|\b(?:github|remote|origin)(?:'a|'e|a|e)?\s+(?:pushlandı|gönderildi)\b/iu,
+    },
+    {
+      name: "working tree clean",
+      kind: "git-status",
+      regex:
+        /\b(?:working\s+tree|repository|repo)\s+(?:is\s+)?clean\b|\bnothing\s+to\s+commit\b|\bçalışma\s+ağacı\s+temiz\b/iu,
+    },
+    {
+      name: "fix verified",
+      mode: "verification",
+      regex:
+        /\b(?:the\s+)?(?:bug|issue|problem|regression)\s+(?:is\s+)?(?:fixed|resolved)\b|\b(?:bug|hata|sorun)\s+(?:düzeltildi|çözüldü)\b/iu,
+    },
+  ];
+}
+
+// Destructive operations helpers
+export function isAuthorizedGitClean(cleanRequest: string, command: string): boolean {
+  if (
+    /\b(?:do\s+not|don't|dont|never|avoid|without)\s+(?:(?:run|running|execute|executing|use|using)\s+)?git\s+clean\b/i.test(cleanRequest) ||
+    /\b(?:instead\s+of|rather\s+than)\s+(?:(?:running|using)\s+)?git\s+clean\b/i.test(cleanRequest) ||
+    /\bgit\s+clean\b[^.!?\n]{0,60}\b(?:yapma|yapmayın|kullanma|kullanmayın|uygulama|uygulamayın|çalıştırma|çalıştırmayın|çalıştırmamalısın|istemiyorum|yerine)\b/iu.test(cleanRequest)
+  ) {
+    return false;
+  }
+  const permitted =
+    /\b(?:run|execute|use|apply)\s+(?:the\s+)?git\s+clean\b/i.test(cleanRequest) ||
+    /\bgit\s+clean\b[^.!?\n]{0,80}\b(?:yap|yapın|uygula|uygulayın|çalıştır|çalıştırın|kullan|kullanın)\b/iu.test(cleanRequest) ||
+    cleanRequest.trim() === command.trim().toLowerCase();
+  if (!permitted) return false;
+
+  const ignoredFiles = /(?:^|\s)-[a-z]*[xX][a-z]*(?=\s|$)|--(?:exclude-standard|ignored)(?=\s|$)/.test(command);
+  return (
+    !ignoredFiles ||
+    /(?:^|\s)-[a-z]*[xX][a-z]*(?=\s|$)|\b(?:ignored\s+files?|gitignored\s+files?|yok\s+sayılan\s+dosyalar|ignore\s+edilen\s+dosyalar)\b/iu.test(cleanRequest)
+  );
+}
+
+export function isImperativeExecutionRequest(request: string): boolean {
+  return /^\s*(?:please\s+)?(?:run|execute|çalıştır|çalıştırın)\b/iu.test(request);
+}
+
+export function isDeleteTargetRequested(request: string): boolean {
+  return /\b(?:delete|remove|wipe|sil|silin|sileyim|kaldır|kaldırın)\b/iu.test(request);
+}
+
+export function isWholeWorkspaceDeleteRequested(request: string): boolean {
+  return (
+    /\brm\s+-rf\s+\.\/?(?:\s|$)/i.test(request) ||
+    /\b(?:delete|remove|wipe|destroy)\s+(?:the\s+)?(?:entire|whole)\s+(?:project|repo|repository|directory|folder|workspace)\b/iu.test(request) ||
+    /\b(?:entire|whole)\s+(?:project|repo|repository|directory|folder|workspace)\b[^.!?]*\b(?:delete|remove|wipe|destroy)\b/iu.test(request) ||
+    /\b(?:tüm|bütün|komple)\s+(?:projeyi|depoyu|klasörü|dizini|çalışma\s+alanını)\s+(?:sil|silin|sıfırla|sıfırlayın)\b/iu.test(request) ||
+    /\b(?:projenin|deponun|klasörün|dizinin)\s+tamamını\s+(?:sil|silin)\b/iu.test(request)
+  );
+}
+
+export function isExplicitlyAllowedSudo(request: string): boolean {
+  const forbidden =
+    /\b(?:without|no|never|avoid|do\s+not|don\x27t|dont)\s+(?:(?:using|use|running|run)\s+)?sudo\b/i.test(request) ||
+    /\bsudo\b[^.!?\n]{0,40}\b(?:kullanma|kullanmayın|yapma|olmadan)\b/iu.test(request);
+  return /\bsudo\b/i.test(request) && !forbidden;
+}
+
+export function isSqlDestructionRequested(request: string): boolean {
+  return /\b(?:drop|truncate|delete|remove|sil|kaldır)\b/iu.test(request);
+}
+
+export const SQL_TARGET_CONTEXT_REGEX =
+  /\b(?:drop|truncate|delete|remove|sil|kaldır|tables?|databases?|schemas?|tablolar?|veritabanı|şema)\b/iu;
+
+// Test cheats helpers
+export function isAuthorizedTestEdit(text?: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  return /(?:\b(?:update|rewrite|modify|refactor|fix|change|adjust|delete|remove|skip)\b[^\n.!?]{0,50}\btests?\b|\btests?\b[^\n.!?]{0,50}\b(?:update|rewrite|modify|modification|refactor|fix|change)\b|\b(?:testleri?|testi)\b[^\n.!?]{0,50}\b(?:güncelle|düzelt|yeniden\s+yaz|değiştir|kaldır|sil|atla)\b|\b(?:skip|atla)\b[^\n.!?]{0,50}\b(?:test|testleri)\b)/iu.test(text);
+}
+
+export function isTestBypassProhibited(userInstruction: string): boolean {
+  return /(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:skip|ignore|delete|weaken|remove|only)\b|\b(?:atlama|silme|kaldırma|zayıflatma)\b/iu.test(userInstruction);
+}
+
+export function isSpecificTestBypassAuthorized(userInstruction: string, pattern: string): boolean {
+  if (/skip|xit|xtest|ignore|todo/i.test(pattern)) {
+    return /\bskip\b|\batla\b|\bignore\b/i.test(userInstruction);
+  }
+  if (/focus|only/i.test(pattern)) return /\bonly\b|\bfocus\b/i.test(userInstruction);
+  if (/assertion weakened/i.test(pattern)) return /\bweaken\b|\bgevşet\b/i.test(userInstruction);
+  if (/coverage threshold reduced/i.test(pattern)) return /(?:lower|reduce|düşür|azalt)[^\n.!?]{0,45}(?:coverage|threshold|kapsam|eşik)/iu.test(userInstruction);
+  if (/test file deleted/i.test(pattern)) return /(?:delete|remove|sil|kaldır)[^\n.!?]{0,45}\btests?\b|\btests?\b[^\n.!?]{0,45}(?:delete|remove|sil|kaldır)/iu.test(userInstruction);
+  if (/CI test step removed/i.test(pattern)) return /(?:remove|delete|kaldır|sil)[^\n.!?]{0,45}\bCI\b/i.test(userInstruction);
+  if (/snapshot update/i.test(pattern)) return /\bsnapshot\b[^\n.!?]{0,45}(?:update|güncelle)/iu.test(userInstruction);
+  return false;
+}
+
+// Shortcuts helpers
+export function isAuthorizedStubOrPlaceholder(text?: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  return /(?:\b(?:add|create|use|put|write|leave)\b[^\n.!?]{0,50}\b(?:stub|mock|placeholder|todo|fixme)\b|\b(?:stub|mock|placeholder|todo|fixme|taslak|yer\s+tutucu)\b[^\n.!?]{0,50}\b(?:ekle|oluştur|yaz|kullan|bırak)\b)/iu.test(text);
+}
+
+export function isPlaceholderProhibited(userInstruction: string): boolean {
+  return /(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:todo|fixme|hack|stub|placeholder|mock)\b|\b(?:todo|fixme|hack|taslak)\s+(?:ekleme|bırakma|yazma)\b/iu.test(userInstruction);
+}
+
+export function isCodePlaceholderRequested(userInstruction: string): boolean {
+  return /\b(?:stub|placeholder|todo|fixme|hack|taslak|yer\s*tutucu)\b/iu.test(userInstruction);
+}
+
+// Apologies helpers
+export interface ApologyPattern {
+  name: string;
+  regex: RegExp;
+}
+
+export function getApologyPatterns(): ApologyPattern[] {
+  return [
+    {
+      name: "English",
+      regex: /(?<!\p{L})(?:(?:i(?:'m| am)?\s+)?(?:deeply|sincerely|terribly|truly|so)?\s*(?:apologiz\p{L}*|apologis\p{L}*|sorr(?:y|ier))|(?:my|our|sincere|deepest)\s+apolog\p{L}*|apologies\s+for|pardon(?:\s+me)?|forgive\s+me|excuse\s+my\s+mistake|my\s+bad|my\s+fault)(?!\p{L})/iu,
+    },
+    {
+      name: "Turkish",
+      regex: /(?<!\p{L})(?:(?:çok\s+|binlerce\s+kez\s+)?özür\s*(?:diler(?:im|iz)?|diliyor(?:um|uz)?|dileyerek)|kusur(?:a|uma)?\s*bakma(?:yın|yınız)?|affeder(?:im|siniz)?|afeder(?:im|siniz)?|bağışla(?:yın)?)(?!\p{L})/iu,
+    },
+    {
+      name: "German",
+      regex: /(?<!\p{L})(?:entschuldig\p{L}*|es\s+tut\s+mir\s+leid|verzeih\p{L}*)(?!\p{L})/iu,
+    },
+    {
+      name: "French",
+      regex: /(?<!\p{L})(?:désol[ée]\p{L}*|pardon(?:nez-moi)?|excuse[zr]?-moi|veuillez\s+m'excuser|navr[ée]\p{L}*|mille\s+excuses)(?!\p{L})/iu,
+    },
+    {
+      name: "Spanish",
+      regex: /(?<!\p{L})(?:disculp\p{L}*|perd[oó]n\p{L}*|lo\s+siento|mil\s+disculpas)(?!\p{L})/iu,
+    },
+    {
+      name: "Italian",
+      regex: /(?<!\p{L})(?:scus\p{L}*|spiacente|chiedo\s+scusa|perdon\p{L}*)(?!\p{L})/iu,
+    },
+    {
+      name: "Portuguese",
+      regex: /(?<!\p{L})(?:desculp\p{L}*|perd[aã]o|sinto\s+muito|peço\s+desculpas)(?!\p{L})/iu,
+    },
+    {
+      name: "Russian",
+      regex: /(?<!\p{L})(?:извини\p{L}*|прости\p{L}*|сожале\p{L}*|прошу\s+прощения)(?!\p{L})/iu,
+    },
+    {
+      name: "Dutch",
+      regex: /(?<!\p{L})(?:het\s+spijt\s+me|verontschuldig\p{L}*)(?!\p{L})/iu,
+    },
+  ];
 }

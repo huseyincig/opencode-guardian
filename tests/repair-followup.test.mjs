@@ -78,6 +78,7 @@ test("V2 after-hook hashes the session root, not the plugin root", async (t) => 
   t.after(() => { GuardEngine.prototype.inspect = original; });
   const host = {
     location: { directory: plugin },
+    options: { secrets: { enabled: false } },
     event: { subscribe: ({ signal }) => (async function* () {
       await ready; yield { type: "session.idle", data: { sessionID: "v2" } };
       await new Promise((r) => {
@@ -106,7 +107,9 @@ test("V2 disposal prevents synthetic remediation from a pending context request"
   let release; const pending = new Promise((r) => { release = r; });
   let enter; const entered = new Promise((r) => { enter = r; });
   let sent = 0;
-  const host = { location: { directory: root },
+  const host = {
+    location: { directory: root },
+    options: { secrets: { enabled: false } },
     event: { subscribe: ({ signal }) => (async function* () {
       yield { type: "session.idle", data: { sessionID: "v2" } };
       await new Promise((r) => {

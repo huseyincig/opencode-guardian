@@ -1,48 +1,7 @@
 import { calculateProductFingerprint, latestEvidence } from "../evidence.js";
 import { sanitizeProseForInspection } from "../prose.js";
-const CLAIM_PATTERNS = [
-    {
-        name: "tests passing",
-        kind: "test",
-        regex: /\b(?:(?:all|the)\s+)?tests?(?:\s+suite)?\s+(?:all\s+)?(?:pass(?:ed|es|ing)?|succeed(?:ed|s)?|are\s+(?:green|passing))\b|\btüm\s+testler\s+(?:geçti|başarılı)\b|\btestler\s+(?:geçti|başarılı)\b/iu,
-    },
-    {
-        name: "build successful",
-        kind: "build",
-        regex: /\b(?:the\s+)?build\s+(?:pass(?:ed|es)?|succeed(?:ed|s)?|is\s+successful|completed\s+successfully)\b|\bderleme\s+(?:başarılı|geçti)\b/iu,
-    },
-    {
-        name: "typecheck successful",
-        kind: "typecheck",
-        regex: /\btype\s*-?check(?:ing)?\s+(?:pass(?:ed|es)?|is\s+clean|succeed(?:ed|s)?)\b|\btypecheck\s+(?:başarılı|geçti)\b/iu,
-    },
-    {
-        name: "lint successful",
-        kind: "lint",
-        regex: /\blint(?:ing)?\s+(?:pass(?:ed|es)?|is\s+clean|succeed(?:ed|s)?)\b|\blint\s+(?:başarılı|geçti)\b/iu,
-    },
-    {
-        name: "audit clean",
-        kind: "audit",
-        regex: /\b(?:audit\s+(?:is\s+)?clean|no\s+vulnerabilit(?:y|ies)|0\s+vulnerabilit(?:y|ies))\b|\b(?:güvenlik\s+)?açığı\s+yok\b/iu,
-    },
-    {
-        name: "push successful",
-        kind: "git-push",
-        regex: /\b(?:push(?:ed)?\s+(?:successfully|to\s+(?:github|origin|remote))|successfully\s+pushed)\b|\b(?:github|remote|origin)(?:'a|'e|a|e)?\s+(?:pushlandı|gönderildi)\b/iu,
-    },
-    {
-        name: "working tree clean",
-        kind: "git-status",
-        regex: /\b(?:working\s+tree|repository|repo)\s+(?:is\s+)?clean\b|\bnothing\s+to\s+commit\b|\bçalışma\s+ağacı\s+temiz\b/iu,
-    },
-    {
-        name: "fix verified",
-        mode: "verification",
-        regex: /\b(?:the\s+)?(?:bug|issue|problem|regression)\s+(?:is\s+)?(?:fixed|resolved)\b|\b(?:bug|hata|sorun)\s+(?:düzeltildi|çözüldü)\b/iu,
-    },
-];
-const UNCERTAINTY = /\b(?:probably|likely|possibly|maybe|should|seems?|appears?|i\s+(?:think|suspect|assume)|not\s+verified|unverified|haven't\s+run|have\s+not\s+run|didn't\s+run|did\s+not\s+run|cannot\s+verify|can't\s+verify|couldn't\s+verify|sanırım|muhtemelen|belki|büyük\s+ihtimal(?:le)?|doğrulamadım|doğrulanmadı|çalıştırmadım|kontrol\s+etmedim)\b/iu;
+import { getClaimPatterns, isUncertaintyClaim } from "../locale-intents.js";
+const CLAIM_PATTERNS = getClaimPatterns();
 function sentenceAround(text, index) {
     const left = Math.max(text.lastIndexOf(".", index - 1), text.lastIndexOf("\n", index - 1), text.lastIndexOf("!", index - 1), text.lastIndexOf("?", index - 1));
     const candidates = [
@@ -166,7 +125,7 @@ export const noUnverifiedClaimsRule = {
                     if (!match)
                         continue;
                     const sentence = sentenceAround(text, match.index);
-                    if (UNCERTAINTY.test(sentence))
+                    if (isUncertaintyClaim(sentence))
                         continue;
                     const evidence = evidenceForClaim(claim, context.evidence, context.directory);
                     if (evidence?.status === "success")

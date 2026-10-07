@@ -2,6 +2,11 @@ import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "
 import { sanitizeProseForInspection } from "../prose.js";
 import { extractLikelyShellMutation } from "../tool-input.js";
 import { extractGitCommitMessage } from "../preflight.js";
+import {
+  isAuthorizedStubOrPlaceholder,
+  isCodePlaceholderRequested,
+  isPlaceholderProhibited,
+} from "../locale-intents.js";
 
 export const DEFAULT_HEDGING_PATTERNS = [
   // Deferred work
@@ -201,8 +206,7 @@ function isWithinException(text: string, pos: number, len: number, exceptions: s
 }
 
 export function explicitlyAuthorizedStubOrPlaceholder(text?: string): boolean {
-  if (!text || typeof text !== "string") return false;
-  return /(?:\b(?:add|create|use|put|write|leave)\b[^\n.!?]{0,50}\b(?:stub|mock|placeholder|todo|fixme)\b|\b(?:stub|mock|placeholder|todo|fixme|taslak|yer\s+tutucu)\b[^\n.!?]{0,50}\b(?:ekle|oluştur|yaz|kullan|bırak)\b)/iu.test(text);
+  return isAuthorizedStubOrPlaceholder(text);
 }
 
 function extractUserInstruction(context: TurnInspectionContext): string {
@@ -232,10 +236,10 @@ export const noShortcutsRule: GuardRule = {
     const authorized = explicitlyAuthorizedStubOrPlaceholder(userInstruction);
     const isAuthorizedMarker = (marker: string, targetFile?: string): boolean => {
       if (!authorized) return false;
-      if (/(?:do\s+not|don\u0027t|never|without)\s+(?:\w+\s+){0,3}(?:todo|fixme|hack|stub|placeholder|mock)\b|\b(?:todo|fixme|hack|taslak)\s+(?:ekleme|bırakma|yazma)\b/iu.test(userInstruction)) return false;
+      if (isPlaceholderProhibited(userInstruction)) return false;
       const instruction = userInstruction.toLowerCase();
       // A request for mocks does not permit arbitrary TODOs in production.
-      const wantsCodePlaceholder = /\b(?:stub|placeholder|todo|fixme|hack|taslak|yer\s*tutucu)\b/iu.test(instruction);
+      const wantsCodePlaceholder = isCodePlaceholderRequested(instruction);
       if (!wantsCodePlaceholder) return false;
       if (/TODO|FIXME|HACK/i.test(marker) && !wantsCodePlaceholder) return false;
       if (targetFile) {

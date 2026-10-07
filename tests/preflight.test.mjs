@@ -145,7 +145,11 @@ function v2Context(directory, tool) {
 }
 
 test("V2 enabled hook blocks before tool execution, preserves hooks and disposes", async (t) => {
-  const directory = tempConfig(t, { enabled: true, preflight: { enabled: true } });
+  const directory = tempConfig(t, {
+    enabled: true,
+    preflight: { enabled: true },
+    secrets: { enabled: false },
+  });
   let before;
   let disposed = false;
   const host = v2Context(directory, {
@@ -182,8 +186,11 @@ test("V2 enabled hook blocks before tool execution, preserves hooks and disposes
   assert.equal(host.sessionHooks.size, 0);
 });
 
-test("V2 default setup runs without a tool hook when preflight is off", async (t) => {
-  const host = v2Context(tempConfig(t, { enabled: true }), undefined);
+test("V2 setup can run without a tool hook when preflight and secret protection are off", async (t) => {
+  const host = v2Context(tempConfig(t, {
+    enabled: true,
+    secrets: { enabled: false },
+  }), undefined);
   const cleanup = await Guardian.setup(host.context);
   assert.equal(typeof cleanup, "function");
   assert.equal(host.sessionHooks.size, 2);
@@ -260,7 +267,9 @@ test("V1 configured custom tool alias is blocked at the host hook", async (t) =>
 
 test("V2 configured custom tool alias is blocked and disposed on unload", async (t) => {
   const directory = tempConfig(t, {
-    enabled: true, preflight: { enabled: true, shellTools: ["mcp.remote.exec_task"] },
+    enabled: true,
+    preflight: { enabled: true, shellTools: ["mcp.remote.exec_task"] },
+    secrets: { enabled: false },
   });
   let before;
   const host = v2Context(directory, {

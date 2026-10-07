@@ -143,6 +143,9 @@ test("real V1 post-turn intervention writes fixed reasons but never raw command 
   const SECRET = "sk-proj-NEVER-IN-THE-LOG";
   let remediations = 0;
   const client = { session: {
+    async get({ path: requestPath }) {
+      return { data: { id: requestPath.id, parentID: undefined } };
+    },
     async messages() {
       return { data: [
         { info: { id: "u1", role: "user" },

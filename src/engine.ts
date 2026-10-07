@@ -63,6 +63,10 @@ export const DEFAULT_CONFIG: GuardConfig = {
   enabled: true,
   remediationBudget: 1,
   iterationBudget: 3,
+  secrets: {
+    enabled: true,
+    replacement: "[REDACTED]",
+  },
   rules: {
     "discipline/no-evasion": "error",
     "discipline/no-apology": "error",
@@ -110,6 +114,22 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
       (!Array.isArray(shellTools) ||
        !shellTools.every((tool) => typeof tool === "string" && tool.trim().length > 0))) {
     fail("preflight.shellTools");
+  }
+  if (value.secrets !== undefined) {
+    if (!value.secrets || typeof value.secrets !== "object" || Array.isArray(value.secrets)) fail("secrets");
+    const sec = value.secrets as Record<string, unknown>;
+    if (sec.enabled !== undefined && typeof sec.enabled !== "boolean") fail("secrets.enabled");
+    if (sec.replacement !== undefined && typeof sec.replacement !== "string") fail("secrets.replacement");
+    if (sec.includeRuntimeEnv !== undefined && typeof sec.includeRuntimeEnv !== "boolean") fail("secrets.includeRuntimeEnv");
+    if (sec.customSensitiveKeys !== undefined && (!Array.isArray(sec.customSensitiveKeys) || !sec.customSensitiveKeys.every(k => typeof k === "string" || k instanceof RegExp))) {
+      fail("secrets.customSensitiveKeys");
+    }
+    if (sec.customSecretValues !== undefined && (!Array.isArray(sec.customSecretValues) || !sec.customSecretValues.every(v => typeof v === "string"))) {
+      fail("secrets.customSecretValues");
+    }
+    if (sec.safeKeyNames !== undefined && (!Array.isArray(sec.safeKeyNames) || !sec.safeKeyNames.every(k => typeof k === "string"))) {
+      fail("secrets.safeKeyNames");
+    }
   }
   if (value.rules !== undefined) {
     if (!value.rules || typeof value.rules !== "object" || Array.isArray(value.rules)) fail("rules");
@@ -219,12 +239,10 @@ export function extractCurrentTurn(messages: SessionMessage[]): {
   const currentTurn =
     lastHumanUserIndex < 0 ? messages : messages.slice(lastHumanUserIndex);
 
-  const activeAgent = currentTurn.findLast(
-    (m) => typeof m.info?.agent === "string" && m.info.agent.length > 0
-  )?.info.agent ?? messages.findLast(
-    (m) => typeof m.info?.agent === "string" && m.info.agent.length > 0
-  )?.info.agent;
-  const isSubagent = Boolean(activeAgent && activeAgent !== "orchestrator");
+  // Agent names are identity hints, not session topology. Runtime adapters
+  // provide parent/child topology explicitly; direct engine callers default
+  // to root semantics rather than guessing from arbitrary agent labels.
+  const isSubagent = false;
 
   return {
     isSubagent,
@@ -294,9 +312,14 @@ export class GuardEngine {
   private sessionState = new SessionStateStore();
 
   constructor(config?: GuardConfig) {
+    const secrets = config?.secrets !== undefined ? {
+      ...DEFAULT_CONFIG.secrets,
+      ...config.secrets,
+    } : DEFAULT_CONFIG.secrets;
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
+      ...(secrets ? { secrets } : {}),
       rules: {
         ...DEFAULT_CONFIG.rules,
         ...config?.rules,

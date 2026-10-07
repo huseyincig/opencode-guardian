@@ -11,6 +11,15 @@ export interface GuardRuleConfig {
   [key: string]: unknown;
 }
 
+export interface GuardianSecretsConfig {
+  enabled?: boolean;
+  replacement?: string;
+  customSensitiveKeys?: (string | RegExp)[];
+  customSecretValues?: string[];
+  includeRuntimeEnv?: boolean;
+  safeKeyNames?: string[];
+}
+
 export interface GuardConfig {
   enabled?: boolean;
   remediationBudget?: number;
@@ -20,6 +29,8 @@ export interface GuardConfig {
   preflight?: { enabled?: boolean; shellTools?: string[] };
   /** Passive startup update notice; enabled unless explicitly disabled. */
   updateNotice?: { enabled?: boolean };
+  /** Post-execution tool output secret redaction & LLM context gatekeeper configuration. */
+  secrets?: GuardianSecretsConfig | undefined;
   rules?: {
     "discipline/no-evasion"?: Severity | GuardRuleConfig;
     "discipline/no-apology"?: Severity | GuardRuleConfig;

@@ -11,6 +11,7 @@ const sandboxDir = path.dirname(new URL(import.meta.url).pathname);
 let lastPrompt = null;
 const mockClient = {
   session: {
+    get: async () => ({ data: { id: "sandbox-session-001" } }),
     messages: async () => ({ data: [
       {
         info: { id: "user-1", role: "user" },

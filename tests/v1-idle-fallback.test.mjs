@@ -382,7 +382,8 @@ test("V1 background child keeps normal idle remediation instead of entering the 
   }));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
-  let promptAsyncCalls = 0;
+  let syntheticRemediations = 0;
+  let visibleInterventions = 0;
   const client = {
     app: {
       async agents() {
@@ -402,7 +403,18 @@ test("V1 background child keeps normal idle remediation instead of entering the 
           parts: [{ type: "text", text: "The failure is unrelated to this change." }] },
       ] };
     },
-    async promptAsync() { promptAsyncCalls++; return { data: undefined }; },
+    async promptAsync(input) {
+      const part = input.body?.parts?.[0];
+      if (part?.synthetic === true) {
+        syntheticRemediations++;
+      } else if (
+        input.body?.noReply === true &&
+        part?.metadata?.["opencode-guardian-visible"] === true
+      ) {
+        visibleInterventions++;
+      }
+      return { data: undefined };
+    },
   } };
 
   const hooks = await Guardian.server({ directory, client });
@@ -414,7 +426,8 @@ test("V1 background child keeps normal idle remediation instead of entering the 
     await hooks.event({ event: {
       type: "session.idle", properties: { sessionID: "child-bg" },
     } });
-    assert.equal(promptAsyncCalls, 1, "background child must retain the existing idle-remediation path");
+    assert.equal(syntheticRemediations, 1, "background child must retain the existing idle-remediation path");
+    assert.equal(visibleInterventions, 1, "background child intervention should also be visible");
   } finally {
     await hooks.dispose?.();
   }

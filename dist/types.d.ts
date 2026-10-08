@@ -124,6 +124,8 @@ export interface RuleFinding {
     description: string;
     evidence?: string[];
     confidence?: "low" | "medium" | "high";
+    /** Stable semantic identity for remediation dedupe; never user-facing. */
+    fingerprint?: string;
 }
 export interface RuleHandoffRequirement {
     required: true;

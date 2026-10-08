@@ -9,7 +9,9 @@ import { createV1TurnWatcher } from "./v1-turn-watcher.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV1AgentCapability, resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
 import { assessCommandPreflight, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
-import { createGuardianToastNotifier, } from "./toast.js";
+import { createGuardianToastNotifier, formatGuardianToast, } from "./toast.js";
+import { formatGuardianTranscriptMessage, GUARDIAN_VISIBLE_INTERVENTION_KEY, isGuardianVisibleInterventionMetadata, } from "./intervention.js";
+import { GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./rules/no-evasion.js";
@@ -41,6 +43,8 @@ export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
 export * from "./toast.js";
+export * from "./intervention.js";
+export * from "./intervention-rpc.js";
 function sanitizeV2ToolError(error, options) {
     const fallback = () => {
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
@@ -150,6 +154,8 @@ export function normalizeV2Messages(messages) {
         const id = typeof msg.id === "string" ? msg.id : undefined;
         const type = typeof msg.type === "string" ? msg.type : undefined;
         if (!id || !type)
+            continue;
+        if (isGuardianVisibleInterventionMetadata(msg.metadata))
             continue;
         if (type === "user" && typeof msg.text === "string") {
             normalized.push({
@@ -266,6 +272,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
         toastNotifier?.notify({
             kind: "warning",
             ruleIds: findings.map((item) => item.ruleId),
+            sessionID,
         });
     }
     return findings;
@@ -336,6 +343,7 @@ async function finalizeSubagentHandoff(input) {
                 input.toastNotifier?.notify({
                     kind: "remediation",
                     ruleIds: findings.map((item) => item.ruleId),
+                    sessionID: input.sessionID,
                 });
             }
             catch {
@@ -405,13 +413,14 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                     result.rollback?.();
                     return;
                 }
-                await sendPrompt(result.combinedRemediationPrompt);
+                await sendPrompt(result.combinedRemediationPrompt, findings.map((item) => item.ruleId));
                 if (signal?.aborted)
                     return;
                 recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
                 toastNotifier?.notify({
                     kind: "remediation",
                     ruleIds: findings.map((item) => item.ruleId),
+                    sessionID,
                 });
             }
             catch (promptError) {
@@ -456,6 +465,7 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
             kind: "preflight-blocked",
             ruleId: finding,
             ...(safeTool ? { tool: safeTool } : {}),
+            ...(sessionID ? { sessionID } : {}),
         });
         throw new GuardianPreflightError(finding);
     }
@@ -500,6 +510,53 @@ const server = async ({ client, directory }, pluginOptions) => {
     let updateChecked = false;
     const strictPreflight = config.preflight?.enabled === true;
     const foregroundHandoffs = new Map();
+    const sendV1Remediation = async (sessionID, text, ruleIds) => {
+        const response = await client.session.promptAsync({
+            path: { id: sessionID },
+            query: { directory },
+            body: {
+                parts: [{
+                        type: "text",
+                        text,
+                        synthetic: true,
+                        metadata: { "opencode-guardian": true },
+                    }],
+            },
+        });
+        if (response.error) {
+            throw new Error("V1 host rejected the Guardian remediation request.");
+        }
+        // The remediation above is intentionally synthetic and hidden by OpenCode.
+        // Add a second, display-only transcript row without triggering a model turn.
+        try {
+            const visible = await client.session.promptAsync({
+                path: { id: sessionID },
+                query: { directory },
+                body: {
+                    noReply: true,
+                    parts: [{
+                            type: "text",
+                            text: formatGuardianTranscriptMessage({
+                                kind: "remediation",
+                                ruleIds,
+                            }),
+                            ignored: true,
+                            metadata: {
+                                "opencode-guardian": true,
+                                [GUARDIAN_VISIBLE_INTERVENTION_KEY]: true,
+                            },
+                        }],
+                },
+            });
+            if (visible.error) {
+                return;
+            }
+        }
+        catch {
+            // Transcript visibility is secondary to the already-delivered
+            // remediation. Native toast remains the fallback UI channel.
+        }
+    };
     const hostSessionRelation = async (sessionID) => {
         const getSession = client.session.get;
         if (typeof getSession !== "function")
@@ -548,21 +605,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                 const contract = extractTaskContract(messages);
                 if (contract)
                     contracts.set(sessionID, contract);
-                await handleSessionIdle(sessionID, directory, async () => messages, async (text) => {
-                    const response = await client.session.promptAsync({
-                        path: { id: sessionID }, query: { directory },
-                        body: {
-                            parts: [{
-                                    type: "text",
-                                    text,
-                                    synthetic: true,
-                                    metadata: { "opencode-guardian": true },
-                                }],
-                        },
-                    });
-                    if (response.error)
-                        throw new Error("V1 host rejected the Guardian remediation request.");
-                }, engine, verificationStore.snapshots(sessionID), undefined, relation.known ? Boolean(relation.parentID) : undefined, relation.known && relation.parentID
+                await handleSessionIdle(sessionID, directory, async () => messages, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds), engine, verificationStore.snapshots(sessionID), undefined, relation.known ? Boolean(relation.parentID) : undefined, relation.known && relation.parentID
                     ? async () => {
                         const cached = getCachedAgentCapability(sessionID);
                         if (cached)
@@ -716,6 +759,10 @@ const server = async ({ client, directory }, pluginOptions) => {
             }
         },
         "chat.message": async (input, output) => {
+            if (output.parts.some((part) => part.type === "text" &&
+                isGuardianVisibleInterventionMetadata(part.metadata))) {
+                return;
+            }
             const text = output.parts
                 .map((part) => part.type === "text" ? part.text : "")
                 .join("\n");
@@ -800,22 +847,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                 if (contract)
                     contracts.set(sessionID, contract);
                 return messages;
-            }, async (text) => {
-                const response = await client.session.promptAsync({
-                    path: { id: sessionID },
-                    query: { directory },
-                    body: {
-                        parts: [{
-                                type: "text",
-                                text,
-                                synthetic: true,
-                                metadata: { "opencode-guardian": true },
-                            }],
-                    },
-                });
-                if (response.error)
-                    throw new Error("V1 host rejected the Guardian remediation request.");
-            }, engine, verificationStore.snapshots(sessionID), undefined, isSubagent, isSubagent
+            }, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds), engine, verificationStore.snapshots(sessionID), undefined, isSubagent, isSubagent
                 ? async () => {
                     const cached = getCachedAgentCapability(sessionID);
                     if (cached)
@@ -875,11 +907,6 @@ const setup = async (context) => {
         }
         return;
     }
-    const toastNotifier = createGuardianToastNotifier({
-        context,
-        directory,
-        enabled: mergedConfig.notifications?.enabled !== false,
-    });
     const controller = new AbortController();
     let events;
     try {
@@ -915,6 +942,53 @@ const setup = async (context) => {
     const contracts = new Map();
     const foregroundHandoffs = new Map();
     const registrations = [];
+    const interventionSnapshots = new Map();
+    if (typeof context.rpc?.register === "function") {
+        try {
+            const rpcRegistration = await context.rpc.register(GUARDIAN_INTERVENTION_RPC_DEFINITION, {
+                [GUARDIAN_INTERVENTION_RPC_METHOD]: async (input) => {
+                    const sessionID = readGuardianInterventionSessionID(input);
+                    if (!sessionID)
+                        return inactiveGuardianIntervention();
+                    const payload = interventionSnapshots.get(sessionID);
+                    return payload
+                        ? activeGuardianIntervention(payload)
+                        : inactiveGuardianIntervention();
+                },
+            });
+            if (rpcRegistration && typeof rpcRegistration.dispose === "function") {
+                registrations.push(rpcRegistration);
+            }
+        }
+        catch {
+            // Visibility bridge is additive; core policy/security must keep running
+            // even when this host build does not expose plugin RPC.
+        }
+    }
+    const baseToastNotifier = createGuardianToastNotifier({
+        context,
+        directory,
+        enabled: mergedConfig.notifications?.enabled !== false,
+    });
+    const toastNotifier = {
+        notify(input) {
+            if (mergedConfig.notifications?.enabled !== false &&
+                typeof input.sessionID === "string" &&
+                input.sessionID.length > 0) {
+                try {
+                    interventionSnapshots.set(input.sessionID, formatGuardianToast(input));
+                    while (interventionSnapshots.size > 64) {
+                        const oldest = interventionSnapshots.keys().next().value;
+                        if (typeof oldest !== "string")
+                            break;
+                        interventionSnapshots.delete(oldest);
+                    }
+                }
+                catch { }
+            }
+            baseToastNotifier.notify(input);
+        },
+    };
     if (strictPreflight) {
         // An explicitly requested security hook must never be silently skipped.
         if (typeof context.tool?.hook !== "function") {
@@ -1144,6 +1218,9 @@ const setup = async (context) => {
         const taskRegistrations = [];
         try {
             const promptRegistration = await context.session.hook("prompt", (event) => {
+                if (isGuardianVisibleInterventionMetadata(event.metadata)) {
+                    return;
+                }
                 const text = event.prompt.text;
                 if (!text || text.trimStart().startsWith("[opencode-guardian remediation]")) {
                     return;
@@ -1160,6 +1237,9 @@ const setup = async (context) => {
             }
             taskRegistrations.push(promptRegistration);
             const contextRegistration = await context.session.hook("context", (event) => {
+                if (Array.isArray(event.messages)) {
+                    event.messages = event.messages.filter((message) => !isGuardianVisibleInterventionMetadata(message.metadata));
+                }
                 if (sanitizerOpts) {
                     if (Array.isArray(event.messages)) {
                         event.messages = sanitizeMessages(event.messages, sanitizerOpts);
@@ -1221,6 +1301,7 @@ const setup = async (context) => {
                             verificationStore.forget(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
+                            interventionSnapshots.delete(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
                         }
                         continue;
@@ -1346,6 +1427,7 @@ const setup = async (context) => {
         contracts.clear();
         verificationStore.clear();
         foregroundHandoffs.clear();
+        interventionSnapshots.clear();
         clearAllAgentCapabilities();
         for (const registration of registrations.splice(0).reverse()) {
             try {

@@ -19,6 +19,7 @@ import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
+import { isGuardianVisibleInterventionMetadata } from "./intervention.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 function composeCombinedRemediationPrompt(blockingPrompts, handoff) {
     if (!handoff) {
@@ -171,12 +172,14 @@ export function loadConfig(directory) {
 }
 function isSyntheticUserMessage(message) {
     return (message.info.role === "user" &&
-        Boolean(message.parts?.some((part) => part.synthetic === true)));
+        Boolean(message.parts?.some((part) => part.synthetic === true ||
+            isGuardianVisibleInterventionMetadata(part.metadata))));
 }
 function isGuardianRemediationMessage(message) {
     if (message.info.role !== "user")
         return false;
     return Boolean(message.parts?.some((part) => part.type === "text" &&
+        part.synthetic === true &&
         typeof part.text === "string" &&
         part.text.trimStart().startsWith(REMEDIATION_MARKER)));
 }
@@ -449,32 +452,15 @@ export class GuardEngine {
                     results,
                 };
             }
-            const fingerprint = blockingResults
-                .map((result) => {
-                const findingKey = result.findings
-                    .map((finding) => `${finding.pattern}:${finding.messageSnippet}`)
-                    .sort()
-                    .join("|");
-                return `${result.ruleId}:${findingKey}`;
-            })
-                .sort()
-                .join("||");
+            const findingFingerprints = Array.from(new Set(blockingResults.flatMap((result) => {
+                const keys = result.findings.map((finding) => `${result.ruleId}:${finding.fingerprint ?? finding.pattern}`);
+                return keys.length > 0 ? keys : [`${result.ruleId}:block`];
+            }))).sort();
             const blockingRuleIds = blockingResults.map((r) => r.ruleId);
-            const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
-            const failedPendingRule = isRemediationResponse &&
-                blockingResults.some((result) => pendingRules.includes(result.ruleId));
             const maxTurnRemediations = contract?.iterativeReview
                 ? Math.max(5, this.config.iterationBudget ?? 3)
-                : Math.max(3, budget * 2);
-            const rulesExhausted = blockingRuleIds.length > 0 &&
-                blockingRuleIds.every((rule) => this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
-                    (!contract?.iterativeReview &&
-                        isRemediationResponse &&
-                        remediationMessagesCount >= budget &&
-                        (pendingRules.length === 0 || pendingRules.includes(rule))));
-            if ((failedPendingRule && this.sessionState.hasExhaustedRule(sessionID, turnKey, pendingRules, budget)) ||
-                rulesExhausted ||
-                !this.sessionState.canRemediate(sessionID, turnKey, fingerprint, blockingRuleIds, budget, maxTurnRemediations)) {
+                : Math.max(8, Math.min(32, this.rules.size * Math.max(1, budget)));
+            if (!this.sessionState.canRemediate(sessionID, turnKey, findingFingerprints, blockingRuleIds, budget, maxTurnRemediations)) {
                 this.sessionState.clearPendingRemediation(sessionID);
                 return {
                     decision: "pass",
@@ -485,7 +471,7 @@ export class GuardEngine {
                         : {}),
                 };
             }
-            this.sessionState.recordRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
+            this.sessionState.recordRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
             this.sessionState.setPendingRemediation(sessionID, turnKey, blockingRuleIds, [...(evidence.mutatedFiles ?? [])]);
             const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
             const handoff = !isSubagent
@@ -505,7 +491,7 @@ export class GuardEngine {
                 combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
                 rollback: () => {
                     this.inspectedMessages.delete(sessionID);
-                    this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
+                    this.sessionState.rollbackRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
                     this.sessionState.clearPendingRemediation(sessionID);
                     if (handoff)
                         this.sessionState.clearActiveHandoff(sessionID);

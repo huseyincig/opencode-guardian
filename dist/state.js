@@ -31,20 +31,17 @@ export class SessionStateStore {
             return 0;
         return state.ruleRemediationCounts?.get(ruleId) ?? 0;
     }
-    canRemediate(sessionID, turnKey, fingerprint, rules, budget, maxTurnBudget) {
+    canRemediate(sessionID, turnKey, fingerprint, _rules, budget, maxTurnBudget) {
         if (budget <= 0)
             return false;
         const state = this.beginTurn(sessionID, turnKey);
         const turnCeiling = maxTurnBudget ?? Math.max(3, budget * 2);
         if (state.remediationCount >= turnCeiling)
             return false;
-        if (rules.length > 0 && rules.every((rule) => (state.ruleRemediationCounts?.get(rule) ?? 0) >= budget)) {
+        const fingerprints = typeof fingerprint === "string" ? [fingerprint] : fingerprint;
+        if (fingerprints.length === 0)
             return false;
-        }
-        const count = state.fingerprintCounts?.get(fingerprint) ?? 0;
-        if (count >= budget)
-            return false;
-        return true;
+        return fingerprints.some((key) => (state.fingerprintCounts?.get(key) ?? 0) < budget);
     }
     hasExhaustedRule(sessionID, turnKey, rules, budget) {
         if (budget <= 0)
@@ -59,10 +56,13 @@ export class SessionStateStore {
     recordRemediation(sessionID, turnKey, fingerprint, rules = []) {
         const state = this.beginTurn(sessionID, turnKey);
         state.remediationCount += 1;
-        state.fingerprints.add(fingerprint);
+        const fingerprints = typeof fingerprint === "string" ? [fingerprint] : fingerprint;
         if (!state.fingerprintCounts)
             state.fingerprintCounts = new Map();
-        state.fingerprintCounts.set(fingerprint, (state.fingerprintCounts.get(fingerprint) ?? 0) + 1);
+        for (const key of fingerprints) {
+            state.fingerprints.add(key);
+            state.fingerprintCounts.set(key, (state.fingerprintCounts.get(key) ?? 0) + 1);
+        }
         if (!state.ruleRemediationCounts)
             state.ruleRemediationCounts = new Map();
         for (const rule of rules) {
@@ -73,13 +73,16 @@ export class SessionStateStore {
         const state = this.sessions.get(sessionID);
         if (state && state.turnKey === turnKey) {
             state.remediationCount = Math.max(0, state.remediationCount - 1);
-            state.fingerprints.delete(fingerprint);
-            const fCount = state.fingerprintCounts?.get(fingerprint) ?? 1;
-            if (fCount <= 1) {
-                state.fingerprintCounts?.delete(fingerprint);
-            }
-            else {
-                state.fingerprintCounts?.set(fingerprint, fCount - 1);
+            const fingerprints = typeof fingerprint === "string" ? [fingerprint] : fingerprint;
+            for (const key of fingerprints) {
+                const fCount = state.fingerprintCounts?.get(key) ?? 1;
+                if (fCount <= 1) {
+                    state.fingerprintCounts?.delete(key);
+                    state.fingerprints.delete(key);
+                }
+                else {
+                    state.fingerprintCounts?.set(key, fCount - 1);
+                }
             }
             for (const rule of rules) {
                 const rCount = state.ruleRemediationCounts?.get(rule) ?? 1;

@@ -142,6 +142,10 @@ export interface RuleFinding {
   description: string;
   evidence?: string[];
   confidence?: "low" | "medium" | "high";
+  /** Project-relative/host-provided path associated with this finding. */
+  filePath?: string;
+  /** Stable semantic identity for remediation dedupe; never user-facing. */
+  fingerprint?: string;
 }
 
 export interface RuleHandoffRequirement {

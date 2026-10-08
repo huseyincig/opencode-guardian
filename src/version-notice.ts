@@ -29,6 +29,7 @@ export interface UpdateCheckOptions {
   now?: number;
   fetcher?: typeof fetch;
   allowDevelopment?: boolean;
+  signal?: AbortSignal;
 }
 
 function installedVersion(): string | undefined {
@@ -82,6 +83,7 @@ function writeCache(cachePath: string, latest: string, now: number): void {
 
 /** Network and filesystem failures are intentionally silent and never trigger an install. */
 export async function checkGuardianUpdate(options: UpdateCheckOptions = {}): Promise<{ current: string; latest: string } | undefined> {
+  if (options.signal?.aborted) return undefined;
   if (!options.allowDevelopment &&
       (process.env.NODE_TEST_CONTEXT || !fileURLToPath(import.meta.url).includes("node_modules"))) return undefined;
   const current = options.installedVersion ?? installedVersion();
@@ -91,9 +93,13 @@ export async function checkGuardianUpdate(options: UpdateCheckOptions = {}): Pro
   let latest = readCache(cachePath, now);
   if (!latest) {
     try {
+      const timeoutSignal = AbortSignal.timeout(3000);
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal;
       const response = await (options.fetcher ?? fetch)(REGISTRY, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(3000),
+        signal,
       });
       if (!response.ok) return undefined;
       const body = await response.json() as { version?: unknown; name?: unknown };
@@ -103,6 +109,7 @@ export async function checkGuardianUpdate(options: UpdateCheckOptions = {}): Pro
       writeCache(cachePath, latest, now);
     } catch { return undefined; }
   }
+  if (options.signal?.aborted) return undefined;
   return newerStableVersion(current, latest) ? { current, latest } : undefined;
 }
 
@@ -113,6 +120,8 @@ export async function announceGuardianUpdate(
 ): Promise<void> {
   try {
     const update = await checkGuardianUpdate(options);
-    if (update) await show(update.current, update.latest);
+    if (update && !options?.signal?.aborted) {
+      await show(update.current, update.latest);
+    }
   } catch { /* Optional notifications must not affect Guardian. */ }
 }

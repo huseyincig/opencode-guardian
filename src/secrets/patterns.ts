@@ -53,18 +53,37 @@ export const SENSITIVE_KEY_REGEX =
 /**
  * Checks whether a key name represents a sensitive credential name.
  */
-export function isSensitiveKey(key: string, customKeys?: (string | RegExp)[]): boolean {
+export function isSensitiveKey(
+  key: string,
+  customKeys?: (string | RegExp)[],
+  safeKeyNames?: string[]
+): boolean {
   if (!key || typeof key !== 'string') return false;
   const upper = key.trim().toUpperCase();
-  if (SAFE_KEY_NAMES.has(upper)) return false;
+
+  // Caller-provided safe names are explicit exceptions and win over every
+  // key-name detector. Built-in safe names remain overridable by an explicit
+  // custom sensitive rule.
+  if (safeKeyNames?.some((safe) => safe.trim().toUpperCase() === upper)) {
+    return false;
+  }
 
   if (customKeys) {
     for (const pattern of customKeys) {
-      if (typeof pattern === 'string' && upper === pattern.toUpperCase()) return true;
-      if (pattern instanceof RegExp && pattern.test(key)) return true;
+      if (typeof pattern === 'string' && upper === pattern.trim().toUpperCase()) {
+        return true;
+      }
+      if (pattern instanceof RegExp) {
+        pattern.lastIndex = 0;
+        const matched = pattern.test(key);
+        pattern.lastIndex = 0;
+        if (matched) return true;
+      }
     }
   }
 
+  if (SAFE_KEY_NAMES.has(upper)) return false;
+  SENSITIVE_KEY_REGEX.lastIndex = 0;
   return SENSITIVE_KEY_REGEX.test(key);
 }
 

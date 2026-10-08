@@ -241,11 +241,22 @@ test("guardian-sq handoff: V1 remediation transport stamps synthetic Guardian pr
     },
   });
 
-  assert.equal(sent.length, 1);
-  const part = sent[0]?.body?.parts?.[0];
+  const remediation = sent.find(
+    (request) => request.body?.parts?.[0]?.synthetic === true
+  );
+  const visible = sent.find(
+    (request) =>
+      request.body?.noReply === true &&
+      request.body?.parts?.[0]?.ignored === true &&
+      request.body?.parts?.[0]?.metadata?.["opencode-guardian-visible"] === true
+  );
+  assert.ok(remediation);
+  const part = remediation.body.parts[0];
   assert.equal(part?.type, "text");
   assert.equal(part?.synthetic, true);
   assert.equal(part?.metadata?.["opencode-guardian"], true);
+  assert.ok(visible);
+  assert.equal(visible.body.parts[0].metadata?.["opencode-guardian"], true);
 });
 
 test("guardian-sq handoff: non-question tools like terraform_plan do NOT satisfy handoff", async () => {

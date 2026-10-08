@@ -1,5 +1,5 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
 
 /**
  * Regex patterns that detect lazy file truncation comments like:
@@ -76,6 +76,9 @@ export const noTruncationRule: GuardRule = {
           }
           if (typeof input.newString === "string") {
             checkCode(input.newString, "file edit");
+          }
+          for (const edit of extractStructuredEditTexts(input)) {
+            checkCode(edit.text, "structured file edit");
           }
           const patchText = extractAddedLines(input.patchText ?? input.patch);
           if (patchText) {

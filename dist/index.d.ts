@@ -32,6 +32,8 @@ export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
 export * from "./toast.js";
+export * from "./intervention.js";
+export * from "./intervention-rpc.js";
 /**
  * Converts OpenCode v2 session.context() records into the stable internal
  * message shape consumed by the rules and engine.

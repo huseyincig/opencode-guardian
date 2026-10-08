@@ -1,5 +1,5 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
 
 export const SECRET_PATTERNS: { regex: RegExp; name: string }[] = [
   { regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{32,}\b/, name: "OpenAI API Key (sk-...)" },
@@ -127,6 +127,7 @@ export const noSecretsRule: GuardRule = {
           pattern: item.name,
           messageSnippet: item.masked,
           description: `Potential hardcoded secret detected in ${filePath ?? source}: ${item.name} (${item.masked})`,
+          ...(filePath ? { filePath } : {}),
         });
       }
     };
@@ -147,6 +148,9 @@ export const noSecretsRule: GuardRule = {
         if (typeof input.content === "string") checkCode(input.content, targetFile);
         if (typeof input.new_string === "string") checkCode(input.new_string, targetFile);
         if (typeof input.newString === "string") checkCode(input.newString, targetFile);
+        for (const edit of extractStructuredEditTexts(input, targetFile)) {
+          checkCode(edit.text, edit.filePath);
+        }
 
         const patchText = extractAddedLines(patchRaw);
         if (patchText) checkCode(patchText, targetFile);

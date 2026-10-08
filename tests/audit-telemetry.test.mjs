@@ -141,7 +141,7 @@ test("real V1 post-turn intervention writes fixed reasons but never raw command 
       [rule, rule === "integrity/no-silent-failure" ? "error" : "off"])),
   }));
   const SECRET = "sk-proj-NEVER-IN-THE-LOG";
-  let remediations = 0;
+  const sent = [];
   const client = { session: {
     async get({ path: requestPath }) {
       return { data: { id: requestPath.id, parentID: undefined } };
@@ -158,12 +158,27 @@ test("real V1 post-turn intervention writes fixed reasons but never raw command 
           ] },
       ] };
     },
-    async promptAsync() { remediations++; return { data: {}, error: undefined }; },
+    async promptAsync(input) {
+      sent.push(input);
+      return { data: {}, error: undefined };
+    },
   } };
   const hooks = await Guardian.server({ directory, client });
   try {
     await hooks.event({ event: { type: "session.idle", properties: { sessionID: "private-v1-session" } } });
-    assert.equal(remediations, 1);
+    const remediation = sent.filter(
+      (request) => request.body?.parts?.[0]?.synthetic === true
+    );
+    const visible = sent.filter(
+      (request) =>
+        request.body?.noReply === true &&
+        request.body?.parts?.[0]?.ignored === true &&
+        request.body?.parts?.[0]?.metadata?.["opencode-guardian-visible"] === true
+    );
+    assert.equal(remediation.length, 1);
+    assert.equal(visible.length, 1);
+    assert.doesNotMatch(visible[0].body.parts[0].text, /sk-proj-NEVER-IN-THE-LOG|npm test/);
+
     const data = fs.readFileSync(guardianEventPath(), "utf8");
     assert.ok(!data.includes(SECRET) && !data.includes("npm test"));
     const event = data.split("\n").filter(Boolean).map(JSON.parse)

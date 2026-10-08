@@ -67,14 +67,8 @@ export const circuitBreakerRule: GuardRule = {
       { count: number; last: EvidenceRecord }
     >();
     for (const record of records) {
-      const family = commandFamily(record);
-
       if (record.status === "success") {
-        for (const [signature, state] of exactCounts) {
-          if (commandFamily(state.last) === family) {
-            exactCounts.delete(signature);
-          }
-        }
+        exactCounts.delete(record.signature);
         continue;
       }
 
@@ -114,8 +108,13 @@ export const circuitBreakerRule: GuardRule = {
       const family = commandFamily(record);
 
       if (record.status === "success") {
-        for (const key of streaks.keys()) {
-          if (key.startsWith(`${family}::`)) streaks.delete(key);
+        for (const [key, state] of streaks) {
+          if (
+            record.kind === state.last.kind &&
+            record.signature === state.last.signature
+          ) {
+            streaks.delete(key);
+          }
         }
         continue;
       }

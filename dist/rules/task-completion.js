@@ -29,7 +29,7 @@ export const taskCompletionRule = {
         const prose = latestAssistantProse(context);
         const findings = [];
         const blocking = [];
-        if (!contract?.requiresExplicitCompletion || !evidence || !prose) {
+        if (!evidence || !prose) {
             return { ruleId: this.id, decision: "pass", findings };
         }
         const writeCapable = isWriteCapableAgent(context);
@@ -48,13 +48,15 @@ export const taskCompletionRule = {
         if (writeCapable && !hasToolFailure && !report.isClosing && report.hasClearBlocker) {
             return { ruleId: this.id, decision: "pass", findings };
         }
-        const policy = evaluateTaskPolicy(contract, evidence);
-        if (policy.review === "missing") {
+        const policy = contract?.requiresExplicitCompletion
+            ? evaluateTaskPolicy(contract, evidence)
+            : undefined;
+        if (policy?.review === "missing") {
             const finding = {
                 ruleId: this.id,
                 pattern: "iteration ended after a change without a new review",
                 messageSnippet: prose.slice(0, 160),
-                description: contract.requiresSourceReview
+                description: contract?.requiresSourceReview
                     ? "The user explicitly required another source review after fixing a finding, but no successful post-change source inspection was observed."
                     : "The user explicitly required another review after fixing a finding, but no successful post-change review or verification was observed.",
                 confidence: "high",
@@ -63,7 +65,7 @@ export const taskCompletionRule = {
             findings.push(finding);
             blocking.push(finding);
         }
-        for (const verification of policy.verifications) {
+        for (const verification of policy?.verifications ?? []) {
             if (verification.status === "passed")
                 continue;
             // Concrete tool failure means the requested check failed.
@@ -105,7 +107,7 @@ export const taskCompletionRule = {
                 return !hasLaterSuccess;
             });
             for (const failure of unresolvedFailures) {
-                const alreadyCovered = policy.verifications.some((v) => v.kind === failure.kind && v.status === "failed");
+                const alreadyCovered = policy?.verifications.some((v) => v.kind === failure.kind && v.status === "failed") ?? false;
                 if (!alreadyCovered) {
                     const finding = {
                         ruleId: this.id,
@@ -113,6 +115,8 @@ export const taskCompletionRule = {
                         messageSnippet: failure.errorFingerprint || failure.error || failure.command || prose.slice(0, 160),
                         description: `A concrete ${failure.kind} execution failed and was not resolved before stopping.`,
                         confidence: "high",
+                        fingerprint: failure.errorFingerprint ??
+                            `${failure.kind}:${failure.signature}`,
                     };
                     findings.push(finding);
                     blocking.push(finding);
@@ -124,7 +128,9 @@ export const taskCompletionRule = {
             decision: blocking.length ? "block" : "pass",
             findings,
             ...(blocking.length ? {
-                remediationPrompt: "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command.",
+                remediationPrompt: contract?.requiresExplicitCompletion
+                    ? "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
+                    : "A concrete execution failed and remains unresolved. Investigate the failure and correct it before stopping. If progress is genuinely blocked by missing permission, credentials, or required user input, report that concrete blocker instead of claiming completion or repeating the same failing action.",
             } : {}),
         };
     },

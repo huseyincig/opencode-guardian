@@ -7,7 +7,7 @@ import type {
   RuleResult,
   TurnInspectionContext,
 } from "../types.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
 
 const NODE_BUILTINS = new Set(
   builtinModules
@@ -1083,12 +1083,48 @@ function resolveTargetFile(
 function targetDirectory(
   targetFile: string | undefined,
   sessionDirectory: string
-): string {
-  if (!targetFile) return sessionDirectory;
-  const absolute = path.isAbsolute(targetFile)
-    ? targetFile
-    : path.resolve(sessionDirectory, targetFile);
-  return path.dirname(absolute);
+): string | null {
+  const root = path.resolve(sessionDirectory);
+  const target = targetFile ? path.resolve(root, targetFile) : root;
+  const scoped = path.relative(root, target);
+  if (
+    scoped === ".." ||
+    scoped.startsWith(".." + path.sep) ||
+    path.isAbsolute(scoped)
+  ) {
+    return null;
+  }
+
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {
+    return null;
+  }
+
+  const directory = targetFile ? path.dirname(target) : target;
+  let probe = directory;
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) return null;
+    probe = parent;
+  }
+
+  try {
+    const realProbe = fs.realpathSync(probe);
+    const realRelative = path.relative(realRoot, realProbe);
+    if (
+      realRelative === ".." ||
+      realRelative.startsWith(".." + path.sep) ||
+      path.isAbsolute(realRelative)
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return directory;
 }
 
 function extensionOf(targetFile?: string): string {
@@ -1135,6 +1171,7 @@ export const noGhostDepsRule: GuardRule = {
     ) => {
       const ext = extensionOf(targetFile);
       const dir = targetDirectory(targetFile, context.directory);
+      if (!dir) return;
 
       if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"].includes(ext) || !ext) {
         const declared = loadNodeDependencies(dir);
@@ -1339,6 +1376,9 @@ export const noGhostDepsRule: GuardRule = {
         }
         if (typeof input.newString === "string") {
           checkCode(input.newString, "file edit", targetFile);
+        }
+        for (const edit of extractStructuredEditTexts(input, targetFile)) {
+          checkCode(edit.text, "structured file edit", edit.filePath);
         }
 
         const patchText = extractAddedLines(input.patchText ?? input.patch);

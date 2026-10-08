@@ -22,10 +22,10 @@ export declare class SessionStateStore {
     beginTurn(sessionID: string, turnKey: string): SessionState;
     getTurnRemediationCount(sessionID: string, turnKey: string): number;
     getRuleRemediationCount(sessionID: string, turnKey: string, ruleId: string): number;
-    canRemediate(sessionID: string, turnKey: string, fingerprint: string, rules: string[], budget: number, maxTurnBudget?: number): boolean;
+    canRemediate(sessionID: string, turnKey: string, fingerprint: string | readonly string[], _rules: string[], budget: number, maxTurnBudget?: number): boolean;
     hasExhaustedRule(sessionID: string, turnKey: string, rules: string[], budget: number): boolean;
-    recordRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
-    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
+    recordRemediation(sessionID: string, turnKey: string, fingerprint: string | readonly string[], rules?: string[]): void;
+    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string | readonly string[], rules?: string[]): void;
     canContinue(sessionID: string, turnKey: string, progressKey: string, budget: number): boolean;
     recordContinuation(sessionID: string, turnKey: string, progressKey: string): void;
     rollbackContinuation(sessionID: string, turnKey: string, progressKey: string): void;

@@ -24,12 +24,16 @@ export interface GuardianInterventionInput {
     ruleIds?: readonly string[] | undefined;
     ruleId?: string | undefined;
     tool?: string | undefined;
+    sessionID?: string | undefined;
 }
-export type GuardianToastListener = (payload: GuardianToastPayload) => void | Promise<unknown>;
-export interface GuardianToastNotifierOptions {
+export interface GuardianToastScope {
+    directory?: string | undefined;
+    sessionID?: string | undefined;
+}
+export type GuardianToastListener = (payload: GuardianToastPayload, scope: GuardianToastScope) => void | Promise<unknown>;
+export interface GuardianToastNotifierOptions extends GuardianToastScope {
     client?: unknown;
     context?: unknown;
-    directory?: string | undefined;
     enabled?: boolean | undefined;
 }
 export interface GuardianToastNotifier {
@@ -37,7 +41,7 @@ export interface GuardianToastNotifier {
 }
 export declare function sanitizeToastRuleId(raw: unknown): string;
 export declare function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload;
-export declare function registerToastListener(listener: GuardianToastListener): () => void;
+export declare function registerToastListener(listener: GuardianToastListener, scope?: GuardianToastScope): () => void;
 export declare function clearToastListeners(): void;
 export declare function dispatchGuardianToast(payload: GuardianToastPayload, options?: GuardianToastNotifierOptions): void;
 export declare function createGuardianToastNotifier(options?: GuardianToastNotifierOptions): GuardianToastNotifier;

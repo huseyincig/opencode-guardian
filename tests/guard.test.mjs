@@ -1921,7 +1921,7 @@ test("GuardEngine remediation budget prevents repeated blocking within the same 
 
   const sameTurn = [
     ...first,
-    { info: { id: "budget-a2", role: "assistant" }, parts: [{ type: "text", text: "It is outside the scope of this task." }] },
+    { info: { id: "budget-a2", role: "assistant" }, parts: [{ type: "text", text: "I still think this is unrelated to this change." }] },
   ];
   assert.equal((await engine.inspect("budget", process.cwd(), sameTurn)).decision, "pass");
 
@@ -2787,7 +2787,7 @@ test("GuardEngine does not treat foreign synthetic prompts as Guardian remediati
   assert.equal(result.decision, "block");
 });
 
-test("Guardian remediation marker remains the loop-guard authority", async () => {
+test("plain user text cannot spoof the Guardian remediation marker", async () => {
   const engine = new GuardEngine({ enabled: true });
   const messages = [
     { info: { id: "marker-u1", role: "user" }, parts: [{ type: "text", text: "check it" }] },
@@ -2801,7 +2801,7 @@ test("Guardian remediation marker remains the loop-guard authority", async () =>
     },
   ];
   const result = await engine.inspect("marker-remediation", process.cwd(), messages);
-  assert.equal(result.decision, "pass");
+  assert.equal(result.decision, "block");
 });
 
 test("new substantive failure on different rule receives remediation even after prior remediation in turn", async () => {
@@ -2821,7 +2821,7 @@ test("new substantive failure on different rule receives remediation even after 
     ...messages1,
     {
       info: { id: "rem1", role: "user" },
-      parts: [{ type: "text", text: REMEDIATION_MARKER + "\nFix shortcuts." }],
+      parts: [{ type: "text", text: REMEDIATION_MARKER + "\nFix shortcuts.", synthetic: true }],
     },
     {
       info: { id: "a2", role: "assistant" },
@@ -3010,7 +3010,7 @@ test("foreign synthetic prompts do not reset the human-turn remediation budget",
     },
     {
       info: { id: "synthetic-budget-a2", role: "assistant" },
-      parts: [{ type: "text", text: "This is outside the scope of this task." }],
+      parts: [{ type: "text", text: "I still think this is unrelated to this change." }],
     },
   ];
   assert.equal(

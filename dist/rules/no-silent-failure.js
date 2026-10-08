@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, } from "../tool-input.js";
 import { isVerificationFailureMask } from "../evidence.js";
 const EMPTY_HANDLER_PATTERNS = [
     {
@@ -78,13 +78,10 @@ export const noSilentFailureRule = {
                     if (typeof value === "string" && value)
                         checkCode(value, "code mutation");
                 }
-                const command = typeof input.command === "string"
-                    ? input.command
-                    : typeof input.cmd === "string"
-                        ? input.cmd
-                        : typeof input.script === "string"
-                            ? input.script
-                            : "";
+                for (const edit of extractStructuredEditTexts(input)) {
+                    checkCode(edit.text, "structured code mutation");
+                }
+                const command = extractToolCommand(input);
                 if (command &&
                     MASKED_VERIFICATION.test(command) &&
                     !EXPLORATORY_VERIFICATION.test(command) &&

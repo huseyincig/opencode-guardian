@@ -57,6 +57,7 @@ function sanitizeKeyValueLine(
   line: string,
   replacement: string,
   customKeys?: (string | RegExp)[],
+  safeKeyNames?: string[],
   findings: SecretFinding[] = []
 ): string {
   // 1. Env assignment: [export ]KEY=VALUE
@@ -67,7 +68,7 @@ function sanitizeKeyValueLine(
     const eq = envMatch[3] ?? '';
     const rawVal = envMatch[4] ?? '';
 
-    if (isSensitiveKey(key, customKeys)) {
+    if (isSensitiveKey(key, customKeys, safeKeyNames)) {
       findings.push({ kind: 'key-value', category: 'env-assignment', keyName: key });
       // Preserve quotes if present
       if (
@@ -89,7 +90,7 @@ function sanitizeKeyValueLine(
     const colon = yamlMatch[3] ?? '';
     const rawVal = yamlMatch[4] ?? '';
 
-    if (isSensitiveKey(key, customKeys)) {
+    if (isSensitiveKey(key, customKeys, safeKeyNames)) {
       findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: key });
       if (
         (rawVal.startsWith('"') && rawVal.endsWith('"')) ||
@@ -177,6 +178,7 @@ export function sanitizeString(
         original,
         replacement,
         options.customSensitiveKeys,
+        options.safeKeyNames,
         findings
       );
       if (sanitized !== original) {
@@ -193,7 +195,7 @@ export function sanitizeString(
     const inlineKvRegex =
       /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)["']?([^\s,;)"'>\n\r]+)["']?/gi;
     result = result.replace(inlineKvRegex, (match, lead, key, sep, val) => {
-      if (!isSensitiveKey(key, options.customSensitiveKeys)) {
+      if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
         return match;
       }
       if (val === replacement || val === '[REDACTED:PRIVATE_KEY]') {
@@ -329,16 +331,13 @@ export function sanitizeObject<T>(
       if (typeof val === 'object') {
         const output: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-          if (isSensitiveKey(k, options.customSensitiveKeys)) {
+          if (isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)) {
             redactedCount++;
             findings.push({ kind: 'key-value', category: 'Object Property', keyName: k });
-            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-              output[k] = replacement;
-            } else if (typeof v === 'object' && v !== null) {
-              output[k] = recurse(v);
-            } else {
-              output[k] = replacement;
-            }
+            // A sensitive key defines the trust boundary for its complete value.
+            // Do not recurse into nested objects/arrays and retain an arbitrary
+            // secret under a non-sensitive child key.
+            output[k] = replacement;
           } else {
             output[k] = recurse(v);
           }
@@ -398,31 +397,29 @@ export function sanitizeToolResult<T>(result: T, options: SanitizerOptions = {})
         } as unknown as T;
       }
 
-      // 2. Process stdout/stderr shape: { stdout, stderr, ... }
+      // 2. Process stdout/stderr shape: { stdout, stderr, ... }.
+      // Sanitize the complete envelope so sibling metadata/raw fields cannot
+      // retain a secret after stdout/stderr themselves are redacted.
       if ('stdout' in resObj || 'stderr' in resObj) {
-        const output = { ...resObj };
-        if (typeof output.stdout === 'string') {
-          output.stdout = sanitizeString(output.stdout, options).sanitized;
-        }
-        if (typeof output.stderr === 'string') {
-          output.stderr = sanitizeString(output.stderr, options).sanitized;
-        }
-        return output as unknown as T;
+        return sanitizeObject(resObj, options).sanitized as unknown as T;
       }
 
-      // 3. MCP Content shape: { content: [{ type: "text", text: "..." }] }
+      // 3. MCP/OpenCode content shape: { content: [...], output?, metadata? }.
+      // Tool.Result officially allows output/content/metadata siblings. Never
+      // sanitize only content and then spread raw sibling fields back in.
       if (Array.isArray(resObj.content)) {
         const sanitizedContent = resObj.content.map((item) => {
           if (item && typeof item === 'object' && 'text' in item && typeof item.text === 'string') {
             return {
-              ...item,
+              ...sanitizeObject(item, options).sanitized as Record<string, unknown>,
               text: sanitizeString(item.text, options).sanitized,
             };
           }
           return sanitizeObject(item, options).sanitized;
         });
+        const sanitizedEnvelope = sanitizeObject(resObj, options).sanitized as Record<string, unknown>;
         return {
-          ...resObj,
+          ...sanitizedEnvelope,
           content: sanitizedContent,
         } as unknown as T;
       }

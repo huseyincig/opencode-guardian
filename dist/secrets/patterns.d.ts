@@ -9,7 +9,7 @@ export declare const SENSITIVE_KEY_REGEX: RegExp;
 /**
  * Checks whether a key name represents a sensitive credential name.
  */
-export declare function isSensitiveKey(key: string, customKeys?: (string | RegExp)[]): boolean;
+export declare function isSensitiveKey(key: string, customKeys?: (string | RegExp)[], safeKeyNames?: string[]): boolean;
 /**
  * Known autonomous credential format patterns (can match value even without key name).
  */

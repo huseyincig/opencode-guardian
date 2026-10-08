@@ -29,7 +29,7 @@ export const taskCompletionRule = {
         const prose = latestAssistantProse(context);
         const findings = [];
         const blocking = [];
-        if (!contract?.requiresExplicitCompletion || !evidence || !prose) {
+        if (!evidence) {
             return { ruleId: this.id, decision: "pass", findings };
         }
         const writeCapable = isWriteCapableAgent(context);
@@ -48,13 +48,15 @@ export const taskCompletionRule = {
         if (writeCapable && !hasToolFailure && !report.isClosing && report.hasClearBlocker) {
             return { ruleId: this.id, decision: "pass", findings };
         }
-        const policy = evaluateTaskPolicy(contract, evidence);
-        if (policy.review === "missing") {
+        const policy = contract?.requiresExplicitCompletion
+            ? evaluateTaskPolicy(contract, evidence)
+            : undefined;
+        if (policy?.review === "missing") {
             const finding = {
                 ruleId: this.id,
                 pattern: "iteration ended after a change without a new review",
                 messageSnippet: prose.slice(0, 160),
-                description: contract.requiresSourceReview
+                description: contract?.requiresSourceReview
                     ? "The user explicitly required another source review after fixing a finding, but no successful post-change source inspection was observed."
                     : "The user explicitly required another review after fixing a finding, but no successful post-change review or verification was observed.",
                 confidence: "high",
@@ -63,7 +65,7 @@ export const taskCompletionRule = {
             findings.push(finding);
             blocking.push(finding);
         }
-        for (const verification of policy.verifications) {
+        for (const verification of policy?.verifications ?? []) {
             if (verification.status === "passed")
                 continue;
             // Concrete tool failure means the requested check failed.
@@ -79,10 +81,16 @@ export const taskCompletionRule = {
                 });
                 continue;
             }
+            const verificationFingerprint = verification.evidence?.errorFingerprint ??
+                verification.evidence?.signature ??
+                `${verification.kind}:${verification.status}`;
             const finding = {
                 ruleId: this.id,
                 pattern: `${verification.kind} verification not confirmed`,
-                messageSnippet: prose.slice(0, 160),
+                messageSnippet: verification.evidence?.errorFingerprint ??
+                    verification.evidence?.error ??
+                    verification.evidence?.command ??
+                    prose.slice(0, 160),
                 description: verification.status === "failed"
                     ? (report.isClosing
                         ? `The task is reported as complete although the latest requested ${verification.kind} check failed.`
@@ -91,6 +99,7 @@ export const taskCompletionRule = {
                         ? `The task is reported as complete while contradictory unfinished/blocker statements were made and ${verification.kind} check was not confirmed.`
                         : `The user requested ${verification.kind} verification, but a successful result after the last change is not visible.`,
                 confidence: (verification.status === "failed" || report.hasClearBlocker) ? "high" : "medium",
+                fingerprint: `verification:${verification.kind}:${verificationFingerprint}`,
             };
             findings.push(finding);
             if (verification.status === "failed" || report.hasClearBlocker) {
@@ -98,14 +107,36 @@ export const taskCompletionRule = {
             }
         }
         if (writeCapable) {
+            const commandIdentity = (value) => (value ?? "")
+                .toLowerCase()
+                .replace(/\s+2>&1\b/g, "")
+                .replace(/\s+--verbose\b/g, "")
+                .replace(/\s+-v\b/g, "")
+                .replace(/\s+/g, " ")
+                .trim();
+            const resolvesFailure = (failure, later) => {
+                if (later.sequence <= failure.sequence || later.status !== "success")
+                    return false;
+                if (later.kind !== failure.kind)
+                    return false;
+                if (failure.kind === "file-mutation") {
+                    return Boolean(failure.filePath &&
+                        later.filePath &&
+                        failure.filePath === later.filePath);
+                }
+                if (failure.command || later.command) {
+                    return Boolean(failure.command &&
+                        later.command &&
+                        commandIdentity(failure.command) === commandIdentity(later.command));
+                }
+                return later.signature === failure.signature;
+            };
             const unresolvedFailures = evidence.failures.filter((failure) => {
-                const hasLaterSuccess = evidence.records.some((later) => later.sequence > failure.sequence &&
-                    later.status === "success" &&
-                    (later.kind === failure.kind || later.toolName === failure.toolName));
+                const hasLaterSuccess = evidence.records.some((later) => resolvesFailure(failure, later));
                 return !hasLaterSuccess;
             });
             for (const failure of unresolvedFailures) {
-                const alreadyCovered = policy.verifications.some((v) => v.kind === failure.kind && v.status === "failed");
+                const alreadyCovered = policy?.verifications.some((v) => v.kind === failure.kind && v.status === "failed") ?? false;
                 if (!alreadyCovered) {
                     const finding = {
                         ruleId: this.id,
@@ -113,6 +144,8 @@ export const taskCompletionRule = {
                         messageSnippet: failure.errorFingerprint || failure.error || failure.command || prose.slice(0, 160),
                         description: `A concrete ${failure.kind} execution failed and was not resolved before stopping.`,
                         confidence: "high",
+                        fingerprint: failure.errorFingerprint ??
+                            `${failure.kind}:${failure.signature}`,
                     };
                     findings.push(finding);
                     blocking.push(finding);
@@ -124,7 +157,9 @@ export const taskCompletionRule = {
             decision: blocking.length ? "block" : "pass",
             findings,
             ...(blocking.length ? {
-                remediationPrompt: "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command.",
+                remediationPrompt: contract?.requiresExplicitCompletion
+                    ? "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
+                    : "A concrete execution failed and remains unresolved. Investigate the failure and correct it before stopping. If progress is genuinely blocked by missing permission, credentials, or required user input, report that concrete blocker instead of claiming completion or repeating the same failing action.",
             } : {}),
         };
     },

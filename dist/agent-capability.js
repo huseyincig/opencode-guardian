@@ -16,28 +16,42 @@ export function isKnownReadOnlyTool(toolName) {
     return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
 }
 function resolveV2ChannelEffect(rules, targetAction) {
-    let specificEffect;
-    let wildcardEffect;
+    let generalEffect;
+    let hasScopedRule = false;
+    let scopedOverride = false;
     for (const rule of rules) {
         const rawAction = (rule.permission ?? rule.action ?? "").toLowerCase().trim();
-        const rawEffect = (rule.action && !rule.permission && !rule.effect ? rule.action : (rule.effect ?? rule.action ?? "")).toLowerCase().trim();
+        const rawEffect = (rule.action && !rule.permission && !rule.effect
+            ? rule.action
+            : (rule.effect ?? rule.action ?? "")).toLowerCase().trim();
         if (!["allow", "deny", "ask"].includes(rawEffect))
             continue;
         const effect = rawEffect;
         const matchesAction = rawAction === targetAction ||
             (targetAction === "shell" && rawAction === "bash") ||
-            (targetAction === "bash" && rawAction === "shell");
-        if (matchesAction) {
-            // Explicit configured deny is final
-            if (effect === "deny")
-                return "deny";
-            specificEffect = effect;
+            (targetAction === "bash" && rawAction === "shell") ||
+            rawAction === "*";
+        if (!matchesAction)
+            continue;
+        // V2 permission rules are ordered and the LAST matching rule wins.
+        // For a generic mutation-capability decision, a '*' resource is the only
+        // proof of a channel-wide effect. A later scoped rule that changes that
+        // effect means the channel is restricted rather than universally allow/
+        // deny/ask. A later '*' rule supersedes all earlier scoped exceptions.
+        const resource = (rule.resource ?? rule.pattern ?? "*").trim();
+        if (resource === "*") {
+            generalEffect = effect;
+            scopedOverride = false;
+            continue;
         }
-        else if (rawAction === "*") {
-            wildcardEffect = effect;
+        hasScopedRule = true;
+        if (generalEffect !== undefined && effect !== generalEffect) {
+            scopedOverride = true;
         }
     }
-    return specificEffect ?? wildcardEffect ?? "unset";
+    if (scopedOverride)
+        return "restricted";
+    return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
 }
 function resolveV1BashEffect(bash) {
     if (typeof bash === "string") {
@@ -45,13 +59,15 @@ function resolveV1BashEffect(bash) {
         return norm === "allow" || norm === "deny" || norm === "ask" ? norm : "unset";
     }
     if (bash && typeof bash === "object" && !Array.isArray(bash)) {
-        const values = Object.values(bash).map((v) => String(v).toLowerCase().trim());
-        if (values.includes("allow"))
-            return "allow";
-        if (values.includes("ask"))
-            return "ask";
-        if (values.length > 0 && values.every((v) => v === "deny"))
-            return "deny";
+        const wildcard = bash["*"];
+        if (typeof wildcard === "string") {
+            const effect = wildcard.toLowerCase().trim();
+            if (effect === "allow" || effect === "deny" || effect === "ask") {
+                return effect;
+            }
+        }
+        if (Object.keys(bash).length > 0)
+            return "restricted";
     }
     return "unset";
 }
@@ -231,19 +247,29 @@ export function isWriteCapableAgent(context) {
     }
     return context.agentCapability !== "read-only" && context.agentCapability !== "write-requires-approval";
 }
-// Session-scoped capability cache
+// Session-scoped capability and live permission-rule caches.
 const sessionCapabilityCache = new Map();
+const sessionV2PermissionCache = new Map();
 export function getCachedAgentCapability(sessionID) {
     return sessionCapabilityCache.get(sessionID);
 }
 export function cacheAgentCapability(sessionID, profile) {
     sessionCapabilityCache.set(sessionID, profile);
 }
+export function cacheV2SessionPermissions(sessionID, permissions) {
+    sessionV2PermissionCache.set(sessionID, permissions.map((rule) => ({ ...rule })));
+    sessionCapabilityCache.delete(sessionID);
+}
+export function getCachedV2SessionPermissions(sessionID) {
+    return sessionV2PermissionCache.get(sessionID);
+}
 export function clearAgentCapability(sessionID) {
     sessionCapabilityCache.delete(sessionID);
+    sessionV2PermissionCache.delete(sessionID);
 }
 export function clearAllAgentCapabilities() {
     sessionCapabilityCache.clear();
+    sessionV2PermissionCache.clear();
 }
 /**
  * Resolves capability for a V1 agent via the V1 client.
@@ -274,12 +300,12 @@ export async function resolveV1AgentCapability(client, directory, agentName, mes
             }
         }
     }
-    catch (error) {
+    catch {
         return {
             capability: "unknown",
             evidence: {
                 agentName,
-                reasons: [`client.app.agents query failed: ${error instanceof Error ? error.message : String(error)}`],
+                reasons: ["client.app.agents query failed"],
             },
         };
     }
@@ -294,38 +320,42 @@ export async function resolveV1AgentCapability(client, directory, agentName, mes
 /**
  * Resolves capability for a V2 agent via the V2 context.
  */
-export async function resolveV2AgentCapability(context, sessionID, agentName, messageTools) {
-    let sessionPermissions;
+export async function resolveV2AgentCapability(context, sessionID, agentName, messageTools, directory) {
     let resolvedAgentName = agentName;
+    let resolvedDirectory = directory;
+    let sessionPermissions = getCachedV2SessionPermissions(sessionID);
     try {
         if (typeof context.session?.get === "function") {
             const session = await context.session.get({ sessionID });
-            if (Array.isArray(session?.permissions)) {
-                sessionPermissions = session.permissions;
-            }
             if (!resolvedAgentName && typeof session?.agent === "string") {
                 resolvedAgentName = session.agent;
             }
-            if (!resolvedAgentName && typeof session?.metadata?.agent === "string") {
-                resolvedAgentName = session.metadata.agent;
+            if (!resolvedDirectory &&
+                typeof session?.location?.directory === "string" &&
+                session.location.directory.length > 0) {
+                resolvedDirectory = session.location.directory;
+            }
+            if (Array.isArray(session?.permissions)) {
+                sessionPermissions = session.permissions;
+                cacheV2SessionPermissions(sessionID, sessionPermissions);
             }
         }
     }
     catch {
-        // transient session.get failure tolerated
+        // Transient session.get failure is tolerated; a live event/cache or agent
+        // catalog lookup can still provide bounded capability evidence.
     }
-    // If session-level permissions exist, evaluate them directly
     if (sessionPermissions && sessionPermissions.length > 0) {
         return evaluateAgentMutationProfile({
             name: resolvedAgentName,
-            v2Permissions: sessionPermissions,
+            v2Permissions: [...sessionPermissions],
             tools: messageTools,
         });
     }
-    // Query context.agent.list
+    // Query the agent catalog in the active session/worktree location.
     if (resolvedAgentName && typeof context.agent?.list === "function") {
         try {
-            const agentList = await context.agent.list();
+            const agentList = await context.agent.list(resolvedDirectory ? { location: { directory: resolvedDirectory } } : undefined);
             if (Array.isArray(agentList.data)) {
                 const found = agentList.data.find((a) => a?.name === resolvedAgentName || a?.id === resolvedAgentName);
                 if (found) {
@@ -341,12 +371,12 @@ export async function resolveV2AgentCapability(context, sessionID, agentName, me
                 }
             }
         }
-        catch (error) {
+        catch {
             return {
                 capability: "unknown",
                 evidence: {
                     agentName: resolvedAgentName,
-                    reasons: [`context.agent.list query failed: ${error instanceof Error ? error.message : String(error)}`],
+                    reasons: ["context.agent.list query failed"],
                 },
             };
         }

@@ -1,5 +1,6 @@
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, } from "../tool-input.js";
 import { isAuthorizedTestEdit, isTestBypassProhibited, isSpecificTestBypassAuthorized } from "../locale-intents.js";
+import { currentHumanMessage } from "../task-contract.js";
 /**
  * High-confidence patterns that directly disable or bypass tests.
  */
@@ -145,6 +146,10 @@ function detectAssertionWeakening(patch, filePath) {
             messageSnippet: `removed: ${removed.replace(/\s+/g, " ").slice(0, 120)} | added: ${added.replace(/\s+/g, " ").slice(0, 120)}`,
             description: "A specific assertion was replaced with a materially weaker truthiness/existence assertion in the same patch hunk",
             confidence: "high",
+            ...(filePath ? {
+                filePath,
+                fingerprint: `${filePath}:assertion weakened:${removed.replace(/\s+/g, " ").trim()}=>${added.replace(/\s+/g, " ").trim()}`,
+            } : {}),
         };
     }
     return undefined;
@@ -169,7 +174,7 @@ function coverageValues(lines) {
     }
     return values;
 }
-function detectCoverageReduction(patch) {
+function detectCoverageReduction(patch, filePath) {
     const before = coverageValues(extractRemovedLines(patch).split("\n"));
     const after = coverageValues(extractAddedLines(patch).split("\n"));
     for (const [key, beforeValues] of before) {
@@ -186,6 +191,10 @@ function detectCoverageReduction(patch) {
             messageSnippet: `${key}: ${beforeMax} → ${afterMax}`,
             description: `Coverage/quality threshold "${key}" was lowered in this patch`,
             confidence: "high",
+            ...(filePath ? {
+                filePath,
+                fingerprint: `${filePath}:coverage threshold reduced:${key}:${beforeMax}->${afterMax}`,
+            } : {}),
         };
     }
     return undefined;
@@ -201,13 +210,9 @@ function detectsTestFileDeletion(input, patchRaw, targetFile) {
         isTestFilePath(targetFile)) {
         return true;
     }
-    const command = typeof input.command === "string"
-        ? input.command
-        : typeof input.cmd === "string"
-            ? input.cmd
-            : "";
+    const command = extractToolCommand(input);
     return Boolean(command &&
-        /\brm\b[^\n;&|]*(?:tests?\/|\.test\.|\.spec\.|test_[^\s/]+\.py|_test\.)/i.test(command));
+        /\b(?:rm|del|erase|remove-item)\b[^\n;&|]*(?:tests?[\\/]|\.test\.|\.spec\.|test_[^\s\\/]+\.py|_test\.)/i.test(command));
 }
 function detectCiTestRemoval(patchRaw, targetFile) {
     if (typeof patchRaw !== "string" || !isCiFilePath(targetFile)) {
@@ -224,6 +229,10 @@ function detectCiTestRemoval(patchRaw, targetFile) {
         messageSnippet: removed.replace(/\s+/g, " ").slice(0, 220),
         description: "A CI test command was removed without a replacement test command in the same patch",
         confidence: "high",
+        ...(targetFile ? {
+            filePath: targetFile,
+            fingerprint: `${targetFile}:CI test step removed:${removed.replace(/\s+/g, " ").trim()}`,
+        } : {}),
     };
 }
 function snapshotUpdateCommand(command) {
@@ -235,16 +244,16 @@ export function explicitlyAuthorizedTestEdit(text) {
 }
 function extractUserInstruction(context) {
     const messages = context.messages?.length ? context.messages : context.currentTurn;
-    const human = messages?.findLast((m) => m.info.role === "user" &&
-        !m.parts?.some((p) => p.synthetic === true) &&
-        !m.parts?.some((p) => typeof p.text === "string" &&
-            p.text.trimStart().startsWith("[opencode-guardian remediation]")));
+    const human = currentHumanMessage(messages ?? []);
     if (!human)
         return "";
     return human.parts
-        ?.filter((p) => p.type === "text" && typeof p.text === "string")
-        .map((p) => p.text ?? "")
-        .join("\n") ?? "";
+        .filter((part) => part.type === "text" &&
+        typeof part.text === "string" &&
+        part.synthetic !== true &&
+        part.ignored !== true)
+        .map((part) => part.text ?? "")
+        .join("\n");
 }
 export const noCheatRule = {
     id: "testing/no-cheat",
@@ -306,6 +315,10 @@ export const noCheatRule = {
                     messageSnippet: extractSnippet(code, match.index, match[0].length),
                     description: `Weakened test detected in ${filePath ?? "test code"}`,
                     confidence: directPatternsBlock ? "high" : "medium",
+                    ...(filePath ? {
+                        filePath,
+                        fingerprint: `${filePath}:${pattern.name}:${match[0].trim()}`,
+                    } : {}),
                 }, directPatternsBlock || pattern.alwaysBlock === true);
             }
         };
@@ -334,6 +347,9 @@ export const noCheatRule = {
                 if (typeof input.newString === "string") {
                     checkTestCode(input.newString, targetFile);
                 }
+                for (const edit of extractStructuredEditTexts(input, targetFile)) {
+                    checkTestCode(edit.text, edit.filePath);
+                }
                 const patchText = extractAddedLines(patchRaw);
                 if (patchText)
                     checkTestCode(patchText, targetFile);
@@ -341,7 +357,7 @@ export const noCheatRule = {
                     const weakening = detectAssertionWeakening(patchRaw, targetFile);
                     if (weakening)
                         addFinding(weakening, blockStructuralTestChanges);
-                    const coverage = detectCoverageReduction(patchRaw);
+                    const coverage = detectCoverageReduction(patchRaw, targetFile);
                     if (coverage)
                         addFinding(coverage, blockStructuralTestChanges);
                     const ciRemoval = detectCiTestRemoval(patchRaw, targetFile);
@@ -355,19 +371,17 @@ export const noCheatRule = {
                         messageSnippet: targetFile ?? "test file",
                         description: "A test file was deleted; this becomes blocking when paired with failed-test evidence or strict structural-test mode",
                         confidence: hasFailedTestEvidence ? "high" : "medium",
+                        ...(targetFile ? {
+                            filePath: targetFile,
+                            fingerprint: `${targetFile}:test file deleted`,
+                        } : {}),
                     }, blockStructuralTestChanges);
                 }
                 const shellMutation = extractLikelyShellMutation(input);
                 if (shellMutation) {
                     checkTestCode(shellMutation, targetFile, blockStructuralTestChanges);
                 }
-                const command = typeof input.command === "string"
-                    ? input.command
-                    : typeof input.cmd === "string"
-                        ? input.cmd
-                        : typeof input.script === "string"
-                            ? input.script
-                            : "";
+                const command = extractToolCommand(input);
                 if (command && snapshotUpdateCommand(command)) {
                     addFinding({
                         ruleId: "testing/no-cheat",

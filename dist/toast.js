@@ -12,6 +12,7 @@
  * Only safe rule IDs, severity, and action taken are included.
  */
 const activeListeners = new Set();
+const activeClearListeners = new Set();
 const recentDispatches = new Map();
 const DEDUPE_WINDOW_MS = 600;
 import { SAFE_RULE_IDS } from "./audit.js";
@@ -83,20 +84,51 @@ export function formatGuardianToast(input) {
         }
     }
 }
-export function registerToastListener(listener) {
-    activeListeners.add(listener);
+export function registerToastListener(listener, scope = {}) {
+    const registration = { listener, scope };
+    activeListeners.add(registration);
     return () => {
-        activeListeners.delete(listener);
+        activeListeners.delete(registration);
     };
+}
+export function registerToastClearListener(listener, scope = {}) {
+    const registration = { listener, scope };
+    activeClearListeners.add(registration);
+    return () => {
+        activeClearListeners.delete(registration);
+    };
+}
+export function dispatchGuardianToastClear(scope) {
+    for (const registration of activeClearListeners) {
+        if (registration.scope.directory !== undefined &&
+            registration.scope.directory !== scope.directory) {
+            continue;
+        }
+        if (registration.scope.sessionID !== undefined &&
+            registration.scope.sessionID !== scope.sessionID) {
+            continue;
+        }
+        try {
+            void Promise.resolve(registration.listener(scope)).catch(() => { });
+        }
+        catch {
+            // Listener errors must never break execution.
+        }
+    }
 }
 export function clearToastListeners() {
     activeListeners.clear();
+    activeClearListeners.clear();
     recentDispatches.clear();
 }
 export function dispatchGuardianToast(payload, options) {
-    if (options?.enabled === false)
-        return;
-    const dedupeKey = `${payload.variant}:${payload.title}:${payload.message}`;
+    const dedupeKey = [
+        options?.directory ?? "",
+        options?.sessionID ?? "",
+        payload.variant,
+        payload.title,
+        payload.message,
+    ].join(":");
     const now = Date.now();
     const lastTime = recentDispatches.get(dedupeKey);
     if (lastTime && now - lastTime < DEDUPE_WINDOW_MS) {
@@ -110,15 +142,31 @@ export function dispatchGuardianToast(payload, options) {
             }
         }
     }
-    // 1. Notify in-memory listeners (e.g. active TUI instance)
-    for (const listener of activeListeners) {
+    // 1. Notify only listeners in the same project/session scope.
+    const dispatchScope = {
+        ...(options?.directory ? { directory: options.directory } : {}),
+        ...(options?.sessionID ? { sessionID: options.sessionID } : {}),
+    };
+    for (const registration of activeListeners) {
+        if (registration.scope.directory !== undefined &&
+            registration.scope.directory !== options?.directory) {
+            continue;
+        }
+        if (registration.scope.sessionID !== undefined &&
+            registration.scope.sessionID !== options?.sessionID) {
+            continue;
+        }
         try {
-            void Promise.resolve(listener(payload)).catch(() => { });
+            void Promise.resolve(registration.listener(payload, dispatchScope)).catch(() => { });
         }
         catch {
             // Listener errors must never break execution
         }
     }
+    // Listener delivery also carries the same-process composer fallback state.
+    // Disabling toast notifications must not disable that separate UI channel.
+    if (options?.enabled === false)
+        return;
     // 2. V1 Host Client (client.tui.showToast)
     const client = options?.client;
     if (typeof client?.tui?.showToast === "function") {
@@ -147,6 +195,7 @@ export function dispatchGuardianToast(payload, options) {
                 message: payload.message,
                 variant: payload.variant,
                 duration: payload.duration,
+                ...(options?.sessionID ? { sessionID: options.sessionID } : {}),
             });
         }
         catch {
@@ -176,10 +225,24 @@ export function createGuardianToastNotifier(options) {
         notify(input) {
             try {
                 const payload = formatGuardianToast(input);
-                dispatchGuardianToast(payload, options);
+                dispatchGuardianToast(payload, {
+                    ...options,
+                    ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+                });
             }
             catch {
                 // Notification failures must fail softly without interrupting policy execution
+            }
+        },
+        clear(sessionID) {
+            try {
+                dispatchGuardianToastClear({
+                    ...(options?.directory ? { directory: options.directory } : {}),
+                    sessionID,
+                });
+            }
+            catch {
+                // Clearing notification state must never interrupt policy execution.
             }
         },
     };

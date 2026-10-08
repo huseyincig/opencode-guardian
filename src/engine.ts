@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type {
   GuardConfig,
   GuardRule,
   GuardRuleConfig,
+  RuleFinding,
   RuleResult,
   Severity,
   SessionMessage,
@@ -26,11 +28,27 @@ import { collectTurnEvidence, type VerificationSnapshot } from "./evidence.js";
 import { SessionStateStore } from "./state.js";
 import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
-import { extractTaskContract, latestMutationSequence } from "./task-contract.js";
+import {
+  extractTaskContract,
+  isSourceReviewEvidence,
+  latestMutationSequence,
+} from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
 import type { AgentMutationCapability } from "./agent-capability.js";
+import { isTrustedGuardianMetadata } from "./provenance.js";
 
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
+
+function findingIdentity(ruleId: string, finding: RuleFinding): string {
+  const semantic = finding.fingerprint
+    ? ["explicit", finding.filePath ?? "", finding.fingerprint]
+    : ["fallback", finding.filePath ?? "", finding.pattern ?? ""];
+  const digest = createHash("sha256")
+    .update(semantic.join("\u0000"))
+    .digest("hex")
+    .slice(0, 24);
+  return `${ruleId}:${digest}`;
+}
 
 function composeCombinedRemediationPrompt(
   blockingPrompts: string[],
@@ -88,10 +106,14 @@ export const DEFAULT_CONFIG: GuardConfig = {
 export class GuardianConfigError extends Error {
   readonly configPath: string;
   constructor(configPath: string, cause?: unknown) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    super(`[opencode-guardian] Invalid configuration in ${configPath}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
+    const configName = path.basename(configPath);
+    const detail =
+      cause instanceof Error
+        ? cause.message
+        : (cause ? String(cause) : "could not parse or validate configuration");
+    super(`[opencode-guardian] Invalid configuration in ${configName}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
     this.name = "GuardianConfigError";
-    this.configPath = configPath;
+    this.configPath = configName;
   }
 }
 
@@ -149,6 +171,93 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
   return value as GuardConfig;
 }
 
+export function resolveEffectiveConfig(
+  base: GuardConfig,
+  rawOptions?: unknown
+): GuardConfig {
+  const options =
+    rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
+      ? { ...(rawOptions as Record<string, unknown>) }
+      : {};
+
+  const legacySecrets: Record<string, unknown> = {};
+  if (typeof options.replacement === "string") {
+    legacySecrets.replacement = options.replacement;
+  }
+  if (Array.isArray(options.customSensitiveKeys)) {
+    legacySecrets.customSensitiveKeys = options.customSensitiveKeys;
+  }
+  if (Array.isArray(options.customSecretValues)) {
+    legacySecrets.customSecretValues = options.customSecretValues;
+  }
+
+  const overlay: Record<string, unknown> = {};
+  for (const key of [
+    "enabled",
+    "remediationBudget",
+    "iterationBudget",
+    "preflight",
+    "updateNotice",
+    "notifications",
+    "secrets",
+    "rules",
+  ] as const) {
+    if (options[key] !== undefined) overlay[key] = options[key];
+  }
+  if (Object.keys(legacySecrets).length > 0) {
+    overlay.secrets = {
+      ...(overlay.secrets && typeof overlay.secrets === "object" && !Array.isArray(overlay.secrets)
+        ? overlay.secrets as Record<string, unknown>
+        : {}),
+      ...legacySecrets,
+    };
+  }
+
+  const validated = validateConfig(overlay);
+  const mergedRules: NonNullable<GuardConfig["rules"]> = {
+    ...base.rules,
+  };
+  for (const [ruleID, next] of Object.entries(validated.rules ?? {})) {
+    const previous = mergedRules[ruleID];
+    if (next && typeof next === "object" && !Array.isArray(next)) {
+      const previousObject =
+        typeof previous === "string"
+          ? { severity: previous }
+          : previous && typeof previous === "object" && !Array.isArray(previous)
+            ? previous
+            : {};
+      mergedRules[ruleID] = {
+        ...previousObject,
+        ...next,
+      };
+    } else {
+      mergedRules[ruleID] = next;
+    }
+  }
+
+  return {
+    ...base,
+    ...validated,
+    preflight: {
+      ...base.preflight,
+      ...validated.preflight,
+    },
+    updateNotice: {
+      ...base.updateNotice,
+      ...validated.updateNotice,
+    },
+    notifications: {
+      ...base.notifications,
+      ...validated.notifications,
+    },
+    secrets: {
+      ...base.secrets,
+      ...validated.secrets,
+    },
+    rules: mergedRules,
+  };
+}
+
 export function loadConfig(directory?: string): GuardConfig {
   const candidatePaths = [
     directory ? path.resolve(directory, "opencode-guardian.json") : null,
@@ -177,22 +286,47 @@ export function loadConfig(directory?: string): GuardConfig {
   return DEFAULT_CONFIG;
 }
 
-function isSyntheticUserMessage(message: SessionMessage): boolean {
+function isSyntheticUserMessage(
+  message: SessionMessage,
+  sessionID?: string
+): boolean {
   return (
     message.info.role === "user" &&
-    Boolean(message.parts?.some((part) => part.synthetic === true))
+    Boolean(
+      message.parts?.some(
+        (part) =>
+          part.synthetic === true ||
+          (part as Record<string, unknown>).ignored === true ||
+          (part.metadata &&
+            typeof part.metadata === "object" &&
+            ((part.metadata as Record<string, unknown>)["opencode-guardian-visible"] === true ||
+             (part.metadata as Record<string, unknown>)["opencode-guardian-kind"] === "visible")) ||
+          isTrustedGuardianMetadata(sessionID, part.metadata, "visible")
+      )
+    )
   );
 }
 
-function isGuardianRemediationMessage(message: SessionMessage): boolean {
+function isGuardianRemediationMessage(
+  message: SessionMessage,
+  sessionID?: string
+): boolean {
   if (message.info.role !== "user") return false;
   return Boolean(
-    message.parts?.some(
-      (part) =>
+    message.parts?.some((part) => {
+      const marker =
         part.type === "text" &&
         typeof part.text === "string" &&
-        part.text.trimStart().startsWith(REMEDIATION_MARKER)
-    )
+        part.text.trimStart().startsWith(REMEDIATION_MARKER);
+      if (!marker) return false;
+      return (
+        part.synthetic === true ||
+        Boolean(
+          sessionID &&
+          isTrustedGuardianMetadata(sessionID, part.metadata, "remediation")
+        )
+      );
+    })
   );
 }
 
@@ -212,7 +346,10 @@ function isNativeQuestionTool(toolRaw: string): boolean {
   return NATIVE_QUESTION_TOOLS.has(name) || NATIVE_QUESTION_TOOLS.has(baseName);
 }
 
-export function extractCurrentTurn(messages: SessionMessage[]): {
+export function extractCurrentTurn(
+  messages: SessionMessage[],
+  sessionID?: string
+): {
   isSubagent: boolean;
   isRemediationResponse: boolean;
   currentTurn: SessionMessage[];
@@ -221,17 +358,17 @@ export function extractCurrentTurn(messages: SessionMessage[]): {
   const lastUserMessage = messages.findLast(
     (message) =>
       message.info.role === "user" &&
-      (!isSyntheticUserMessage(message) || isGuardianRemediationMessage(message))
+      (!isSyntheticUserMessage(message, sessionID) || isGuardianRemediationMessage(message, sessionID))
   );
   const isRemediationResponse = Boolean(
-    lastUserMessage && isGuardianRemediationMessage(lastUserMessage)
+    lastUserMessage && isGuardianRemediationMessage(lastUserMessage, sessionID)
   );
 
   const lastHumanUserIndex = messages.findLastIndex(
     (m) =>
       m.info.role === "user" &&
-      !isGuardianRemediationMessage(m) &&
-      !isSyntheticUserMessage(m)
+      !isGuardianRemediationMessage(m, sessionID) &&
+      !isSyntheticUserMessage(m, sessionID)
   );
   const lastHumanUser =
     lastHumanUserIndex >= 0 ? messages[lastHumanUserIndex] : undefined;
@@ -365,7 +502,7 @@ export class GuardEngine {
       isRemediationResponse,
       currentTurn,
       turnKey,
-    } = extractCurrentTurn(messages);
+    } = extractCurrentTurn(messages, sessionID);
     const isSubagent = options?.isSubagent ?? inferredSubagent;
     const firstCurrentMessage = currentTurn[0];
     if (!firstCurrentMessage) {
@@ -375,7 +512,7 @@ export class GuardEngine {
     const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
     if (activeHandoff?.status === "question_presented") {
       const hasUserReply = currentTurn.some((msg) =>
-        msg.info.role === "user" && !isGuardianRemediationMessage(msg)
+        msg.info.role === "user" && !isGuardianRemediationMessage(msg, sessionID)
       );
       if (hasUserReply) {
         this.sessionState.clearActiveHandoff(sessionID);
@@ -404,7 +541,7 @@ export class GuardEngine {
 
     const contract = extractTaskContract(currentTurn);
     const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
-    const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
+    const lastGuardianIndex = currentTurn.findLastIndex((m) => isGuardianRemediationMessage(m, sessionID));
     const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
       ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
       : currentTurn;
@@ -418,6 +555,9 @@ export class GuardEngine {
       : [];
     const pendingFiles = isRemediationResponse
       ? this.sessionState.getPendingRemediationFiles(sessionID, turnKey)
+      : [];
+    const pendingFindingKeys = isRemediationResponse
+      ? this.sessionState.getPendingRemediationFindings(sessionID, turnKey)
       : [];
     const results: RuleResult[] = [];
     const blockingPrompts: string[] = [];
@@ -523,6 +663,7 @@ export class GuardEngine {
         if (handoff) {
           this.sessionState.setActiveHandoff(sessionID, {
             handoffId: handoff.handoffId,
+            turnKey,
             kind: handoff.kind,
             autoSelect: handoff.autoSelect,
             status: "handed_off",
@@ -552,46 +693,29 @@ export class GuardEngine {
           results,
         };
       }
-      const fingerprint = blockingResults
-        .map((result) => {
-          const findingKey = result.findings
-            .map((finding) => `${finding.pattern}:${finding.messageSnippet}`)
-            .sort()
-            .join("|");
-          return `${result.ruleId}:${findingKey}`;
+      const findingFingerprints = Array.from(new Set(
+        blockingResults.flatMap((result) => {
+          const keys = result.findings.map((finding) =>
+            findingIdentity(result.ruleId, finding)
+          );
+          return keys.length > 0 ? keys : [`${result.ruleId}:block`];
         })
-        .sort()
-        .join("||");
+      )).sort();
 
       const blockingRuleIds = blockingResults.map((r) => r.ruleId);
-      const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
-
-      const failedPendingRule =
-        isRemediationResponse &&
-        blockingResults.some((result) => pendingRules.includes(result.ruleId));
 
       const maxTurnRemediations = contract?.iterativeReview
         ? Math.max(5, this.config.iterationBudget ?? 3)
-        : Math.max(3, budget * 2);
-
-      const rulesExhausted =
-        blockingRuleIds.length > 0 &&
-        blockingRuleIds.every(
-          (rule) =>
-            this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
-            (!contract?.iterativeReview &&
-              isRemediationResponse &&
-              remediationMessagesCount >= budget &&
-              (pendingRules.length === 0 || pendingRules.includes(rule)))
-        );
+        : Math.max(
+            8,
+            Math.min(32, this.rules.size * Math.max(1, budget))
+          );
 
       if (
-        (failedPendingRule && this.sessionState.hasExhaustedRule(sessionID, turnKey, pendingRules, budget)) ||
-        rulesExhausted ||
         !this.sessionState.canRemediate(
           sessionID,
           turnKey,
-          fingerprint,
+          findingFingerprints,
           blockingRuleIds,
           budget,
           maxTurnRemediations
@@ -607,12 +731,32 @@ export class GuardEngine {
             : {}),
         };
       }
-      this.sessionState.recordRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
+      this.sessionState.recordRemediation(
+        sessionID,
+        turnKey,
+        findingFingerprints,
+        blockingRuleIds
+      );
+      const blockingFiles = Array.from(new Set(
+        blockingResults.flatMap((result) =>
+          result.findings.flatMap((finding) =>
+            finding.filePath ? [finding.filePath] : []
+          )
+        )
+      ));
+      const blockingFindingKeys = Array.from(new Set(
+        blockingResults.flatMap((result) =>
+          result.findings.map((finding) =>
+            findingIdentity(result.ruleId, finding)
+          )
+        )
+      ));
       this.sessionState.setPendingRemediation(
         sessionID,
         turnKey,
         blockingRuleIds,
-        [...(evidence.mutatedFiles ?? [])]
+        blockingFiles,
+        blockingFindingKeys
       );
       const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
       const handoff = !isSubagent
@@ -621,6 +765,7 @@ export class GuardEngine {
       if (handoff) {
         this.sessionState.setActiveHandoff(sessionID, {
           handoffId: handoff.handoffId,
+          turnKey,
           kind: handoff.kind,
           autoSelect: handoff.autoSelect,
           status: "handed_off",
@@ -632,7 +777,12 @@ export class GuardEngine {
         combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
         rollback: () => {
           this.inspectedMessages.delete(sessionID);
-          this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
+          this.sessionState.rollbackRemediation(
+            sessionID,
+            turnKey,
+            findingFingerprints,
+            blockingRuleIds
+          );
           this.sessionState.clearPendingRemediation(sessionID);
           if (handoff) this.sessionState.clearActiveHandoff(sessionID);
         },
@@ -652,8 +802,13 @@ export class GuardEngine {
       const hasProgress = successfulFresh.some((record) =>
         ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind)
       );
+      const pendingFindingSet = new Set(pendingFindingKeys);
       const originalFindingsRemain = results.some(
-        (result) => pendingRules.includes(result.ruleId) && result.findings.length > 0
+        (result) =>
+          pendingRules.includes(result.ruleId) &&
+          result.findings.some((finding) =>
+            pendingFindingSet.has(findingIdentity(result.ruleId, finding))
+          )
       );
       let verified = pendingRules.length > 0 && hasProgress && !originalFindingsRemain;
       if (verified && pendingRules.includes("security/no-secrets")) {
@@ -723,7 +878,11 @@ export class GuardEngine {
               }],
               isSubagent, ruleConfig: recheckRuleConfig, evidence: freshEvidence,
             });
-            if (checked.findings.length > 0) { verified = false; break; }
+            const originalSourceFindingRemains = checked.findings.some(
+              (finding) =>
+                pendingFindingSet.has(findingIdentity(ruleID, finding))
+            );
+            if (originalSourceFindingRemains) { verified = false; break; }
           }
         }
       }

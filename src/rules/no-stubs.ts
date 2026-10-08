@@ -1,5 +1,6 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractFilePathFromPatch } from "./no-secrets.js";
 
 /**
  * Patterns that indicate fake or stubbed implementations in code.
@@ -66,7 +67,7 @@ export const noStubsRule: GuardRule = {
     const findings: RuleFinding[] = [];
     const seen = new Set<string>();
 
-    const checkCode = (code: string, source: string) => {
+    const checkCode = (code: string, source: string, filePath?: string) => {
       if (!code || typeof code !== "string") return;
 
       for (const pattern of STUB_PATTERNS) {
@@ -81,6 +82,10 @@ export const noStubsRule: GuardRule = {
             pattern: pattern.name,
             messageSnippet: snippet,
             description: `Stub / incomplete implementation detected in ${source}: "${match[0]}" → "${snippet}"`,
+            ...(filePath ? {
+              filePath,
+              fingerprint: `${filePath}:${pattern.name}:${match[0].trim()}`,
+            } : {}),
           });
         }
       }
@@ -92,18 +97,28 @@ export const noStubsRule: GuardRule = {
       for (const part of msg.parts) {
         if (part.type === "tool" && part.state?.input) {
           const input = part.state.input;
+          const patchRaw = input.patchText ?? input.patch;
+          const targetFile =
+            (input.path as string) ??
+            (input.targetFile as string) ??
+            (input.filePath as string) ??
+            (input.file as string) ??
+            extractFilePathFromPatch(patchRaw);
           if (typeof input.content === "string") {
-            checkCode(input.content, "file write content");
+            checkCode(input.content, "file write content", targetFile);
           }
           if (typeof input.new_string === "string") {
-            checkCode(input.new_string, "file edit");
+            checkCode(input.new_string, "file edit", targetFile);
           }
           if (typeof input.newString === "string") {
-            checkCode(input.newString, "file edit");
+            checkCode(input.newString, "file edit", targetFile);
           }
-          const patchText = extractAddedLines(input.patchText ?? input.patch);
+          for (const edit of extractStructuredEditTexts(input, targetFile)) {
+            checkCode(edit.text, "structured file edit", edit.filePath);
+          }
+          const patchText = extractAddedLines(patchRaw);
           if (patchText) {
-            checkCode(patchText, "patch added lines");
+            checkCode(patchText, "patch added lines", targetFile);
           }
           const shellMutation = extractLikelyShellMutation(input);
           if (shellMutation) {

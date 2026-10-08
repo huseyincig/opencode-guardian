@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
 export const SECRET_PATTERNS = [
     { regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{32,}\b/, name: "OpenAI API Key (sk-...)" },
     { regex: /\bghp_[a-zA-Z0-9]{36}\b/, name: "GitHub Personal Access Token (ghp_...)" },
@@ -103,6 +103,7 @@ export const noSecretsRule = {
                     pattern: item.name,
                     messageSnippet: item.masked,
                     description: `Potential hardcoded secret detected in ${filePath ?? source}: ${item.name} (${item.masked})`,
+                    ...(filePath ? { filePath } : {}),
                 });
             }
         };
@@ -125,6 +126,9 @@ export const noSecretsRule = {
                     checkCode(input.new_string, targetFile);
                 if (typeof input.newString === "string")
                     checkCode(input.newString, targetFile);
+                for (const edit of extractStructuredEditTexts(input, targetFile)) {
+                    checkCode(edit.text, edit.filePath);
+                }
                 const patchText = extractAddedLines(patchRaw);
                 if (patchText)
                     checkCode(patchText, targetFile);

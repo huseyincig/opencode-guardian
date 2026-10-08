@@ -5,6 +5,7 @@ export interface UpdateCheckOptions {
     now?: number;
     fetcher?: typeof fetch;
     allowDevelopment?: boolean;
+    signal?: AbortSignal;
 }
 /** Network and filesystem failures are intentionally silent and never trigger an install. */
 export declare function checkGuardianUpdate(options?: UpdateCheckOptions): Promise<{

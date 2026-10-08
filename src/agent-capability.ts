@@ -9,8 +9,8 @@ export type AgentMutationCapability =
 
 export interface AgentMutationEvidence {
   agentName?: string | undefined;
-  edit?: ("allow" | "deny" | "ask" | "disabled" | "unset") | undefined;
-  bash?: ("allow" | "deny" | "ask" | "disabled" | "unset") | undefined;
+  edit?: ("allow" | "deny" | "ask" | "restricted" | "disabled" | "unset") | undefined;
+  bash?: ("allow" | "deny" | "ask" | "restricted" | "disabled" | "unset") | undefined;
   mutatingTools?: string[] | undefined;
   unknownTools?: string[] | undefined;
   reasons: string[];
@@ -39,6 +39,14 @@ export function isKnownReadOnlyTool(toolName: string): boolean {
   return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
 }
 
+export interface V2PermissionRule {
+  permission?: string | undefined;
+  action?: string | undefined;
+  pattern?: string | undefined;
+  resource?: string | undefined;
+  effect?: string | undefined;
+}
+
 export interface NormalizedAgentInput {
   name?: string | undefined;
   tools?: Record<string, boolean> | undefined;
@@ -49,25 +57,24 @@ export interface NormalizedAgentInput {
     bash?: string | Record<string, string> | undefined;
     [key: string]: unknown;
   } | undefined;
-  v2Permissions?: Array<{
-    permission?: string | undefined;
-    action?: string | undefined;
-    pattern?: string | undefined;
-    resource?: string | undefined;
-    effect?: string | undefined;
-  }> | undefined;
+  v2Permissions?: V2PermissionRule[] | undefined;
 }
 
 function resolveV2ChannelEffect(
   rules: NonNullable<NormalizedAgentInput["v2Permissions"]>,
   targetAction: string
-): "allow" | "deny" | "ask" | "unset" {
-  let specificEffect: "allow" | "deny" | "ask" | undefined;
-  let wildcardEffect: "allow" | "deny" | "ask" | undefined;
+): "allow" | "deny" | "ask" | "restricted" | "unset" {
+  let generalEffect: "allow" | "deny" | "ask" | undefined;
+  let hasScopedRule = false;
+  let scopedOverride = false;
 
   for (const rule of rules) {
     const rawAction = (rule.permission ?? rule.action ?? "").toLowerCase().trim();
-    const rawEffect = (rule.action && !rule.permission && !rule.effect ? rule.action : (rule.effect ?? rule.action ?? "")).toLowerCase().trim();
+    const rawEffect = (
+      rule.action && !rule.permission && !rule.effect
+        ? rule.action
+        : (rule.effect ?? rule.action ?? "")
+    ).toLowerCase().trim();
 
     if (!["allow", "deny", "ask"].includes(rawEffect)) continue;
     const effect = rawEffect as "allow" | "deny" | "ask";
@@ -75,33 +82,49 @@ function resolveV2ChannelEffect(
     const matchesAction =
       rawAction === targetAction ||
       (targetAction === "shell" && rawAction === "bash") ||
-      (targetAction === "bash" && rawAction === "shell");
+      (targetAction === "bash" && rawAction === "shell") ||
+      rawAction === "*";
+    if (!matchesAction) continue;
 
-    if (matchesAction) {
-      // Explicit configured deny is final
-      if (effect === "deny") return "deny";
-      specificEffect = effect;
-    } else if (rawAction === "*") {
-      wildcardEffect = effect;
+    // V2 permission rules are ordered and the LAST matching rule wins.
+    // For a generic mutation-capability decision, a '*' resource is the only
+    // proof of a channel-wide effect. A later scoped rule that changes that
+    // effect means the channel is restricted rather than universally allow/
+    // deny/ask. A later '*' rule supersedes all earlier scoped exceptions.
+    const resource = (rule.resource ?? rule.pattern ?? "*").trim();
+    if (resource === "*") {
+      generalEffect = effect;
+      scopedOverride = false;
+      continue;
+    }
+
+    hasScopedRule = true;
+    if (generalEffect !== undefined && effect !== generalEffect) {
+      scopedOverride = true;
     }
   }
 
-  return specificEffect ?? wildcardEffect ?? "unset";
+  if (scopedOverride) return "restricted";
+  return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
 }
 
 function resolveV1BashEffect(
   bash: string | Record<string, string> | undefined
-): "allow" | "deny" | "ask" | "unset" {
+): "allow" | "deny" | "ask" | "restricted" | "unset" {
   if (typeof bash === "string") {
     const norm = bash.toLowerCase().trim();
     return norm === "allow" || norm === "deny" || norm === "ask" ? norm : "unset";
   }
 
   if (bash && typeof bash === "object" && !Array.isArray(bash)) {
-    const values = Object.values(bash).map((v) => String(v).toLowerCase().trim());
-    if (values.includes("allow")) return "allow";
-    if (values.includes("ask")) return "ask";
-    if (values.length > 0 && values.every((v) => v === "deny")) return "deny";
+    const wildcard = bash["*"];
+    if (typeof wildcard === "string") {
+      const effect = wildcard.toLowerCase().trim();
+      if (effect === "allow" || effect === "deny" || effect === "ask") {
+        return effect;
+      }
+    }
+    if (Object.keys(bash).length > 0) return "restricted";
   }
 
   return "unset";
@@ -164,7 +187,7 @@ export function evaluateAgentMutationProfile(
       : undefined);
 
   // 1. Resolve Edit channel
-  let editEffect: "allow" | "deny" | "ask" | "disabled" | "unset" = "unset";
+  let editEffect: "allow" | "deny" | "ask" | "restricted" | "disabled" | "unset" = "unset";
   if (tools.edit === false) {
     editEffect = "disabled";
     reasons.push("edit tool explicitly disabled in tools");
@@ -180,7 +203,7 @@ export function evaluateAgentMutationProfile(
   }
 
   // 2. Resolve Shell/Bash channel
-  let bashEffect: "allow" | "deny" | "ask" | "disabled" | "unset" = "unset";
+  let bashEffect: "allow" | "deny" | "ask" | "restricted" | "disabled" | "unset" = "unset";
   if (tools.bash === false || tools.shell === false) {
     bashEffect = "disabled";
     reasons.push("bash/shell tool explicitly disabled in tools");
@@ -330,8 +353,9 @@ export function isWriteCapableAgent(context: {
   return context.agentCapability !== "read-only" && context.agentCapability !== "write-requires-approval";
 }
 
-// Session-scoped capability cache
+// Session-scoped capability and live permission-rule caches.
 const sessionCapabilityCache = new Map<string, AgentMutationProfile>();
+const sessionV2PermissionCache = new Map<string, V2PermissionRule[]>();
 
 export function getCachedAgentCapability(sessionID: string): AgentMutationProfile | undefined {
   return sessionCapabilityCache.get(sessionID);
@@ -341,12 +365,31 @@ export function cacheAgentCapability(sessionID: string, profile: AgentMutationPr
   sessionCapabilityCache.set(sessionID, profile);
 }
 
+export function cacheV2SessionPermissions(
+  sessionID: string,
+  permissions: readonly V2PermissionRule[]
+): void {
+  sessionV2PermissionCache.set(
+    sessionID,
+    permissions.map((rule) => ({ ...rule }))
+  );
+  sessionCapabilityCache.delete(sessionID);
+}
+
+export function getCachedV2SessionPermissions(
+  sessionID: string
+): readonly V2PermissionRule[] | undefined {
+  return sessionV2PermissionCache.get(sessionID);
+}
+
 export function clearAgentCapability(sessionID: string): void {
   sessionCapabilityCache.delete(sessionID);
+  sessionV2PermissionCache.delete(sessionID);
 }
 
 export function clearAllAgentCapabilities(): void {
   sessionCapabilityCache.clear();
+  sessionV2PermissionCache.clear();
 }
 
 /**
@@ -387,12 +430,12 @@ export async function resolveV1AgentCapability(
         }
       }
     }
-  } catch (error) {
+  } catch {
     return {
       capability: "unknown",
       evidence: {
         agentName,
-        reasons: [`client.app.agents query failed: ${error instanceof Error ? error.message : String(error)}`],
+        reasons: ["client.app.agents query failed"],
       },
     };
   }
@@ -420,47 +463,50 @@ export async function resolveV2AgentCapability(
   },
   sessionID: string,
   agentName?: string | undefined,
-  messageTools?: Record<string, boolean> | undefined
+  messageTools?: Record<string, boolean> | undefined,
+  directory?: string | undefined
 ): Promise<AgentMutationProfile> {
-  let sessionPermissions: Array<{
-    permission?: string | undefined;
-    action?: string | undefined;
-    pattern?: string | undefined;
-    resource?: string | undefined;
-    effect?: string | undefined;
-  }> | undefined;
   let resolvedAgentName = agentName;
+  let resolvedDirectory = directory;
+  let sessionPermissions = getCachedV2SessionPermissions(sessionID);
 
   try {
     if (typeof context.session?.get === "function") {
       const session = await context.session.get({ sessionID });
-      if (Array.isArray(session?.permissions)) {
-        sessionPermissions = session.permissions;
-      }
       if (!resolvedAgentName && typeof session?.agent === "string") {
         resolvedAgentName = session.agent;
       }
-      if (!resolvedAgentName && typeof session?.metadata?.agent === "string") {
-        resolvedAgentName = session.metadata.agent;
+      if (
+        !resolvedDirectory &&
+        typeof session?.location?.directory === "string" &&
+        session.location.directory.length > 0
+      ) {
+        resolvedDirectory = session.location.directory;
+      }
+      if (Array.isArray(session?.permissions)) {
+        sessionPermissions = session.permissions as V2PermissionRule[];
+        cacheV2SessionPermissions(sessionID, sessionPermissions);
       }
     }
   } catch {
-    // transient session.get failure tolerated
+    // Transient session.get failure is tolerated; a live event/cache or agent
+    // catalog lookup can still provide bounded capability evidence.
   }
 
-  // If session-level permissions exist, evaluate them directly
   if (sessionPermissions && sessionPermissions.length > 0) {
     return evaluateAgentMutationProfile({
       name: resolvedAgentName,
-      v2Permissions: sessionPermissions,
+      v2Permissions: [...sessionPermissions],
       tools: messageTools,
     });
   }
 
-  // Query context.agent.list
+  // Query the agent catalog in the active session/worktree location.
   if (resolvedAgentName && typeof context.agent?.list === "function") {
     try {
-      const agentList = await context.agent.list();
+      const agentList = await context.agent.list(
+        resolvedDirectory ? { location: { directory: resolvedDirectory } } : undefined
+      );
       if (Array.isArray(agentList.data)) {
         const found = agentList.data.find(
           (a: any) => a?.name === resolvedAgentName || a?.id === resolvedAgentName
@@ -477,12 +523,12 @@ export async function resolveV2AgentCapability(
           });
         }
       }
-    } catch (error) {
+    } catch {
       return {
         capability: "unknown",
         evidence: {
           agentName: resolvedAgentName,
-          reasons: [`context.agent.list query failed: ${error instanceof Error ? error.message : String(error)}`],
+          reasons: ["context.agent.list query failed"],
         },
       };
     }

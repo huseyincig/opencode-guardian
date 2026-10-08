@@ -1,5 +1,6 @@
 export interface HandoffTrackingState {
     handoffId: string;
+    turnKey: string;
     kind: "clarification" | "choice" | "approval";
     autoSelect: "allowed" | "forbidden";
     status: "handed_off" | "question_presented" | "resolved";
@@ -14,6 +15,7 @@ interface SessionState {
     continuationKeys: Set<string>;
     pendingRemediationRules?: string[];
     pendingRemediationFiles?: string[];
+    pendingRemediationFindings?: string[];
     activeHandoff?: HandoffTrackingState;
     handoffSequence: number;
 }
@@ -22,16 +24,17 @@ export declare class SessionStateStore {
     beginTurn(sessionID: string, turnKey: string): SessionState;
     getTurnRemediationCount(sessionID: string, turnKey: string): number;
     getRuleRemediationCount(sessionID: string, turnKey: string, ruleId: string): number;
-    canRemediate(sessionID: string, turnKey: string, fingerprint: string, rules: string[], budget: number, maxTurnBudget?: number): boolean;
+    canRemediate(sessionID: string, turnKey: string, fingerprint: string | readonly string[], _rules: string[], budget: number, maxTurnBudget?: number): boolean;
     hasExhaustedRule(sessionID: string, turnKey: string, rules: string[], budget: number): boolean;
-    recordRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
-    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string, rules?: string[]): void;
+    recordRemediation(sessionID: string, turnKey: string, fingerprint: string | readonly string[], rules?: string[]): void;
+    rollbackRemediation(sessionID: string, turnKey: string, fingerprint: string | readonly string[], rules?: string[]): void;
     canContinue(sessionID: string, turnKey: string, progressKey: string, budget: number): boolean;
     recordContinuation(sessionID: string, turnKey: string, progressKey: string): void;
     rollbackContinuation(sessionID: string, turnKey: string, progressKey: string): void;
-    setPendingRemediation(sessionID: string, turnKey: string, rules: string[], files?: string[]): void;
+    setPendingRemediation(sessionID: string, turnKey: string, rules: string[], files?: string[], findings?: string[]): void;
     getPendingRemediation(sessionID: string, turnKey?: string): string[] | undefined;
     getPendingRemediationFiles(sessionID: string, turnKey: string): string[];
+    getPendingRemediationFindings(sessionID: string, turnKey: string): string[];
     clearPendingRemediation(sessionID: string): void;
     setActiveHandoff(sessionID: string, handoff: HandoffTrackingState): void;
     getActiveHandoff(sessionID: string): HandoffTrackingState | undefined;

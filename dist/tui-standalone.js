@@ -1,6 +1,6 @@
-import { memo as _$memo } from "@opentui/solid";
-import { createComponent as _$createComponent } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
+import { createComponent as _$createComponent } from "@opentui/solid";
+import { memo as _$memo } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
@@ -11,9 +11,10 @@ import { createElement as _$createElement } from "@opentui/solid";
 import { createSignal, onCleanup, Show } from "solid-js";
 import { readFileSync } from "node:fs";
 import { readGuardianStatus } from "./telemetry.js";
-import { loadConfig } from "./engine.js";
+import { loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
-import { registerToastListener } from "./toast.js";
+import { registerToastClearListener, registerToastListener } from "./toast.js";
+import { GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, parseGuardianInterventionSnapshot } from "./intervention-rpc.js";
 import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport } from "./commands.js";
 const guardianVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 function StatRow(props) {
@@ -46,8 +47,58 @@ function StatRow(props) {
     return _el$;
   })();
 }
+function GuardianConversationIntervention(props) {
+  const accent = () => props.payload?.variant === "warning" ? props.colors.warning ?? props.colors.accent : props.colors.error ?? props.colors.accent;
+  const label = () => {
+    if (props.payload?.variant === "warning") return "GUARDIAN · WARNING";
+    if (props.payload?.title.includes("Blocked")) return "GUARDIAN · BLOCKED";
+    return "GUARDIAN · ERROR";
+  };
+  return _$createComponent(Show, {
+    get when() {
+      return props.payload;
+    },
+    get children() {
+      var _el$5 = _$createElement("box"),
+        _el$6 = _$createElement("text"),
+        _el$7 = _$createElement("b"),
+        _el$8 = _$createElement("text");
+      _$insertNode(_el$5, _el$6);
+      _$insertNode(_el$5, _el$8);
+      _$setProp(_el$5, "width", "100%");
+      _$setProp(_el$5, "flexDirection", "column");
+      _$setProp(_el$5, "border", ["left"]);
+      _$setProp(_el$5, "paddingLeft", 1);
+      _$setProp(_el$5, "marginBottom", 1);
+      _$insertNode(_el$6, _el$7);
+      _$insert(_el$7, label);
+      _$insert(_el$8, () => props.payload?.message ?? "");
+      _$effect(_p$ => {
+        var _v$3 = accent(),
+          _v$4 = accent(),
+          _v$5 = props.colors.text;
+        _v$3 !== _p$.e && (_p$.e = _$setProp(_el$5, "borderColor", _v$3, _p$.e));
+        _v$4 !== _p$.t && (_p$.t = _$setProp(_el$6, "fg", _v$4, _p$.t));
+        _v$5 !== _p$.a && (_p$.a = _$setProp(_el$8, "fg", _v$5, _p$.a));
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined,
+        a: undefined
+      });
+      return _el$5;
+    }
+  });
+}
+function v2SessionDirectory(context, sessionID, fallback) {
+  return context.data.session.get(sessionID)?.location?.directory ?? context.data.location.default()?.directory ?? fallback;
+}
 function v2CommandDirectory(context, fallback) {
-  return context.data?.location?.default?.()?.directory ?? fallback;
+  const route = context.ui.router.current();
+  if (route.type === "session") {
+    return v2SessionDirectory(context, route.sessionID, fallback);
+  }
+  return context.data.location.default()?.directory ?? fallback;
 }
 async function v2PerformCommand(context, command, directory) {
   if (command === "reset") {
@@ -152,16 +203,19 @@ function GuardianSidebar(props) {
   const [open, setOpen] = createSignal(false);
   const [status, setStatus] = createSignal(readGuardianStatus(currentDirectory()));
   const timer = setInterval(() => setStatus(readGuardianStatus(currentDirectory())), 2500);
+  const updateController = new AbortController();
   let disposed = false;
   onCleanup(() => {
     clearInterval(timer);
+    updateController.abort();
     disposed = true;
   });
   const [hasUpdate, setHasUpdate] = createSignal(false);
   const [latestVersion, setLatestVersion] = createSignal(undefined);
   if (props.checkUpdates !== false) {
     checkGuardianUpdate({
-      allowDevelopment: true
+      allowDevelopment: true,
+      signal: updateController.signal
     }).then(info => {
       if (!disposed && info) {
         setHasUpdate(true);
@@ -235,50 +289,50 @@ function GuardianSidebar(props) {
     }
   };
   return (() => {
-    var _el$5 = _$createElement("box"),
-      _el$6 = _$createElement("box"),
-      _el$7 = _$createElement("box"),
-      _el$8 = _$createElement("text"),
-      _el$9 = _$createElement("text"),
-      _el$0 = _$createElement("b"),
-      _el$10 = _$createElement("box"),
-      _el$11 = _$createElement("text");
-    _$insertNode(_el$5, _el$6);
-    _$setProp(_el$5, "width", "100%");
-    _$setProp(_el$5, "flexDirection", "column");
-    _$setProp(_el$5, "gap", 0);
-    _$insertNode(_el$6, _el$7);
-    _$insertNode(_el$6, _el$10);
-    _$setProp(_el$6, "width", "100%");
-    _$setProp(_el$6, "flexDirection", "row");
-    _$setProp(_el$6, "justifyContent", "space-between");
-    _$setProp(_el$6, "alignItems", "center");
-    _$setProp(_el$6, "onMouseDown", () => setOpen(value => !value));
-    _$insertNode(_el$7, _el$8);
-    _$insertNode(_el$7, _el$9);
-    _$setProp(_el$7, "flexDirection", "row");
-    _$setProp(_el$7, "alignItems", "center");
-    _$insert(_el$8, () => open() ? "▼ " : "▶ ");
+    var _el$9 = _$createElement("box"),
+      _el$0 = _$createElement("box"),
+      _el$1 = _$createElement("box"),
+      _el$10 = _$createElement("text"),
+      _el$11 = _$createElement("text"),
+      _el$12 = _$createElement("b"),
+      _el$14 = _$createElement("box"),
+      _el$15 = _$createElement("text");
     _$insertNode(_el$9, _el$0);
-    _$insertNode(_el$0, _$createTextNode(`Guardian`));
-    _$insertNode(_el$10, _el$11);
-    _$setProp(_el$10, "flexDirection", "row");
-    _$setProp(_el$10, "alignItems", "center");
-    _$insert(_el$11, "v" + guardianVersion);
-    _$insert(_el$10, _$createComponent(Show, {
+    _$setProp(_el$9, "width", "100%");
+    _$setProp(_el$9, "flexDirection", "column");
+    _$setProp(_el$9, "gap", 0);
+    _$insertNode(_el$0, _el$1);
+    _$insertNode(_el$0, _el$14);
+    _$setProp(_el$0, "width", "100%");
+    _$setProp(_el$0, "flexDirection", "row");
+    _$setProp(_el$0, "justifyContent", "space-between");
+    _$setProp(_el$0, "alignItems", "center");
+    _$setProp(_el$0, "onMouseDown", () => setOpen(value => !value));
+    _$insertNode(_el$1, _el$10);
+    _$insertNode(_el$1, _el$11);
+    _$setProp(_el$1, "flexDirection", "row");
+    _$setProp(_el$1, "alignItems", "center");
+    _$insert(_el$10, () => open() ? "▼ " : "▶ ");
+    _$insertNode(_el$11, _el$12);
+    _$insertNode(_el$12, _$createTextNode(`Guardian`));
+    _$insertNode(_el$14, _el$15);
+    _$setProp(_el$14, "flexDirection", "row");
+    _$setProp(_el$14, "alignItems", "center");
+    _$insert(_el$15, "v" + guardianVersion);
+    _$insert(_el$14, _$createComponent(Show, {
       get when() {
         return hasUpdate();
       },
       get children() {
-        var _el$12 = _$createElement("text"),
-          _el$13 = _$createElement("b");
-        _$insertNode(_el$12, _el$13);
-        _$insertNode(_el$13, _$createTextNode(` (↑)`));
-        _$effect(_$p => _$setProp(_el$12, "fg", successColor(), _$p));
-        return _el$12;
+        var _el$16 = _$createElement("text"),
+          _el$17 = _$createElement("b");
+        _$insertNode(_el$16, _el$17);
+        _$insertNode(_el$17, _$createTextNode(` (↑)`));
+        _$effect(_$p => _$setProp(_el$16, "fg", successColor(), _$p));
+        return _el$16;
       }
     }), null);
-    _$insert(_el$5, _$createComponent(Show, {
+    _$insert(_el$9, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!hasUpdate())() && latestVersion();
       },
@@ -300,7 +354,7 @@ function GuardianSidebar(props) {
         });
       }
     }), null);
-    _$insert(_el$5, _$createComponent(Show, {
+    _$insert(_el$9, _$createComponent(Show, {
       get when() {
         return !open();
       },
@@ -333,7 +387,7 @@ function GuardianSidebar(props) {
         })];
       }
     }), null);
-    _$insert(_el$5, _$createComponent(Show, {
+    _$insert(_el$9, _$createComponent(Show, {
       get when() {
         return open();
       },
@@ -443,53 +497,54 @@ function GuardianSidebar(props) {
             return status().truncated;
           },
           get children() {
-            var _el$15 = _$createElement("box"),
-              _el$16 = _$createElement("text"),
-              _el$18 = _$createElement("text");
-            _$insertNode(_el$15, _el$16);
-            _$insertNode(_el$15, _el$18);
-            _$setProp(_el$15, "width", "100%");
-            _$setProp(_el$15, "flexDirection", "row");
-            _$setProp(_el$15, "justifyContent", "space-between");
-            _$insertNode(_el$16, _$createTextNode(`Log`));
-            _$insertNode(_el$18, _$createTextNode(`recent window`));
+            var _el$19 = _$createElement("box"),
+              _el$20 = _$createElement("text"),
+              _el$22 = _$createElement("text");
+            _$insertNode(_el$19, _el$20);
+            _$insertNode(_el$19, _el$22);
+            _$setProp(_el$19, "width", "100%");
+            _$setProp(_el$19, "flexDirection", "row");
+            _$setProp(_el$19, "justifyContent", "space-between");
+            _$insertNode(_el$20, _$createTextNode(`Log`));
+            _$insertNode(_el$22, _$createTextNode(`recent window`));
             _$effect(_p$ => {
-              var _v$3 = props.colors.muted,
-                _v$4 = props.colors.muted;
-              _v$3 !== _p$.e && (_p$.e = _$setProp(_el$16, "fg", _v$3, _p$.e));
-              _v$4 !== _p$.t && (_p$.t = _$setProp(_el$18, "fg", _v$4, _p$.t));
+              var _v$6 = props.colors.muted,
+                _v$7 = props.colors.muted;
+              _v$6 !== _p$.e && (_p$.e = _$setProp(_el$20, "fg", _v$6, _p$.e));
+              _v$7 !== _p$.t && (_p$.t = _$setProp(_el$22, "fg", _v$7, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$15;
+            return _el$19;
           }
         })];
       }
     }), null);
     _$effect(_p$ => {
-      var _v$5 = props.colors.muted,
-        _v$6 = props.colors.text,
-        _v$7 = props.colors.muted;
-      _v$5 !== _p$.e && (_p$.e = _$setProp(_el$8, "fg", _v$5, _p$.e));
-      _v$6 !== _p$.t && (_p$.t = _$setProp(_el$9, "fg", _v$6, _p$.t));
-      _v$7 !== _p$.a && (_p$.a = _$setProp(_el$11, "fg", _v$7, _p$.a));
+      var _v$8 = props.colors.muted,
+        _v$9 = props.colors.text,
+        _v$0 = props.colors.muted;
+      _v$8 !== _p$.e && (_p$.e = _$setProp(_el$10, "fg", _v$8, _p$.e));
+      _v$9 !== _p$.t && (_p$.t = _$setProp(_el$11, "fg", _v$9, _p$.t));
+      _v$0 !== _p$.a && (_p$.a = _$setProp(_el$15, "fg", _v$0, _p$.a));
       return _p$;
     }, {
       e: undefined,
       t: undefined,
       a: undefined
     });
-    return _el$5;
+    return _el$9;
   })();
 }
 const v2Plugin = {
   id: "opencode-guardian.tui",
   setup(context) {
     const directory = context.location?.directory ?? process.cwd();
-    const config = loadConfig(directory);
+    const config = resolveEffectiveConfig(loadConfig(directory), context.options);
     if (config.enabled === false) return;
+    const updateNoticeController = new AbortController();
     // The pinned V2 host owns setup-created layers and removes them on unload.
     registerGuardianV2Commands(context, () => v2CommandDirectory(context, directory));
     if (config.updateNotice?.enabled !== false && typeof context.ui.toast?.show === "function") {
@@ -498,61 +553,177 @@ const v2Plugin = {
         message: `v${current} → v${latest} (update manually)`,
         variant: "info",
         duration: 5000
-      }));
+      }), {
+        signal: updateNoticeController.signal
+      });
     }
-    let unregisterToast;
-    if (config.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
-      unregisterToast = registerToastListener(toast => {
+    const colors = () => ({
+      accent: context.theme.status?.success?.base ?? context.theme.text.base,
+      onAccent: context.theme.text.action.primary.base,
+      text: context.theme.text.base,
+      muted: context.theme.text.muted,
+      success: context.theme.status?.success?.base,
+      warning: context.theme.status?.warning?.base,
+      error: context.theme.status?.error?.base
+    });
+    const [interventions, setInterventions] = createSignal({});
+    const rpcInFlight = new Set();
+    let rpcGeneration = 0;
+    let disposed = false;
+    const storeIntervention = (sessionID, payload) => {
+      setInterventions(current => {
+        const next = {
+          ...current
+        };
+        if (payload) next[sessionID] = payload;else delete next[sessionID];
+        while (Object.keys(next).length > 32) {
+          const oldest = Object.keys(next)[0];
+          if (!oldest) break;
+          delete next[oldest];
+        }
+        return next;
+      });
+    };
+    const interventionRpc = typeof context.client?.rpc === "function" ? context.client.rpc(GUARDIAN_INTERVENTION_RPC_DEFINITION) : undefined;
+    const refreshIntervention = async sessionID => {
+      if (!interventionRpc || disposed || rpcInFlight.has(sessionID)) return;
+      rpcInFlight.add(sessionID);
+      const generation = rpcGeneration;
+      const sessionLocation = context.data.session.get(sessionID)?.location ?? context.location;
+      const requestedDirectory = sessionLocation?.directory;
+      try {
+        const raw = await interventionRpc[GUARDIAN_INTERVENTION_RPC_METHOD]({
+          sessionID
+        }, sessionLocation ? {
+          location: sessionLocation
+        } : undefined);
+        if (disposed || generation !== rpcGeneration) return;
+        const currentDirectory = context.data.session.get(sessionID)?.location?.directory ?? context.location?.directory;
+        if (currentDirectory !== requestedDirectory) return;
+        const snapshot = parseGuardianInterventionSnapshot(raw);
+        if (!snapshot) return;
+        storeIntervention(sessionID, snapshot.active ? {
+          title: snapshot.title,
+          message: snapshot.message,
+          variant: snapshot.variant,
+          duration: snapshot.duration
+        } : undefined);
+      } catch {
+        // Same-process toast bridge remains available when RPC is unavailable.
+      } finally {
+        rpcInFlight.delete(sessionID);
+      }
+    };
+    let rpcPoll;
+    if (interventionRpc) {
+      const refreshCurrentSession = () => {
+        const route = context.ui.router.current();
+        if (route.type === "session") {
+          void refreshIntervention(route.sessionID);
+        }
+      };
+      refreshCurrentSession();
+      rpcPoll = setInterval(refreshCurrentSession, 500);
+    }
+    const ownsInterventionScope = scope => {
+      if (!scope.sessionID) {
+        return scope.directory === undefined || scope.directory === directory;
+      }
+      const session = context.data.session.get(scope.sessionID);
+      if (!session) return false;
+      const sessionDirectory = session.location?.directory ?? directory;
+      return scope.directory === undefined || scope.directory === sessionDirectory;
+    };
+    const unregisterToast = registerToastListener((toast, scope) => {
+      if (!ownsInterventionScope(scope)) return;
+      if (scope.sessionID) {
+        storeIntervention(scope.sessionID, toast);
+      }
+      const toastDirectory = scope.sessionID ? v2SessionDirectory(context, scope.sessionID, directory) : scope.directory ?? directory;
+      const toastConfig = resolveEffectiveConfig(loadConfig(toastDirectory), context.options);
+      if (toastConfig.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
         try {
           context.ui.toast.show({
             title: toast.title,
             message: toast.message,
             variant: toast.variant,
-            duration: toast.duration
+            duration: toast.duration,
+            ...(scope.sessionID ? {
+              sessionID: scope.sessionID
+            } : {})
           });
         } catch {}
-      });
-    }
-    // Append: never override Magic Context, AFT, or built-in sidebar sections.
-    const slotDisposer = context.ui.slot({
-      append: "sidebar.content",
-      render: () => _$createComponent(GuardianSidebar, {
-        directory: directory,
-        currentDirectory: () => v2CommandDirectory(context, directory),
-        get checkUpdates() {
-          return config.updateNotice?.enabled !== false;
+      }
+    });
+    const unregisterToastClear = registerToastClearListener(scope => {
+      if (!ownsInterventionScope(scope)) return;
+      if (scope.sessionID) {
+        storeIntervention(scope.sessionID, undefined);
+      }
+    });
+
+    // Main conversation column: visible Guardian interventions belong next to
+    // the active chat, not only in the sidebar/toast layer.
+    const conversationSlotDisposer = context.ui.slot({
+      append: "session.composer.top",
+      render: ({
+        sessionID
+      }) => _$createComponent(GuardianConversationIntervention, {
+        get payload() {
+          return interventions()[sessionID];
         },
         get colors() {
-          return {
-            accent: context.theme.status?.success?.base ?? context.theme.text.base,
-            onAccent: context.theme.text.action.primary.base,
-            text: context.theme.text.base,
-            muted: context.theme.text.muted,
-            success: context.theme.status?.success?.base,
-            warning: context.theme.status?.warning?.base,
-            error: context.theme.status?.error?.base
-          };
+          return colors();
         }
       })
     });
-    if (unregisterToast) {
-      return () => {
-        try {
-          unregisterToast?.();
-        } catch {}
-        try {
-          slotDisposer?.();
-        } catch {}
-      };
-    }
-    return slotDisposer;
+
+    // Append: never override Magic Context, AFT, or built-in sidebar sections.
+    const sidebarSlotDisposer = context.ui.slot({
+      append: "sidebar.content",
+      render: ({
+        sessionID
+      }) => {
+        const sessionDirectory = () => v2SessionDirectory(context, sessionID, directory);
+        const sessionConfig = () => resolveEffectiveConfig(loadConfig(sessionDirectory()), context.options);
+        return _$createComponent(GuardianSidebar, {
+          directory: directory,
+          currentDirectory: sessionDirectory,
+          get checkUpdates() {
+            return sessionConfig().updateNotice?.enabled !== false;
+          },
+          get colors() {
+            return colors();
+          }
+        });
+      }
+    });
+    return () => {
+      disposed = true;
+      rpcGeneration += 1;
+      rpcInFlight.clear();
+      updateNoticeController.abort();
+      if (rpcPoll) clearInterval(rpcPoll);
+      try {
+        unregisterToast?.();
+      } catch {}
+      try {
+        unregisterToastClear?.();
+      } catch {}
+      try {
+        conversationSlotDisposer?.();
+      } catch {}
+      try {
+        sidebarSlotDisposer?.();
+      } catch {}
+    };
   }
 };
 
 /** Use V1's actual SDK contract; V1 slot IDs are host-managed, not disposers. */
-const v1Tui = async api => {
+const v1Tui = async (api, pluginOptions) => {
   const directory = api.state.path.directory;
-  const config = loadConfig(directory);
+  const config = resolveEffectiveConfig(loadConfig(directory), pluginOptions);
   if (config.enabled === false) return;
   registerGuardianV1Commands(api);
   if (config.notifications?.enabled !== false && typeof api.ui?.toast === "function") {
@@ -565,6 +736,8 @@ const v1Tui = async api => {
           duration: toast.duration
         });
       } catch {}
+    }, {
+      directory
     });
     api.lifecycle?.onDispose?.(unregisterToast);
   }

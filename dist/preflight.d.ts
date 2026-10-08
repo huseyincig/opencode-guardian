@@ -1,4 +1,4 @@
-export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input" | "hardcoded-secret-in-file-write" | "uninspectable-file-input" | "lazy-commit-message" | "hallucinated-or-malformed-package";
+export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input" | "hardcoded-secret-in-file-write" | "uninspectable-file-input" | "high-risk-environment-dump" | "lazy-commit-message" | "hallucinated-or-malformed-package";
 export declare function isShellExecutionTool(tool: string, additionalTools?: readonly string[]): boolean;
 export declare function isFileMutationTool(tool: string): boolean;
 /** A process launcher requires inspection of both the executable and argv. */

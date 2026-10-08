@@ -8,9 +8,10 @@ export declare class GuardianConfigError extends Error {
     readonly configPath: string;
     constructor(configPath: string, cause?: unknown);
 }
+export declare function resolveEffectiveConfig(base: GuardConfig, rawOptions?: unknown): GuardConfig;
 export declare function loadConfig(directory?: string): GuardConfig;
 export declare const NATIVE_QUESTION_TOOLS: Set<string>;
-export declare function extractCurrentTurn(messages: SessionMessage[]): {
+export declare function extractCurrentTurn(messages: SessionMessage[], sessionID?: string): {
     isSubagent: boolean;
     isRemediationResponse: boolean;
     currentTurn: SessionMessage[];

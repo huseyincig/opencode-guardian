@@ -11,6 +11,7 @@ export declare function isDestructiveCommand(command: string, depth?: number): b
 /** Recognize actual literal rm invocations, not quoted examples or help output.
  * Separate from recursive-force classification to preserve existing evidence kinds. */
 export declare function isSimpleFileRemoval(command: string, depth?: number): boolean;
+export declare function extractMutatedFilePaths(part: MessagePart): string[];
 export declare function extractMutatedFilePath(part: MessagePart): string | undefined;
 export declare function calculateProductFingerprint(directory?: string, files?: Iterable<string>): string;
 /** Captured by a real tool-after event, not reconstructed from message history. */
@@ -22,6 +23,7 @@ export interface VerificationSnapshot {
 export declare class VerificationSnapshotStore {
     private readonly sessions;
     observe(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, output: unknown, metadata: Record<string, unknown>, directory: string, status?: string): void;
+    beginTurn(sessionID: string): void;
     snapshots(sessionID: string): ReadonlyMap<string, VerificationSnapshot>;
     forget(sessionID: string): void;
     clear(): void;

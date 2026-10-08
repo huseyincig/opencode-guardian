@@ -4,7 +4,11 @@ import type {
   RuleResult,
   TurnInspectionContext,
 } from "../types.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import {
+  extractLikelyShellMutation,
+  extractStructuredEditTexts,
+  extractToolCommand,
+} from "../tool-input.js";
 import { isVerificationFailureMask } from "../evidence.js";
 
 const EMPTY_HANDLER_PATTERNS: Array<{ name: string; regex: RegExp }> = [
@@ -89,15 +93,11 @@ export const noSilentFailureRule: GuardRule = {
         ]) {
           if (typeof value === "string" && value) checkCode(value, "code mutation");
         }
+        for (const edit of extractStructuredEditTexts(input)) {
+          checkCode(edit.text, "structured code mutation");
+        }
 
-        const command =
-          typeof input.command === "string"
-            ? input.command
-            : typeof input.cmd === "string"
-              ? input.cmd
-              : typeof input.script === "string"
-                ? input.script
-                : "";
+        const command = extractToolCommand(input);
 
         if (
           command &&

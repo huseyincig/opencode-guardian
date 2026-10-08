@@ -37,8 +37,10 @@ export declare function parseOpenCodeHandoff(text: string): OpenCodeHandoff | nu
 export declare function createHandoffForBlockingResults(results: readonly RuleResult[], sessionID: string, turnKey: string, sequence?: number): OpenCodeHandoff | null;
 /**
  * Register Guardian capability in the global OpenCode coordination registry.
+ * Returns an idempotent cleanup that restores the prior registration after the
+ * last Guardian instance unloads.
  */
-export declare function registerGuardianCapability(): void;
+export declare function registerGuardianCapability(): () => void;
 /**
  * Check if Smart Questions is registered in the in-process capability registry.
  */

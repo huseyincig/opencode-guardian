@@ -2,14 +2,16 @@ import { deniedVerification, extractAdvisoryTaskSignals, isExploratoryPrompt, sa
 export { isExploratoryPrompt } from "./locale-intents.js";
 function userText(message) {
     return message.parts
-        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .filter((part) => part.type === "text" &&
+        typeof part.text === "string" &&
+        part.synthetic !== true &&
+        part.ignored !== true)
         .map((part) => part.text ?? "")
         .join("\n");
 }
 export function currentHumanMessage(messages) {
     return messages.findLast((message) => message.info.role === "user" &&
-        !message.parts.some((part) => part.synthetic === true) &&
-        !userText(message).trimStart().startsWith("[opencode-guardian remediation]"));
+        userText(message).trim().length > 0);
 }
 /** Only an exact first-line directive is accepted; examples in code do not count. */
 export function parseExplicitTaskDirective(text) {
@@ -107,6 +109,39 @@ export function latestMutationSequence(evidence) {
         .filter((record) => record.status !== "failure")
         .reduce((latest, record) => Math.max(latest, record.sequence), -1);
 }
+export function isSourceReviewEvidence(record) {
+    if (record.status !== "success" || record.kind !== "generic")
+        return false;
+    const output = record.output?.trim();
+    if (!output)
+        return false;
+    const tool = record.toolName.toLowerCase();
+    const command = record.command ?? "";
+    // Read/view tools commonly use names such as read_file and file.view.
+    // Reject obvious error envelopes even when a provider incorrectly reports
+    // the outer tool invocation as successful.
+    const directRead = /(?:^|[.:_-])(?:read|view)(?:$|[.:_-])/.test(tool);
+    if (directRead) {
+        return !/^\s*(?:error|failed|failure|exception)\b/i.test(output) &&
+            !/^\s*\{\s*"error"\s*:/i.test(output);
+    }
+    // Name-only searches, glob/find output and git diff --stat are not
+    // evidence of inspecting file contents. Require an actual source snippet.
+    const codeMatch = /^(?:(?:[A-Za-z]:)?[^\n:]+:)?\d+:(?!\d+:[ \t]*$)(?:\d+:)?\s*\S/m.test(output);
+    const searchTool = /(?:^|[.:_-])(?:grep|search)(?:$|[.:_-])/.test(tool);
+    // Recognize executed shell commands, not words inside echo arguments or
+    // a pipeline into cat/head that might return only filenames or statistics.
+    const shellSearch = /(?:^|(?:&&|\|\||;|\n)\s*)\s*(?:rg|grep)(?=\s|$)/m.test(command);
+    if (searchTool || shellSearch)
+        return codeMatch;
+    const directShellRead = /(?:^|(?:&&|\|\||;|\n)\s*)\s*(?:cat|head|tail)(?=\s|$)/m.test(command) ||
+        /(?:^|(?:&&|\|\||;|\n)\s*)\s*sed\s+-n(?=\s|$)/m.test(command) ||
+        /(?:^|(?:&&|\|\||;|\n)\s*)\s*git\s+show\s+[^\s;&|]+:[^\s;&|]+(?=\s|$|[;&|])/m.test(command);
+    if (directShellRead)
+        return true;
+    return /(?:^|(?:&&|\|\||;|\n)\s*)\s*git\s+(?:diff|show)(?=\s|$)/m.test(command) &&
+        /^[+-](?![+-])\s*\S/m.test(output);
+}
 export function hasPostMutationReview(evidence, sourceReviewRequired = false) {
     const lastMutation = latestMutationSequence(evidence);
     if (lastMutation < 0)
@@ -117,30 +152,6 @@ export function hasPostMutationReview(evidence, sourceReviewRequired = false) {
         if (!sourceReviewRequired && ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)) {
             return true;
         }
-        if (record.kind !== "generic" || !record.output?.trim())
-            return false;
-        const tool = record.toolName.toLowerCase();
-        const command = record.command ?? "";
-        // Read/view tools commonly use names such as read_file and file.view.
-        // A file_search returning only paths is not, by itself, source inspection.
-        const directRead = /(?:^|[.:_-])(?:read|view)(?:$|[.:_-])/.test(tool);
-        if (directRead)
-            return true;
-        // Name-only searches, glob/find output and git diff --stat are not
-        // evidence of inspecting file contents. Require an actual source snippet.
-        const codeMatch = /^(?:(?:[A-Za-z]:)?[^\n:]+:)?\d+:(?!\d+:[ \t]*$)(?:\d+:)?\s*\S/m.test(record.output);
-        const searchTool = /(?:^|[.:_-])(?:grep|search)(?:$|[.:_-])/.test(tool);
-        // Recognize executed shell commands, not words inside echo arguments or
-        // a pipeline into cat/head that might return only filenames or statistics.
-        const shellSearch = /(?:^|(?:&&|\|\||;|\n)\s*)\s*(?:rg|grep)(?=\s|$)/m.test(command);
-        if (searchTool || shellSearch)
-            return codeMatch;
-        const directShellRead = /(?:^|(?:&&|\|\||;|\n)\s*)\s*(?:cat|head|tail)(?=\s|$)/m.test(command) ||
-            /(?:^|(?:&&|\|\||;|\n)\s*)\s*sed\s+-n(?=\s|$)/m.test(command) ||
-            /(?:^|(?:&&|\|\||;|\n)\s*)\s*git\s+show\s+[^\s;&|]+:[^\s;&|]+(?=\s|$|[;&|])/m.test(command);
-        if (directShellRead)
-            return true;
-        return /(?:^|(?:&&|\|\||;|\n)\s*)\s*git\s+(?:diff|show)(?=\s|$)/m.test(command) &&
-            /^[+-](?![+-])\s*\S/m.test(record.output);
+        return isSourceReviewEvidence(record);
     });
 }

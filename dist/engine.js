@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { noEvasionRule } from "./rules/no-evasion.js";
 import { noShortcutsRule } from "./rules/no-shortcuts.js";
 import { noStubsRule } from "./rules/no-stubs.js";
@@ -17,9 +18,20 @@ import { collectTurnEvidence } from "./evidence.js";
 import { SessionStateStore } from "./state.js";
 import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
-import { extractTaskContract, latestMutationSequence } from "./task-contract.js";
+import { extractTaskContract, latestMutationSequence, } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
+import { isTrustedGuardianMetadata } from "./provenance.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
+function findingIdentity(ruleId, finding) {
+    const semantic = finding.fingerprint
+        ? ["explicit", finding.filePath ?? "", finding.fingerprint]
+        : ["fallback", finding.filePath ?? "", finding.pattern ?? ""];
+    const digest = createHash("sha256")
+        .update(semantic.join("\u0000"))
+        .digest("hex")
+        .slice(0, 24);
+    return `${ruleId}:${digest}`;
+}
 function composeCombinedRemediationPrompt(blockingPrompts, handoff) {
     if (!handoff) {
         return `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`;
@@ -70,10 +82,13 @@ export const DEFAULT_CONFIG = {
 export class GuardianConfigError extends Error {
     configPath;
     constructor(configPath, cause) {
-        const detail = cause instanceof Error ? cause.message : String(cause);
-        super(`[opencode-guardian] Invalid configuration in ${configPath}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
+        const configName = path.basename(configPath);
+        const detail = cause instanceof Error
+            ? cause.message
+            : (cause ? String(cause) : "could not parse or validate configuration");
+        super(`[opencode-guardian] Invalid configuration in ${configName}: ${detail}. Fix or remove the file to prevent unintended security fallbacks.`);
         this.name = "GuardianConfigError";
-        this.configPath = configPath;
+        this.configPath = configName;
     }
 }
 function validateConfig(value) {
@@ -143,6 +158,85 @@ function validateConfig(value) {
     }
     return value;
 }
+export function resolveEffectiveConfig(base, rawOptions) {
+    const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
+        ? { ...rawOptions }
+        : {};
+    const legacySecrets = {};
+    if (typeof options.replacement === "string") {
+        legacySecrets.replacement = options.replacement;
+    }
+    if (Array.isArray(options.customSensitiveKeys)) {
+        legacySecrets.customSensitiveKeys = options.customSensitiveKeys;
+    }
+    if (Array.isArray(options.customSecretValues)) {
+        legacySecrets.customSecretValues = options.customSecretValues;
+    }
+    const overlay = {};
+    for (const key of [
+        "enabled",
+        "remediationBudget",
+        "iterationBudget",
+        "preflight",
+        "updateNotice",
+        "notifications",
+        "secrets",
+        "rules",
+    ]) {
+        if (options[key] !== undefined)
+            overlay[key] = options[key];
+    }
+    if (Object.keys(legacySecrets).length > 0) {
+        overlay.secrets = {
+            ...(overlay.secrets && typeof overlay.secrets === "object" && !Array.isArray(overlay.secrets)
+                ? overlay.secrets
+                : {}),
+            ...legacySecrets,
+        };
+    }
+    const validated = validateConfig(overlay);
+    const mergedRules = {
+        ...base.rules,
+    };
+    for (const [ruleID, next] of Object.entries(validated.rules ?? {})) {
+        const previous = mergedRules[ruleID];
+        if (next && typeof next === "object" && !Array.isArray(next)) {
+            const previousObject = typeof previous === "string"
+                ? { severity: previous }
+                : previous && typeof previous === "object" && !Array.isArray(previous)
+                    ? previous
+                    : {};
+            mergedRules[ruleID] = {
+                ...previousObject,
+                ...next,
+            };
+        }
+        else {
+            mergedRules[ruleID] = next;
+        }
+    }
+    return {
+        ...base,
+        ...validated,
+        preflight: {
+            ...base.preflight,
+            ...validated.preflight,
+        },
+        updateNotice: {
+            ...base.updateNotice,
+            ...validated.updateNotice,
+        },
+        notifications: {
+            ...base.notifications,
+            ...validated.notifications,
+        },
+        secrets: {
+            ...base.secrets,
+            ...validated.secrets,
+        },
+        rules: mergedRules,
+    };
+}
 export function loadConfig(directory) {
     const candidatePaths = [
         directory ? path.resolve(directory, "opencode-guardian.json") : null,
@@ -169,16 +263,29 @@ export function loadConfig(directory) {
     }
     return DEFAULT_CONFIG;
 }
-function isSyntheticUserMessage(message) {
+function isSyntheticUserMessage(message, sessionID) {
     return (message.info.role === "user" &&
-        Boolean(message.parts?.some((part) => part.synthetic === true)));
+        Boolean(message.parts?.some((part) => part.synthetic === true ||
+            part.ignored === true ||
+            (part.metadata &&
+                typeof part.metadata === "object" &&
+                (part.metadata["opencode-guardian-visible"] === true ||
+                    part.metadata["opencode-guardian-kind"] === "visible")) ||
+            isTrustedGuardianMetadata(sessionID, part.metadata, "visible"))));
 }
-function isGuardianRemediationMessage(message) {
+function isGuardianRemediationMessage(message, sessionID) {
     if (message.info.role !== "user")
         return false;
-    return Boolean(message.parts?.some((part) => part.type === "text" &&
-        typeof part.text === "string" &&
-        part.text.trimStart().startsWith(REMEDIATION_MARKER)));
+    return Boolean(message.parts?.some((part) => {
+        const marker = part.type === "text" &&
+            typeof part.text === "string" &&
+            part.text.trimStart().startsWith(REMEDIATION_MARKER);
+        if (!marker)
+            return false;
+        return (part.synthetic === true ||
+            Boolean(sessionID &&
+                isTrustedGuardianMetadata(sessionID, part.metadata, "remediation")));
+    }));
 }
 export const NATIVE_QUESTION_TOOLS = new Set([
     "ask_question",
@@ -195,13 +302,13 @@ function isNativeQuestionTool(toolRaw) {
     const baseName = name.includes(".") ? (name.split(".").pop() ?? name) : name;
     return NATIVE_QUESTION_TOOLS.has(name) || NATIVE_QUESTION_TOOLS.has(baseName);
 }
-export function extractCurrentTurn(messages) {
+export function extractCurrentTurn(messages, sessionID) {
     const lastUserMessage = messages.findLast((message) => message.info.role === "user" &&
-        (!isSyntheticUserMessage(message) || isGuardianRemediationMessage(message)));
-    const isRemediationResponse = Boolean(lastUserMessage && isGuardianRemediationMessage(lastUserMessage));
+        (!isSyntheticUserMessage(message, sessionID) || isGuardianRemediationMessage(message, sessionID)));
+    const isRemediationResponse = Boolean(lastUserMessage && isGuardianRemediationMessage(lastUserMessage, sessionID));
     const lastHumanUserIndex = messages.findLastIndex((m) => m.info.role === "user" &&
-        !isGuardianRemediationMessage(m) &&
-        !isSyntheticUserMessage(m));
+        !isGuardianRemediationMessage(m, sessionID) &&
+        !isSyntheticUserMessage(m, sessionID));
     const lastHumanUser = lastHumanUserIndex >= 0 ? messages[lastHumanUserIndex] : undefined;
     const currentTurn = lastHumanUserIndex < 0 ? messages : messages.slice(lastHumanUserIndex);
     // Agent names are identity hints, not session topology. Runtime adapters
@@ -289,7 +396,7 @@ export class GuardEngine {
         if (!messageID || this.inspectedMessages.get(sessionID) === messageID) {
             return { decision: "pass", results: [] };
         }
-        const { isSubagent: inferredSubagent, isRemediationResponse, currentTurn, turnKey, } = extractCurrentTurn(messages);
+        const { isSubagent: inferredSubagent, isRemediationResponse, currentTurn, turnKey, } = extractCurrentTurn(messages, sessionID);
         const isSubagent = options?.isSubagent ?? inferredSubagent;
         const firstCurrentMessage = currentTurn[0];
         if (!firstCurrentMessage) {
@@ -297,7 +404,7 @@ export class GuardEngine {
         }
         const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
         if (activeHandoff?.status === "question_presented") {
-            const hasUserReply = currentTurn.some((msg) => msg.info.role === "user" && !isGuardianRemediationMessage(msg));
+            const hasUserReply = currentTurn.some((msg) => msg.info.role === "user" && !isGuardianRemediationMessage(msg, sessionID));
             if (hasUserReply) {
                 this.sessionState.clearActiveHandoff(sessionID);
             }
@@ -322,7 +429,7 @@ export class GuardEngine {
         }
         const contract = extractTaskContract(currentTurn);
         const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
-        const lastGuardianIndex = currentTurn.findLastIndex(isGuardianRemediationMessage);
+        const lastGuardianIndex = currentTurn.findLastIndex((m) => isGuardianRemediationMessage(m, sessionID));
         const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
             ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
             : currentTurn;
@@ -336,6 +443,9 @@ export class GuardEngine {
             : [];
         const pendingFiles = isRemediationResponse
             ? this.sessionState.getPendingRemediationFiles(sessionID, turnKey)
+            : [];
+        const pendingFindingKeys = isRemediationResponse
+            ? this.sessionState.getPendingRemediationFindings(sessionID, turnKey)
             : [];
         const results = [];
         const blockingPrompts = [];
@@ -421,6 +531,7 @@ export class GuardEngine {
                 if (handoff) {
                     this.sessionState.setActiveHandoff(sessionID, {
                         handoffId: handoff.handoffId,
+                        turnKey,
                         kind: handoff.kind,
                         autoSelect: handoff.autoSelect,
                         status: "handed_off",
@@ -449,32 +560,15 @@ export class GuardEngine {
                     results,
                 };
             }
-            const fingerprint = blockingResults
-                .map((result) => {
-                const findingKey = result.findings
-                    .map((finding) => `${finding.pattern}:${finding.messageSnippet}`)
-                    .sort()
-                    .join("|");
-                return `${result.ruleId}:${findingKey}`;
-            })
-                .sort()
-                .join("||");
+            const findingFingerprints = Array.from(new Set(blockingResults.flatMap((result) => {
+                const keys = result.findings.map((finding) => findingIdentity(result.ruleId, finding));
+                return keys.length > 0 ? keys : [`${result.ruleId}:block`];
+            }))).sort();
             const blockingRuleIds = blockingResults.map((r) => r.ruleId);
-            const remediationMessagesCount = currentTurn.filter(isGuardianRemediationMessage).length;
-            const failedPendingRule = isRemediationResponse &&
-                blockingResults.some((result) => pendingRules.includes(result.ruleId));
             const maxTurnRemediations = contract?.iterativeReview
                 ? Math.max(5, this.config.iterationBudget ?? 3)
-                : Math.max(3, budget * 2);
-            const rulesExhausted = blockingRuleIds.length > 0 &&
-                blockingRuleIds.every((rule) => this.sessionState.getRuleRemediationCount(sessionID, turnKey, rule) >= budget ||
-                    (!contract?.iterativeReview &&
-                        isRemediationResponse &&
-                        remediationMessagesCount >= budget &&
-                        (pendingRules.length === 0 || pendingRules.includes(rule))));
-            if ((failedPendingRule && this.sessionState.hasExhaustedRule(sessionID, turnKey, pendingRules, budget)) ||
-                rulesExhausted ||
-                !this.sessionState.canRemediate(sessionID, turnKey, fingerprint, blockingRuleIds, budget, maxTurnRemediations)) {
+                : Math.max(8, Math.min(32, this.rules.size * Math.max(1, budget)));
+            if (!this.sessionState.canRemediate(sessionID, turnKey, findingFingerprints, blockingRuleIds, budget, maxTurnRemediations)) {
                 this.sessionState.clearPendingRemediation(sessionID);
                 return {
                     decision: "pass",
@@ -485,8 +579,10 @@ export class GuardEngine {
                         : {}),
                 };
             }
-            this.sessionState.recordRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
-            this.sessionState.setPendingRemediation(sessionID, turnKey, blockingRuleIds, [...(evidence.mutatedFiles ?? [])]);
+            this.sessionState.recordRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
+            const blockingFiles = Array.from(new Set(blockingResults.flatMap((result) => result.findings.flatMap((finding) => finding.filePath ? [finding.filePath] : []))));
+            const blockingFindingKeys = Array.from(new Set(blockingResults.flatMap((result) => result.findings.map((finding) => findingIdentity(result.ruleId, finding)))));
+            this.sessionState.setPendingRemediation(sessionID, turnKey, blockingRuleIds, blockingFiles, blockingFindingKeys);
             const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
             const handoff = !isSubagent
                 ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey, sequence)
@@ -494,6 +590,7 @@ export class GuardEngine {
             if (handoff) {
                 this.sessionState.setActiveHandoff(sessionID, {
                     handoffId: handoff.handoffId,
+                    turnKey,
                     kind: handoff.kind,
                     autoSelect: handoff.autoSelect,
                     status: "handed_off",
@@ -505,7 +602,7 @@ export class GuardEngine {
                 combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
                 rollback: () => {
                     this.inspectedMessages.delete(sessionID);
-                    this.sessionState.rollbackRemediation(sessionID, turnKey, fingerprint, blockingRuleIds);
+                    this.sessionState.rollbackRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
                     this.sessionState.clearPendingRemediation(sessionID);
                     if (handoff)
                         this.sessionState.clearActiveHandoff(sessionID);
@@ -519,7 +616,9 @@ export class GuardEngine {
             const fixedPaths = new Set(successfulFresh.filter((record) => record.kind === "file-mutation")
                 .map((record) => record.filePath).filter((file) => !!file));
             const hasProgress = successfulFresh.some((record) => ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind));
-            const originalFindingsRemain = results.some((result) => pendingRules.includes(result.ruleId) && result.findings.length > 0);
+            const pendingFindingSet = new Set(pendingFindingKeys);
+            const originalFindingsRemain = results.some((result) => pendingRules.includes(result.ruleId) &&
+                result.findings.some((finding) => pendingFindingSet.has(findingIdentity(result.ruleId, finding))));
             let verified = pendingRules.length > 0 && hasProgress && !originalFindingsRemain;
             if (verified && pendingRules.includes("security/no-secrets")) {
                 // Check actual files, not only the proposed tool input. No file on
@@ -602,7 +701,8 @@ export class GuardEngine {
                                 }],
                             isSubagent, ruleConfig: recheckRuleConfig, evidence: freshEvidence,
                         });
-                        if (checked.findings.length > 0) {
+                        const originalSourceFindingRemains = checked.findings.some((finding) => pendingFindingSet.has(findingIdentity(ruleID, finding)));
+                        if (originalSourceFindingRemains) {
                             verified = false;
                             break;
                         }

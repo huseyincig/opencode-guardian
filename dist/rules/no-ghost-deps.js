@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { builtinModules } from "node:module";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
 const NODE_BUILTINS = new Set(builtinModules
     .filter((name) => !name.startsWith("node:"))
     .map((name) => name.split("/")[0]));
@@ -981,12 +981,42 @@ function resolveTargetFile(input) {
         extractFilePathFromPatch(patch));
 }
 function targetDirectory(targetFile, sessionDirectory) {
-    if (!targetFile)
-        return sessionDirectory;
-    const absolute = path.isAbsolute(targetFile)
-        ? targetFile
-        : path.resolve(sessionDirectory, targetFile);
-    return path.dirname(absolute);
+    const root = path.resolve(sessionDirectory);
+    const target = targetFile ? path.resolve(root, targetFile) : root;
+    const scoped = path.relative(root, target);
+    if (scoped === ".." ||
+        scoped.startsWith(".." + path.sep) ||
+        path.isAbsolute(scoped)) {
+        return null;
+    }
+    let realRoot;
+    try {
+        realRoot = fs.realpathSync(root);
+    }
+    catch {
+        return null;
+    }
+    const directory = targetFile ? path.dirname(target) : target;
+    let probe = directory;
+    while (!fs.existsSync(probe)) {
+        const parent = path.dirname(probe);
+        if (parent === probe)
+            return null;
+        probe = parent;
+    }
+    try {
+        const realProbe = fs.realpathSync(probe);
+        const realRelative = path.relative(realRoot, realProbe);
+        if (realRelative === ".." ||
+            realRelative.startsWith(".." + path.sep) ||
+            path.isAbsolute(realRelative)) {
+            return null;
+        }
+    }
+    catch {
+        return null;
+    }
+    return directory;
 }
 function extensionOf(targetFile) {
     return targetFile ? path.extname(targetFile).toLowerCase() : "";
@@ -1018,6 +1048,8 @@ export const noGhostDepsRule = {
         const checkCode = (code, source, targetFile) => {
             const ext = extensionOf(targetFile);
             const dir = targetDirectory(targetFile, context.directory);
+            if (!dir)
+                return;
             if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"].includes(ext) || !ext) {
                 const declared = loadNodeDependencies(dir);
                 if (declared) {
@@ -1211,6 +1243,9 @@ export const noGhostDepsRule = {
                 }
                 if (typeof input.newString === "string") {
                     checkCode(input.newString, "file edit", targetFile);
+                }
+                for (const edit of extractStructuredEditTexts(input, targetFile)) {
+                    checkCode(edit.text, "structured file edit", edit.filePath);
                 }
                 const patchText = extractAddedLines(input.patchText ?? input.patch);
                 if (patchText)

@@ -100,15 +100,49 @@ export function createHandoffForBlockingResults(results, sessionID, turnKey, seq
         handoffId,
     };
 }
+let guardianRegistrationCount = 0;
+let previousGuardianCapability;
 /**
  * Register Guardian capability in the global OpenCode coordination registry.
+ * Returns an idempotent cleanup that restores the prior registration after the
+ * last Guardian instance unloads.
  */
 export function registerGuardianCapability() {
     const globalObj = globalThis;
     const root = (globalObj[COORDINATION_SYMBOL] ??= {});
+    if (guardianRegistrationCount === 0) {
+        previousGuardianCapability = root.guardian
+            ? { ...root.guardian }
+            : undefined;
+    }
+    guardianRegistrationCount += 1;
     root.guardian = {
         version: 1,
         supportsHandoff: true,
+    };
+    let disposed = false;
+    return () => {
+        if (disposed)
+            return;
+        disposed = true;
+        guardianRegistrationCount = Math.max(0, guardianRegistrationCount - 1);
+        if (guardianRegistrationCount > 0)
+            return;
+        const currentRoot = globalObj[COORDINATION_SYMBOL];
+        if (!currentRoot) {
+            previousGuardianCapability = undefined;
+            return;
+        }
+        if (previousGuardianCapability) {
+            currentRoot.guardian = previousGuardianCapability;
+        }
+        else {
+            delete currentRoot.guardian;
+        }
+        previousGuardianCapability = undefined;
+        if (!currentRoot.guardian && !currentRoot.smartQuestions) {
+            delete globalObj[COORDINATION_SYMBOL];
+        }
     };
 }
 /**

@@ -1,6 +1,6 @@
 # Security Benchmark & Synthetic Preflight Test Suite
 
-Documentation for OpenCode Guardian **v0.8.0**.
+Documentation for OpenCode Guardian **v0.9.0**.
 
 Guardian includes a curated suite of synthetic benchmark tests that evaluate preflight shell-risk detection logic without executing destructive commands or mutating files.
 

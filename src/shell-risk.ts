@@ -179,6 +179,38 @@ export function literalShellScripts(command: string): string[] {
   return scripts;
 }
 
+function unwrapLiteralWindowsScript(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed.at(-1);
+    if ((first === '"' || first === "'") && first === last) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+/** Literal scripts passed through Windows command interpreters. Encoded
+ * PowerShell payloads are intentionally not decoded and are treated opaque. */
+export function literalWindowsShellScripts(command: string): string[] {
+  const scripts: string[] = [];
+  for (const stage of splitShellStages(command).flat()) {
+    const cmd = /^\s*(?:cmd(?:\.exe)?)\s+\/[ck]\s+([\s\S]+)$/i.exec(stage);
+    if (cmd?.[1]) {
+      scripts.push(unwrapLiteralWindowsScript(cmd[1]));
+      continue;
+    }
+
+    const powershell =
+      /^\s*(?:powershell|pwsh)(?:\.exe)?\b[\s\S]*?\s-(?:command|c)\s+([\s\S]+)$/i.exec(stage);
+    if (powershell?.[1]) {
+      scripts.push(unwrapLiteralWindowsScript(powershell[1]));
+    }
+  }
+  return scripts;
+}
+
 /** Find's deletion actions do not require the rm binary to run directly. */
 export function hasFindDeletion(command: string): boolean {
   return splitShellStages(command).flat().some((stage) =>
@@ -191,6 +223,13 @@ export function hasFindDeletion(command: string): boolean {
  * signal only: it does not prove that the decoded payload is destructive.
  */
 export function isOpaqueShellExecution(command: string): boolean {
+  if (
+    splitShellStages(command).flat().some((stage) =>
+      /^\s*(?:powershell|pwsh)(?:\.exe)?\b[\s\S]*?\s-(?:encodedcommand|enc)\b/i.test(stage)
+    )
+  ) {
+    return true;
+  }
   return splitShellStages(command).some((stages) =>
     stages.some((stage, index) =>
       /^\s*(?:sudo\s+)?(?:env\s+)?(?:openssl\s+)?base64\s+(?:-[dD]\b|--decode\b)/i.test(stage) &&
@@ -209,7 +248,8 @@ export function hasDynamicCommandName(command: string, depth = 0): boolean {
       return true;
     }
   }
-  return depth < 4 && literalShellScripts(command).some(
-    (script) => hasDynamicCommandName(script, depth + 1)
-  );
+  return depth < 4 && [
+    ...literalShellScripts(command),
+    ...literalWindowsShellScripts(command),
+  ].some((script) => hasDynamicCommandName(script, depth + 1));
 }

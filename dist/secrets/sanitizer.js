@@ -42,7 +42,7 @@ function escapeRegExp(str) {
 /**
  * Sanitizes a single line if it resembles an environment variable assignment or key-value pair.
  */
-function sanitizeKeyValueLine(line, replacement, customKeys, findings = []) {
+function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findings = []) {
     // 1. Env assignment: [export ]KEY=VALUE
     const envMatch = line.match(/^(\s*(?:export\s+)?)([a-zA-Z0-9_.-]+)(\s*=\s*)(.*)$/);
     if (envMatch) {
@@ -50,7 +50,7 @@ function sanitizeKeyValueLine(line, replacement, customKeys, findings = []) {
         const key = envMatch[2] ?? '';
         const eq = envMatch[3] ?? '';
         const rawVal = envMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys)) {
+        if (isSensitiveKey(key, customKeys, safeKeyNames)) {
             findings.push({ kind: 'key-value', category: 'env-assignment', keyName: key });
             // Preserve quotes if present
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
@@ -68,7 +68,7 @@ function sanitizeKeyValueLine(line, replacement, customKeys, findings = []) {
         const key = yamlMatch[2] ?? '';
         const colon = yamlMatch[3] ?? '';
         const rawVal = yamlMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys)) {
+        if (isSensitiveKey(key, customKeys, safeKeyNames)) {
             findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: key });
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
                 (rawVal.startsWith("'") && rawVal.endsWith("'"))) {
@@ -135,7 +135,7 @@ export function sanitizeString(text, options = {}) {
         let lineModified = false;
         for (let i = 0; i < lines.length; i++) {
             const original = lines[i] ?? '';
-            const sanitized = sanitizeKeyValueLine(original, replacement, options.customSensitiveKeys, findings);
+            const sanitized = sanitizeKeyValueLine(original, replacement, options.customSensitiveKeys, options.safeKeyNames, findings);
             if (sanitized !== original) {
                 lines[i] = sanitized;
                 lineModified = true;
@@ -148,7 +148,7 @@ export function sanitizeString(text, options = {}) {
         // 3b. Inline key-value assignments (e.g. "token=xyz", "password: xyz", "password xyz", "--api-key=xyz")
         const inlineKvRegex = /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)["']?([^\s,;)"'>\n\r]+)["']?/gi;
         result = result.replace(inlineKvRegex, (match, lead, key, sep, val) => {
-            if (!isSensitiveKey(key, options.customSensitiveKeys)) {
+            if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
                 return match;
             }
             if (val === replacement || val === '[REDACTED:PRIVATE_KEY]') {
@@ -270,18 +270,13 @@ export function sanitizeObject(data, options = {}) {
             if (typeof val === 'object') {
                 const output = {};
                 for (const [k, v] of Object.entries(val)) {
-                    if (isSensitiveKey(k, options.customSensitiveKeys)) {
+                    if (isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)) {
                         redactedCount++;
                         findings.push({ kind: 'key-value', category: 'Object Property', keyName: k });
-                        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-                            output[k] = replacement;
-                        }
-                        else if (typeof v === 'object' && v !== null) {
-                            output[k] = recurse(v);
-                        }
-                        else {
-                            output[k] = replacement;
-                        }
+                        // A sensitive key defines the trust boundary for its complete value.
+                        // Do not recurse into nested objects/arrays and retain an arbitrary
+                        // secret under a non-sensitive child key.
+                        output[k] = replacement;
                     }
                     else {
                         output[k] = recurse(v);
@@ -337,30 +332,28 @@ export function sanitizeToolResult(result, options = {}) {
                     ...(resObj.metadata ? { metadata: sanitizeObject(resObj.metadata, options).sanitized } : {}),
                 };
             }
-            // 2. Process stdout/stderr shape: { stdout, stderr, ... }
+            // 2. Process stdout/stderr shape: { stdout, stderr, ... }.
+            // Sanitize the complete envelope so sibling metadata/raw fields cannot
+            // retain a secret after stdout/stderr themselves are redacted.
             if ('stdout' in resObj || 'stderr' in resObj) {
-                const output = { ...resObj };
-                if (typeof output.stdout === 'string') {
-                    output.stdout = sanitizeString(output.stdout, options).sanitized;
-                }
-                if (typeof output.stderr === 'string') {
-                    output.stderr = sanitizeString(output.stderr, options).sanitized;
-                }
-                return output;
+                return sanitizeObject(resObj, options).sanitized;
             }
-            // 3. MCP Content shape: { content: [{ type: "text", text: "..." }] }
+            // 3. MCP/OpenCode content shape: { content: [...], output?, metadata? }.
+            // Tool.Result officially allows output/content/metadata siblings. Never
+            // sanitize only content and then spread raw sibling fields back in.
             if (Array.isArray(resObj.content)) {
                 const sanitizedContent = resObj.content.map((item) => {
                     if (item && typeof item === 'object' && 'text' in item && typeof item.text === 'string') {
                         return {
-                            ...item,
+                            ...sanitizeObject(item, options).sanitized,
                             text: sanitizeString(item.text, options).sanitized,
                         };
                     }
                     return sanitizeObject(item, options).sanitized;
                 });
+                const sanitizedEnvelope = sanitizeObject(resObj, options).sanitized;
                 return {
-                    ...resObj,
+                    ...sanitizedEnvelope,
                     content: sanitizedContent,
                 };
             }

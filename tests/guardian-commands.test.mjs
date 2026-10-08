@@ -299,24 +299,26 @@ test("V1 command registration disposes with the verified TUI lifecycle", async (
   assert.equal(disposed, 1);
 });
 
-test("V2 setup owns global commands independent of sidebar rendering", (t) => {
+test("V2 setup owns global commands independent of sidebar and conversation rendering", (t) => {
   const dir = isolated(t);
   const steps = [];
+  const slots = [];
   let factory;
   let released = 0;
   const cleanup = GuardianTui.setup({
     location: { directory: dir },
     keymap: { layer(create) { steps.push("keymap"); factory = create; } },
     ui: { slot(input) {
-      steps.push("sidebar");
-      assert.equal(input.append, "sidebar.content");
+      steps.push("slot");
+      slots.push(input.append);
       return () => { released++; };
     } },
   });
-  assert.deepEqual(steps, ["keymap", "sidebar"]);
+  assert.equal(steps[0], "keymap");
+  assert.deepEqual(slots.sort(), ["session.composer.top", "sidebar.content"]);
   assert.equal(factory().mode, "global");
   assert.equal(factory().commands.filter((c) => c.palette === true).length, 7);
   assert.equal(typeof cleanup, "function");
   cleanup();
-  assert.equal(released, 1);
+  assert.equal(released, 2);
 });

@@ -1,12 +1,18 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
 import { sanitizeProseForInspection } from "../prose.js";
-import { extractLikelyShellMutation } from "../tool-input.js";
+import {
+  extractLikelyShellMutation,
+  extractStructuredEditTexts,
+  extractToolCommand,
+} from "../tool-input.js";
 import { extractGitCommitMessage } from "../preflight.js";
+import { extractFilePathFromPatch } from "./no-secrets.js";
 import {
   isAuthorizedStubOrPlaceholder,
   isCodePlaceholderRequested,
   isPlaceholderProhibited,
 } from "../locale-intents.js";
+import { currentHumanMessage } from "../task-contract.js";
 
 export const DEFAULT_HEDGING_PATTERNS = [
   // Deferred work
@@ -211,21 +217,18 @@ export function explicitlyAuthorizedStubOrPlaceholder(text?: string): boolean {
 
 function extractUserInstruction(context: TurnInspectionContext): string {
   const messages = context.messages?.length ? context.messages : context.currentTurn;
-  const human = messages?.findLast(
-    (m) =>
-      m.info.role === "user" &&
-      !m.parts?.some((p) => p.synthetic === true) &&
-      !m.parts?.some(
-        (p) =>
-          typeof p.text === "string" &&
-          p.text.trimStart().startsWith("[opencode-guardian remediation]")
-      )
-  );
+  const human = currentHumanMessage(messages ?? []);
   if (!human) return "";
   return human.parts
-    ?.filter((p) => p.type === "text" && typeof p.text === "string")
-    .map((p) => p.text ?? "")
-    .join("\n") ?? "";
+    .filter(
+      (part) =>
+        part.type === "text" &&
+        typeof part.text === "string" &&
+        part.synthetic !== true &&
+        part.ignored !== true
+    )
+    .map((part) => part.text ?? "")
+    .join("\n");
 }
 
 export const noShortcutsRule: GuardRule = {
@@ -300,6 +303,10 @@ export const noShortcutsRule: GuardRule = {
           ) {
             seen.add(lowerPattern);
             const snippet = extractSnippet(text, idx, pattern.length);
+            const lineStart = text.lastIndexOf("\n", idx) + 1;
+            const lineEndRaw = text.indexOf("\n", idx);
+            const lineEnd = lineEndRaw < 0 ? text.length : lineEndRaw;
+            const matchedLine = text.slice(lineStart, lineEnd).trim();
             const shouldBlock =
               customPhraseSet.has(lowerPattern) ||
               HIGH_CONFIDENCE_HEDGING_PATTERNS.has(lowerPattern);
@@ -309,6 +316,10 @@ export const noShortcutsRule: GuardRule = {
               messageSnippet: snippet,
               description: `Shortcut/hedging detected in ${source}: "${pattern}" → "${snippet}"`,
               confidence: shouldBlock ? "high" : "medium",
+              ...(targetFile ? {
+                filePath: targetFile,
+                fingerprint: `${targetFile}:${lowerPattern}:${matchedLine}`,
+              } : {}),
             };
             findings.push(finding);
             if (shouldBlock) blocking.push(finding);
@@ -335,6 +346,10 @@ export const noShortcutsRule: GuardRule = {
               messageSnippet: snippet,
               description: `Code marker detected in ${source}: "${marker}" → "${snippet}"`,
               confidence: "high",
+              ...(targetFile ? {
+                filePath: targetFile,
+                fingerprint: `${targetFile}:${marker}:${match[0].trim()}`,
+              } : {}),
             };
             findings.push(finding);
             if (!isAuthorizedMarker(marker, targetFile)) blocking.push(finding);
@@ -353,12 +368,19 @@ export const noShortcutsRule: GuardRule = {
 
         if (part.type === "tool" && part.state?.input) {
           const input = part.state.input;
+          const patchRaw = input.patchText ?? input.patch;
+          const targetFile =
+            (input.path as string) ??
+            (input.targetFile as string) ??
+            (input.filePath as string) ??
+            (input.file as string) ??
+            extractFilePathFromPatch(patchRaw);
           if (typeof input.content === "string") {
             checkText(
               extractCodeComments(input.content),
               "file write comments",
               true,
-              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
+              targetFile
             );
           }
           if (typeof input.new_string === "string") {
@@ -366,7 +388,7 @@ export const noShortcutsRule: GuardRule = {
               extractCodeComments(input.new_string),
               "file edit comments",
               true,
-              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
+              targetFile
             );
           }
           if (typeof input.newString === "string") {
@@ -374,16 +396,24 @@ export const noShortcutsRule: GuardRule = {
               extractCodeComments(input.newString),
               "file edit comments",
               true,
-              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
+              targetFile
             );
           }
-          const patchText = extractAddedPatchLines(input.patchText ?? input.patch);
+          for (const edit of extractStructuredEditTexts(input, targetFile)) {
+            checkText(
+              extractCodeComments(edit.text),
+              "structured file edit comments",
+              true,
+              edit.filePath
+            );
+          }
+          const patchText = extractAddedPatchLines(patchRaw);
           if (patchText) {
             checkText(
               extractCodeComments(patchText),
               "patch added comments",
               true,
-              typeof input.path === "string" ? input.path : typeof input.filePath === "string" ? input.filePath : undefined
+              targetFile
             );
           }
           const shellMutation = extractLikelyShellMutation(input);
@@ -394,7 +424,7 @@ export const noShortcutsRule: GuardRule = {
               true
             );
           }
-          const cmd = typeof input.command === "string" ? input.command : typeof input.cmd === "string" ? input.cmd : "";
+          const cmd = extractToolCommand(input);
           if (cmd) {
             const msg = extractGitCommitMessage(cmd);
             if (

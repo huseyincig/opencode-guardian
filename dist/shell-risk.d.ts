@@ -15,6 +15,9 @@ export declare function activeCommandSubstitutions(command: string): string[];
 export declare function activeBacktickSubstitutions(command: string): string[];
 /** Literal script passed to a shell; dynamic scripts are not decoded here. */
 export declare function literalShellScripts(command: string): string[];
+/** Literal scripts passed through Windows command interpreters. Encoded
+ * PowerShell payloads are intentionally not decoded and are treated opaque. */
+export declare function literalWindowsShellScripts(command: string): string[];
 /** Find's deletion actions do not require the rm binary to run directly. */
 export declare function hasFindDeletion(command: string): boolean;
 /**

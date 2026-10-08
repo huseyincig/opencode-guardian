@@ -286,7 +286,9 @@ test("V2 TUI setup: registers listener with context.ui.toast.show and disposes c
   assert.equal(typeof cleanup, "function");
 
   // Dispatch a toast via notifier
-  const notifier = createGuardianToastNotifier();
+  const notifier = createGuardianToastNotifier({
+    directory: process.cwd(),
+  });
   notifier.notify({
     kind: "warning",
     ruleIds: ["integrity/no-unverified-claims"],
@@ -485,3 +487,64 @@ test("V2 server integration: strict preflight block triggers error toast via in-
   assert.match(toasts[0].message, /\[destructive-command\] Execution of "bash" was blocked for safety\./);
 });
 
+
+
+test("toast listeners are isolated by project directory", () => {
+  clearToastListeners();
+  const projectA = [];
+  const projectB = [];
+  const offA = registerToastListener(
+    (toast) => projectA.push(toast),
+    { directory: "/workspace/project-a" }
+  );
+  const offB = registerToastListener(
+    (toast) => projectB.push(toast),
+    { directory: "/workspace/project-b" }
+  );
+
+  dispatchGuardianToast(
+    {
+      title: "Guardian — Warning",
+      message: "Advisory finding: integrity/no-unverified-claims.",
+      variant: "warning",
+      duration: 4000,
+    },
+    { directory: "/workspace/project-a" }
+  );
+
+  assert.equal(projectA.length, 1);
+  assert.equal(projectB.length, 0);
+  offA();
+  offB();
+  clearToastListeners();
+});
+
+test("toast dedupe is session-scoped so identical findings in two sessions are both visible", () => {
+  clearToastListeners();
+  const received = [];
+  const off = registerToastListener(
+    (toast, scope) => received.push({ toast, scope }),
+    { directory: "/workspace/project" }
+  );
+  const payload = {
+    title: "Guardian — Remediation",
+    message: "Blocked: task/completion-gate\nAgent was asked to correct the issue.",
+    variant: "error",
+    duration: 5000,
+  };
+
+  dispatchGuardianToast(payload, {
+    directory: "/workspace/project",
+    sessionID: "session-a",
+  });
+  dispatchGuardianToast(payload, {
+    directory: "/workspace/project",
+    sessionID: "session-b",
+  });
+
+  assert.equal(received.length, 2);
+  assert.equal(received[0].scope.sessionID, "session-a");
+  assert.equal(received[1].scope.sessionID, "session-b");
+  off();
+  clearToastListeners();
+});

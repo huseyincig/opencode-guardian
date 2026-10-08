@@ -1,4 +1,4 @@
-import type { SessionMessage, TurnEvidence } from "./types.js";
+import type { EvidenceRecord, SessionMessage, TurnEvidence } from "./types.js";
 export { isExploratoryPrompt } from "./locale-intents.js";
 /** Explicit user requirements only. No LLM classification or inferred goals. */
 export interface TaskContract {
@@ -23,4 +23,5 @@ export declare function parseExplicitTaskDirective(text: string): ExplicitTaskDi
 export declare function extractTaskContract(messages: readonly SessionMessage[]): TaskContract | undefined;
 export declare function taskGuidance(contract: TaskContract): string | undefined;
 export declare function latestMutationSequence(evidence: TurnEvidence): number;
+export declare function isSourceReviewEvidence(record: EvidenceRecord): boolean;
 export declare function hasPostMutationReview(evidence: TurnEvidence, sourceReviewRequired?: boolean): boolean;

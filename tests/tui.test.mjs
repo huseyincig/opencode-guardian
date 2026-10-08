@@ -4,17 +4,33 @@ import TuiPlugin, { registerGuardianV1Commands,
   registerGuardianV2Commands } from "../dist/tui.js";
 import RootTui, { default as LocalPathTui } from "../tui.js";
 
-test("V2 TUI registers an additive sidebar slot and returns its disposer", () => {
-  let claim;
-  const stop = () => {};
+test("V2 TUI registers additive sidebar and main-conversation intervention slots", () => {
+  const claims = [];
+  let disposed = 0;
   const cleanup = TuiPlugin.setup({
-    ui: { slot(input) { claim = input; return stop; } },
+    ui: {
+      slot(input) {
+        claims.push(input);
+        return () => { disposed++; };
+      },
+    },
   });
   assert.equal(TuiPlugin.id, "opencode-guardian.tui");
-  assert.equal(claim.append, "sidebar.content");
-  assert.equal(claim.replace, undefined);
-  assert.equal(typeof claim.render, "function");
-  assert.equal(cleanup, stop);
+
+  const sidebar = claims.find((claim) => claim.append === "sidebar.content");
+  const conversation = claims.find((claim) => claim.append === "session.composer.top");
+
+  assert.ok(sidebar, "Guardian sidebar slot must remain registered");
+  assert.equal(sidebar.replace, undefined);
+  assert.equal(typeof sidebar.render, "function");
+
+  assert.ok(conversation, "Guardian intervention must render in the main conversation column");
+  assert.equal(conversation.replace, undefined);
+  assert.equal(typeof conversation.render, "function");
+
+  assert.equal(typeof cleanup, "function");
+  cleanup();
+  assert.equal(disposed, 2);
 });
 
 test("adaptive TUI exports every function advertised by its type declarations", () => {
@@ -56,12 +72,15 @@ test("V1 and V2 sidebar registration APIs coexist in the same package entrypoint
     v1 = typeof input.slots.sidebar_content === "function";
     return "guardian-v1-slot";
   } } });
+  let v2Conversation = false;
   const dispose = TuiPlugin.setup({ ui: { slot(input) {
-    v2 = input.append === "sidebar.content";
+    v2 ||= input.append === "sidebar.content";
+    v2Conversation ||= input.append === "session.composer.top";
     return () => {};
   } } });
   assert.equal(v1, true);
   assert.equal(v2, true);
+  assert.equal(v2Conversation, true);
   assert.equal(typeof dispose, "function");
 });
 

@@ -108,26 +108,34 @@ function failedAssistant(completed = false) {
 
 test("V1 rejected promptAsync response rolls back remediation and a later idle retries", async (t) => {
   const directory = tempProject(t);
-  let attempts = 0;
+  let syntheticAttempts = 0;
+  let visibleCalls = 0;
   const hooks = await Guardian.server({ directory, client: { session: {
     async get({ path: requestPath }) {
       return { data: { id: requestPath.id, parentID: undefined } };
     },
     async messages() { return { data: failedAssistant() }; },
-    async promptAsync() {
-      attempts++;
-      return attempts === 1
-        ? { data: undefined, error: { message: "simulated host rejection" } }
-        : { data: {}, error: undefined };
+    async promptAsync(input) {
+      const part = input.body?.parts?.[0];
+      if (part?.synthetic === true) {
+        syntheticAttempts++;
+        return syntheticAttempts === 1
+          ? { data: undefined, error: { message: "simulated host rejection" } }
+          : { data: {}, error: undefined };
+      }
+      visibleCalls++;
+      return { data: {}, error: undefined };
     },
   } } });
   t.after(async () => hooks.dispose?.());
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "retry" } } });
-  assert.equal(attempts, 1);
+  assert.equal(syntheticAttempts, 1);
+  assert.equal(visibleCalls, 0);
   assert.equal(readGuardianStatus(directory).remediations, 0);
   assert.equal(readGuardianStatus(directory).errors, 1);
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "retry" } } });
-  assert.equal(attempts, 2);
+  assert.equal(syntheticAttempts, 2);
+  assert.equal(visibleCalls, 1);
   assert.equal(readGuardianStatus(directory).remediations, 1);
 });
 

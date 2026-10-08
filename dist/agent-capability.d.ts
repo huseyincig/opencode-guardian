@@ -2,8 +2,8 @@ import type { SessionMessage } from "./types.js";
 export type AgentMutationCapability = "read-only" | "write-allowed" | "write-requires-approval" | "unknown";
 export interface AgentMutationEvidence {
     agentName?: string | undefined;
-    edit?: ("allow" | "deny" | "ask" | "disabled" | "unset") | undefined;
-    bash?: ("allow" | "deny" | "ask" | "disabled" | "unset") | undefined;
+    edit?: ("allow" | "deny" | "ask" | "restricted" | "disabled" | "unset") | undefined;
+    bash?: ("allow" | "deny" | "ask" | "restricted" | "disabled" | "unset") | undefined;
     mutatingTools?: string[] | undefined;
     unknownTools?: string[] | undefined;
     reasons: string[];
@@ -14,6 +14,13 @@ export interface AgentMutationProfile {
 }
 export declare const KNOWN_READ_ONLY_TOOLS: Set<string>;
 export declare function isKnownReadOnlyTool(toolName: string): boolean;
+export interface V2PermissionRule {
+    permission?: string | undefined;
+    action?: string | undefined;
+    pattern?: string | undefined;
+    resource?: string | undefined;
+    effect?: string | undefined;
+}
 export interface NormalizedAgentInput {
     name?: string | undefined;
     tools?: Record<string, boolean> | undefined;
@@ -24,13 +31,7 @@ export interface NormalizedAgentInput {
         bash?: string | Record<string, string> | undefined;
         [key: string]: unknown;
     } | undefined;
-    v2Permissions?: Array<{
-        permission?: string | undefined;
-        action?: string | undefined;
-        pattern?: string | undefined;
-        resource?: string | undefined;
-        effect?: string | undefined;
-    }> | undefined;
+    v2Permissions?: V2PermissionRule[] | undefined;
 }
 /**
  * Pure policy evaluation to classify mutation capability.
@@ -43,6 +44,8 @@ export declare function isWriteCapableAgent(context: {
 }): boolean;
 export declare function getCachedAgentCapability(sessionID: string): AgentMutationProfile | undefined;
 export declare function cacheAgentCapability(sessionID: string, profile: AgentMutationProfile): void;
+export declare function cacheV2SessionPermissions(sessionID: string, permissions: readonly V2PermissionRule[]): void;
+export declare function getCachedV2SessionPermissions(sessionID: string): readonly V2PermissionRule[] | undefined;
 export declare function clearAgentCapability(sessionID: string): void;
 export declare function clearAllAgentCapabilities(): void;
 /**
@@ -63,5 +66,5 @@ export declare function resolveV2AgentCapability(context: {
     session?: {
         get?: (...args: any[]) => Promise<any>;
     } | undefined;
-}, sessionID: string, agentName?: string | undefined, messageTools?: Record<string, boolean> | undefined): Promise<AgentMutationProfile>;
+}, sessionID: string, agentName?: string | undefined, messageTools?: Record<string, boolean> | undefined, directory?: string | undefined): Promise<AgentMutationProfile>;
 export declare function extractAgentNameFromMessages(messages: readonly SessionMessage[]): string | undefined;

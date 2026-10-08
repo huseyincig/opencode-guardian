@@ -17,7 +17,17 @@ export const instructionFidelityRule = {
             .map((part) => part.text ?? "")
             .join("\n") ?? "";
         const prose = sanitizeProseForInspection(assistant);
-        const observableWork = context.evidence?.records.some((record) => record.status === "success") ?? false;
+        const observableWork = context.evidence?.records.some((record) => record.status === "success" &&
+            [
+                "file-mutation",
+                "install",
+                "test",
+                "build",
+                "typecheck",
+                "lint",
+                "audit",
+                "git-push",
+            ].includes(record.kind)) ?? false;
         const signals = detectInstructionFidelitySignals(instruction, prose, observableWork);
         if (!signals.hasViolation) {
             return { ruleId: this.id, decision: "pass", findings: [] };

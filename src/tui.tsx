@@ -5,9 +5,18 @@ import { createSignal, onCleanup, Show } from "solid-js";
 import { readFileSync } from "node:fs";
 import type { RGBA } from "@opentui/core";
 import { readGuardianStatus } from "./telemetry.js";
-import { loadConfig } from "./engine.js";
+import { loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
-import { registerToastListener } from "./toast.js";
+import {
+  registerToastClearListener,
+  registerToastListener,
+  type GuardianToastPayload,
+} from "./toast.js";
+import {
+  GUARDIAN_INTERVENTION_RPC_DEFINITION,
+  GUARDIAN_INTERVENTION_RPC_METHOD,
+  parseGuardianInterventionSnapshot,
+} from "./intervention-rpc.js";
 import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport,
   type GuardianCommand, type GuardianReport } from "./commands.js";
 
@@ -40,10 +49,55 @@ function StatRow(props: {
   );
 }
 
+function GuardianConversationIntervention(props: {
+  payload: GuardianToastPayload | undefined;
+  colors: SidebarColors;
+}) {
+  const accent = () =>
+    props.payload?.variant === "warning"
+      ? props.colors.warning ?? props.colors.accent
+      : props.colors.error ?? props.colors.accent;
+  const label = () => {
+    if (props.payload?.variant === "warning") return "GUARDIAN · WARNING";
+    if (props.payload?.title.includes("Blocked")) return "GUARDIAN · BLOCKED";
+    return "GUARDIAN · ERROR";
+  };
+
+  return (
+    <Show when={props.payload}>
+      <box
+        width="100%"
+        flexDirection="column"
+        border={["left"]}
+        borderColor={accent()}
+        paddingLeft={1}
+        marginBottom={1}
+      >
+        <text fg={accent()}><b>{label()}</b></text>
+        <text fg={props.colors.text}>{props.payload?.message ?? ""}</text>
+      </box>
+    </Show>
+  );
+}
+
 type GuardianV2Context = Parameters<Plugin.Definition["setup"]>[0];
 
+function v2SessionDirectory(
+  context: GuardianV2Context,
+  sessionID: string,
+  fallback: string
+): string {
+  return context.data.session.get(sessionID)?.location?.directory ??
+    context.data.location.default()?.directory ??
+    fallback;
+}
+
 function v2CommandDirectory(context: GuardianV2Context, fallback: string): string {
-  return context.data?.location?.default?.()?.directory ?? fallback;
+  const route = context.ui.router.current();
+  if (route.type === "session") {
+    return v2SessionDirectory(context, route.sessionID, fallback);
+  }
+  return context.data.location.default()?.directory ?? fallback;
 }
 
 async function v2PerformCommand(
@@ -152,9 +206,11 @@ function GuardianSidebar(props: {
   const [open, setOpen] = createSignal(false);
   const [status, setStatus] = createSignal(readGuardianStatus(currentDirectory()));
   const timer = setInterval(() => setStatus(readGuardianStatus(currentDirectory())), 2500);
+  const updateController = new AbortController();
   let disposed = false;
   onCleanup(() => {
     clearInterval(timer);
+    updateController.abort();
     disposed = true;
   });
 
@@ -162,7 +218,10 @@ function GuardianSidebar(props: {
   const [latestVersion, setLatestVersion] = createSignal<string | undefined>(undefined);
 
   if (props.checkUpdates !== false) {
-    checkGuardianUpdate({ allowDevelopment: true })
+    checkGuardianUpdate({
+      allowDevelopment: true,
+      signal: updateController.signal,
+    })
       .then((info) => {
         if (!disposed && info) {
           setHasUpdate(true);
@@ -335,57 +394,196 @@ const v2Plugin: Plugin.Definition = {
   id: "opencode-guardian.tui",
   setup(context) {
     const directory = context.location?.directory ?? process.cwd();
-    const config = loadConfig(directory);
+    const config = resolveEffectiveConfig(loadConfig(directory), context.options);
     if (config.enabled === false) return;
+    const updateNoticeController = new AbortController();
     // The pinned V2 host owns setup-created layers and removes them on unload.
     registerGuardianV2Commands(context, () => v2CommandDirectory(context, directory));
     if (config.updateNotice?.enabled !== false && typeof context.ui.toast?.show === "function") {
       void announceGuardianUpdate((current, latest) => context.ui.toast.show({
         title: "OpenCode Guardian — New version", message: `v${current} → v${latest} (update manually)`, variant: "info", duration: 5000,
-      }));
+      }), { signal: updateNoticeController.signal });
     }
-    let unregisterToast: (() => void) | undefined;
-    if (config.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
-      unregisterToast = registerToastListener((toast) => {
+    const colors = (): SidebarColors => ({
+      accent: context.theme.status?.success?.base ?? context.theme.text.base,
+      onAccent: context.theme.text.action.primary.base,
+      text: context.theme.text.base,
+      muted: context.theme.text.muted,
+      success: context.theme.status?.success?.base,
+      warning: context.theme.status?.warning?.base,
+      error: context.theme.status?.error?.base,
+    });
+
+    const [interventions, setInterventions] = createSignal<Record<string, GuardianToastPayload>>({});
+    const rpcInFlight = new Set<string>();
+    let rpcGeneration = 0;
+    let disposed = false;
+
+    const storeIntervention = (
+      sessionID: string,
+      payload: GuardianToastPayload | undefined
+    ): void => {
+      setInterventions((current) => {
+        const next = { ...current };
+        if (payload) next[sessionID] = payload;
+        else delete next[sessionID];
+
+        while (Object.keys(next).length > 32) {
+          const oldest = Object.keys(next)[0];
+          if (!oldest) break;
+          delete next[oldest];
+        }
+        return next;
+      });
+    };
+
+    const interventionRpc =
+      typeof context.client?.rpc === "function"
+        ? context.client.rpc(GUARDIAN_INTERVENTION_RPC_DEFINITION)
+        : undefined;
+
+    const refreshIntervention = async (sessionID: string): Promise<void> => {
+      if (!interventionRpc || disposed || rpcInFlight.has(sessionID)) return;
+      rpcInFlight.add(sessionID);
+      const generation = rpcGeneration;
+      const sessionLocation =
+        context.data.session.get(sessionID)?.location ?? context.location;
+      const requestedDirectory = sessionLocation?.directory;
+      try {
+        const raw = await interventionRpc[GUARDIAN_INTERVENTION_RPC_METHOD](
+          { sessionID },
+          sessionLocation ? { location: sessionLocation } : undefined
+        );
+        if (disposed || generation !== rpcGeneration) return;
+        const currentDirectory =
+          context.data.session.get(sessionID)?.location?.directory ??
+          context.location?.directory;
+        if (currentDirectory !== requestedDirectory) return;
+        const snapshot = parseGuardianInterventionSnapshot(raw);
+        if (!snapshot) return;
+        storeIntervention(
+          sessionID,
+          snapshot.active
+            ? {
+                title: snapshot.title,
+                message: snapshot.message,
+                variant: snapshot.variant,
+                duration: snapshot.duration,
+              }
+            : undefined
+        );
+      } catch {
+        // Same-process toast bridge remains available when RPC is unavailable.
+      } finally {
+        rpcInFlight.delete(sessionID);
+      }
+    };
+
+    let rpcPoll: ReturnType<typeof setInterval> | undefined;
+    if (interventionRpc) {
+      const refreshCurrentSession = () => {
+        const route = context.ui.router.current();
+        if (route.type === "session") {
+          void refreshIntervention(route.sessionID);
+        }
+      };
+      refreshCurrentSession();
+      rpcPoll = setInterval(refreshCurrentSession, 500);
+    }
+
+    const ownsInterventionScope = (scope: {
+      directory?: string | undefined;
+      sessionID?: string | undefined;
+    }): boolean => {
+      if (!scope.sessionID) {
+        return scope.directory === undefined || scope.directory === directory;
+      }
+      const session = context.data.session.get(scope.sessionID);
+      if (!session) return false;
+      const sessionDirectory = session.location?.directory ?? directory;
+      return scope.directory === undefined || scope.directory === sessionDirectory;
+    };
+
+    const unregisterToast = registerToastListener((toast, scope) => {
+      if (!ownsInterventionScope(scope)) return;
+      if (scope.sessionID) {
+        storeIntervention(scope.sessionID, toast);
+      }
+      const toastDirectory =
+        scope.sessionID
+          ? v2SessionDirectory(context, scope.sessionID, directory)
+          : scope.directory ?? directory;
+      const toastConfig = resolveEffectiveConfig(
+        loadConfig(toastDirectory),
+        context.options
+      );
+      if (
+        toastConfig.notifications?.enabled !== false &&
+        typeof context.ui.toast?.show === "function"
+      ) {
         try {
           context.ui.toast.show({
             title: toast.title,
             message: toast.message,
             variant: toast.variant,
             duration: toast.duration,
+            ...(scope.sessionID ? { sessionID: scope.sessionID } : {}),
           });
         } catch {}
-      });
-    }
-    // Append: never override Magic Context, AFT, or built-in sidebar sections.
-    const slotDisposer = context.ui.slot({
-      append: "sidebar.content",
-      render: () => <GuardianSidebar directory={directory}
-        currentDirectory={() => v2CommandDirectory(context, directory)}
-        checkUpdates={config.updateNotice?.enabled !== false} colors={{
-        accent: context.theme.status?.success?.base ?? context.theme.text.base,
-        onAccent: context.theme.text.action.primary.base,
-        text: context.theme.text.base,
-        muted: context.theme.text.muted,
-        success: context.theme.status?.success?.base,
-        warning: context.theme.status?.warning?.base,
-        error: context.theme.status?.error?.base,
-      }} />,
+      }
     });
-    if (unregisterToast) {
-      return () => {
-        try { unregisterToast?.(); } catch {}
-        try { slotDisposer?.(); } catch {}
-      };
-    }
-    return slotDisposer;
+    const unregisterToastClear = registerToastClearListener((scope) => {
+      if (!ownsInterventionScope(scope)) return;
+      if (scope.sessionID) {
+        storeIntervention(scope.sessionID, undefined);
+      }
+    });
+
+    // Main conversation column: visible Guardian interventions belong next to
+    // the active chat, not only in the sidebar/toast layer.
+    const conversationSlotDisposer = context.ui.slot({
+      append: "session.composer.top",
+      render: ({ sessionID }) => (
+        <GuardianConversationIntervention
+          payload={interventions()[sessionID]}
+          colors={colors()}
+        />
+      ),
+    });
+
+    // Append: never override Magic Context, AFT, or built-in sidebar sections.
+    const sidebarSlotDisposer = context.ui.slot({
+      append: "sidebar.content",
+      render: ({ sessionID }) => {
+        const sessionDirectory = () =>
+          v2SessionDirectory(context, sessionID, directory);
+        const sessionConfig = () =>
+          resolveEffectiveConfig(loadConfig(sessionDirectory()), context.options);
+        return <GuardianSidebar directory={directory}
+          currentDirectory={sessionDirectory}
+          checkUpdates={sessionConfig().updateNotice?.enabled !== false}
+          colors={colors()} />;
+      },
+    });
+
+    return () => {
+      disposed = true;
+      rpcGeneration += 1;
+      rpcInFlight.clear();
+      updateNoticeController.abort();
+      if (rpcPoll) clearInterval(rpcPoll);
+      try { unregisterToast?.(); } catch {}
+      try { unregisterToastClear?.(); } catch {}
+      try { conversationSlotDisposer?.(); } catch {}
+      try { sidebarSlotDisposer?.(); } catch {}
+    };
   },
 };
 
 /** Use V1's actual SDK contract; V1 slot IDs are host-managed, not disposers. */
-const v1Tui: TuiPlugin = async (api: TuiPluginApi) => {
+const v1Tui: TuiPlugin = async (api: TuiPluginApi, pluginOptions) => {
   const directory = api.state.path.directory;
-  const config = loadConfig(directory);
+  const config = resolveEffectiveConfig(loadConfig(directory), pluginOptions);
   if (config.enabled === false) return;
   registerGuardianV1Commands(api);
   if (config.notifications?.enabled !== false && typeof api.ui?.toast === "function") {
@@ -398,7 +596,7 @@ const v1Tui: TuiPlugin = async (api: TuiPluginApi) => {
           duration: toast.duration,
         });
       } catch {}
-    });
+    }, { directory });
     api.lifecycle?.onDispose?.(unregisterToast);
   }
   api.slots.register({

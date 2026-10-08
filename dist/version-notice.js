@@ -87,6 +87,8 @@ function writeCache(cachePath, latest, now) {
 }
 /** Network and filesystem failures are intentionally silent and never trigger an install. */
 export async function checkGuardianUpdate(options = {}) {
+    if (options.signal?.aborted)
+        return undefined;
     if (!options.allowDevelopment &&
         (process.env.NODE_TEST_CONTEXT || !fileURLToPath(import.meta.url).includes("node_modules")))
         return undefined;
@@ -98,9 +100,13 @@ export async function checkGuardianUpdate(options = {}) {
     let latest = readCache(cachePath, now);
     if (!latest) {
         try {
+            const timeoutSignal = AbortSignal.timeout(3000);
+            const signal = options.signal
+                ? AbortSignal.any([options.signal, timeoutSignal])
+                : timeoutSignal;
             const response = await (options.fetcher ?? fetch)(REGISTRY, {
                 headers: { accept: "application/json" },
-                signal: AbortSignal.timeout(3000),
+                signal,
             });
             if (!response.ok)
                 return undefined;
@@ -115,14 +121,17 @@ export async function checkGuardianUpdate(options = {}) {
             return undefined;
         }
     }
+    if (options.signal?.aborted)
+        return undefined;
     return newerStableVersion(current, latest) ? { current, latest } : undefined;
 }
 /** Fire-and-forget notification; all host UI errors are isolated from Guardian. */
 export async function announceGuardianUpdate(show, options) {
     try {
         const update = await checkGuardianUpdate(options);
-        if (update)
+        if (update && !options?.signal?.aborted) {
             await show(update.current, update.latest);
+        }
     }
     catch { /* Optional notifications must not affect Guardian. */ }
 }

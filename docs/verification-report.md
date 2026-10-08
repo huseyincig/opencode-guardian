@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.8.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.9.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.8.0`
+- **Package Version:** OpenCode Guardian `v0.9.0`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **534 / 534 unit, security, toast notification, and regression tests passed**
+- **Current Automated Source Suite:** **545 / 545 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.8.0 introduces visible color-coded user-facing toast notifications across V1 and V2 host channels, strict rule sanitization preventing code/secret leaks, and maintains strict concrete failure remediation invariants, high-confidence instruction fidelity without mutation downgrades, per-rule fingerprint remediation budgeting, lifecycle reverse-splice disposal, and multi-layer secret protection & output redaction across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.8.0 V1/V2 acceptance run.
+> v0.9.0 delivers clean isolation between V2 strict preflight and tool-after evidence hooks, robust finding identity hashing across superficial prompt wording changes, command-family streak resets in circuit breakers, and hardened provenance tracking, alongside color-coded toast notifications and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.9.0 V1/V2 acceptance run.
 
 ---
 
@@ -121,6 +121,19 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.9.0 Preflight Hook Isolation, Finding Identity Hardening, and Circuit Breaker Tracking
+
+The v0.9.0 release resolves edge-case hook conflicts and strengthens continuous inspection resilience:
+
+- **Preflight & Verification Hook Isolation (`index`):**
+  - Completely decoupled V2 `execute.before` (strict preflight / subagent finalization) and `execute.after` (verification snapshotting & output secret redaction) registrations. Preflight failures no longer trigger false-positive secret errors, and optional evidence hook failures fail soft without suppressing active shell guards.
+- **Finding Identity Semantic Hardening (`engine`):**
+  - Standardized fallback finding fingerprints on `ruleId`, `filePath`, and core detected `pattern` while omitting non-deterministic prose snippets. Prevents agents from entering infinite remediation loops merely by rewording evasive responses across successive turns while reliably preserving distinct substantive findings.
+- **Circuit Breaker Streak Tracking (`circuit-breaker`):**
+  - Reset failure streaks and exact command counts cleanly across command families whenever successful forward progress occurs (e.g. successful verification tests resetting consecutive test runner failure streaks).
+- **Provenance & Synthetic Message Transparency (`provenance` & `index`):**
+  - Synchronized Guardian message metadata with SDK JsonValue contracts and ensured synthetic remediation messages are consistently recognized across turn extraction without interfering with user turn detection.
 
 ## v0.8.0 Visible Color-Coded Toast Interventions, Rule Sanitization, and Multi-Channel Parity
 

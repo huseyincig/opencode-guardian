@@ -1,6 +1,8 @@
 import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "./evidence.js";
+import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
+import { extractStructuredEditTexts } from "./tool-input.js";
 /**
  * Shell tools known to execute shell commands.
  */
@@ -74,6 +76,9 @@ function evaluateProcessStartPreflight(input) {
         return "uninspectable-shell-input";
     }
     const command = [executable, ...args].join(" ");
+    if (assessCommandPreflight(command).isHighRiskEnvDump) {
+        return "high-risk-environment-dump";
+    }
     if (isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
         isWindowsDestructiveCommand(command)) {
         return "destructive-command";
@@ -103,34 +108,42 @@ export function evaluateFileMutationPreflight(tool, input) {
     const textsToCheck = [];
     for (const key of ["content", "new_string", "newString", "CodeContent", "ReplacementContent", "text"]) {
         if (typeof args[key] === "string" && args[key].length > 0) {
-            textsToCheck.push(args[key]);
+            textsToCheck.push({
+                text: args[key],
+                ...(typeof targetFile === "string" ? { filePath: targetFile } : {}),
+            });
         }
     }
     if (typeof patchRaw === "string") {
         const addedLines = extractAddedLines(patchRaw);
-        if (addedLines)
-            textsToCheck.push(addedLines);
-    }
-    // File mutation providers also accept structured edit arrays. Inspect the
-    // replacement data, not only the outer tool argument object.
-    if (Array.isArray(args.edits)) {
-        for (const edit of args.edits) {
-            if (!edit || typeof edit !== "object" || Array.isArray(edit))
-                return "uninspectable-file-input";
-            for (const key of ["content", "text", "new_text", "newText", "replacement", "new_string", "newString"]) {
-                const value = edit[key];
-                if (typeof value === "string")
-                    textsToCheck.push(value);
-            }
+        if (addedLines) {
+            const patchPaths = Array.from(patchRaw.matchAll(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/g), (match) => match[1]).filter((value) => Boolean(value && value !== "/dev/null"));
+            const uniquePatchPaths = [...new Set(patchPaths)];
+            const patchFilePath = uniquePatchPaths.length === 1 ? uniquePatchPaths[0] : undefined;
+            textsToCheck.push({
+                text: addedLines,
+                ...(patchFilePath ? { filePath: patchFilePath } : {}),
+            });
         }
     }
+    // File mutation providers also accept structured edit arrays. Preserve each
+    // edit's own target path so path-based sample/template exceptions can never
+    // bleed from one file into another.
+    if (Array.isArray(args.edits)) {
+        for (const edit of args.edits) {
+            if (!edit || typeof edit !== "object" || Array.isArray(edit)) {
+                return "uninspectable-file-input";
+            }
+        }
+        textsToCheck.push(...extractStructuredEditTexts(args, typeof targetFile === "string" ? targetFile : undefined));
+    }
     const action = typeof args.action === "string" ? args.action.toLowerCase() : "";
-    if (isFileMutationTool(tool) && ["file_mutate", "file_write", "file_edit"].some((name) => tool.toLowerCase().endsWith(name)) &&
-        !["move", "copy"].includes(action) && textsToCheck.length === 0) {
+    if (!["move", "copy", "delete", "remove"].includes(action) &&
+        textsToCheck.length === 0) {
         return "uninspectable-file-input";
     }
-    for (const text of textsToCheck) {
-        const found = findSecretInCode(text, targetFile);
+    for (const item of textsToCheck) {
+        const found = findSecretInCode(item.text, item.filePath);
         if (found) {
             return "hardcoded-secret-in-file-write";
         }
@@ -243,6 +256,9 @@ export function evaluatePreflight(tool, input, additionalTools = []) {
             return "uninspectable-shell-input";
         }
         const commands = values;
+        if (commands.some((command) => assessCommandPreflight(command).isHighRiskEnvDump)) {
+            return "high-risk-environment-dump";
+        }
         if (commands.some((command) => isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
             isWindowsDestructiveCommand(command)))
             return "destructive-command";
@@ -274,6 +290,7 @@ export class GuardianPreflightError extends Error {
             "uninspectable-shell-input": "missing or uninspectable shell command",
             "hardcoded-secret-in-file-write": "potential hardcoded secret in file write",
             "uninspectable-file-input": "missing or uninspectable file mutation payload",
+            "high-risk-environment-dump": "broad environment or container metadata dump that may expose credentials",
             "lazy-commit-message": "lazy or uninformative git commit message; write a descriptive conventional commit (feat:, fix:, etc.)",
             "hallucinated-or-malformed-package": "malformed or suspicious package installation command",
         };

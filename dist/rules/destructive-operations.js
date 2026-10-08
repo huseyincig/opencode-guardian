@@ -1,14 +1,18 @@
 import { gitCleanInvocation, isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "../evidence.js";
 import { hasFindDeletion } from "../shell-risk.js";
+import { currentHumanMessage } from "../task-contract.js";
+import { extractToolCommand } from "../tool-input.js";
 import { isAuthorizedGitClean, isDeleteTargetRequested, isExplicitlyAllowedSudo, isImperativeExecutionRequest, isSqlDestructionRequested, isWholeWorkspaceDeleteRequested, SQL_TARGET_CONTEXT_REGEX, } from "../locale-intents.js";
 function latestHumanRequest(context) {
-    const user = context.currentTurn.findLast((message) => message.info.role === "user" &&
-        !message.parts.some((part) => part.synthetic === true));
+    const user = currentHumanMessage(context.currentTurn);
     if (!user)
         return "";
     return user.parts
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text)
+        .filter((part) => part.type === "text" &&
+        typeof part.text === "string" &&
+        part.synthetic !== true &&
+        part.ignored !== true)
+        .map((part) => part.text ?? "")
         .join("\n")
         .toLowerCase();
 }
@@ -287,13 +291,7 @@ export const destructiveOperationsRule = {
                 if (part.type !== "tool" || !part.state?.input)
                     continue;
                 const input = part.state.input;
-                const command = typeof input.command === "string"
-                    ? input.command
-                    : typeof input.cmd === "string"
-                        ? input.cmd
-                        : typeof input.script === "string"
-                            ? input.script
-                            : "";
+                const command = extractToolCommand(input);
                 if (!command)
                     continue;
                 const destructive = isDestructiveCommand(command);

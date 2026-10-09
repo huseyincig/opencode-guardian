@@ -1,6 +1,6 @@
 # OWASP Agentic Top 10 (2026): Guardian Coverage and Safety Limits
 
-Documentation for OpenCode Guardian **v0.9.0**.
+Documentation for OpenCode Guardian **v0.10.0**.
 
 This document maps OpenCode Guardian's architecture and guardrails to the **OWASP Top 10 for Agentic Applications (2026)** framework. It serves as an evidence-linked engineering mapping of current capabilities and explicit non-goals.
 

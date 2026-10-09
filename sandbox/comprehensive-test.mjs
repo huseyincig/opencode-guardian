@@ -431,7 +431,12 @@ for (const sc of SCENARIOS) {
       get: async () => ({ data: { id: "sandbox-session-001" } }),
       messages: async () => ({ data: sc.messages, error: undefined }),
       promptAsync: async ({ body }) => {
-        promptSent = body.parts?.[0]?.text;
+        // A display-only Guardian transcript must not overwrite the
+        // synthetic remediation prompt being asserted by this test.
+        const part = body.parts?.[0];
+        if (part?.synthetic === true && body.noReply !== true) {
+          promptSent = part.text;
+        }
         return { data: {}, error: undefined };
       },
     },

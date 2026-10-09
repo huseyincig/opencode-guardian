@@ -537,11 +537,15 @@ export class GuardEngine {
                         status: "handed_off",
                     });
                 }
+                let rollbackDone = false;
                 return {
                     decision: "block",
                     results,
                     combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
                     rollback: () => {
+                        if (rollbackDone)
+                            return;
+                        rollbackDone = true;
                         this.inspectedMessages.delete(sessionID);
                         this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
                         if (handoff)
@@ -596,11 +600,15 @@ export class GuardEngine {
                     status: "handed_off",
                 });
             }
+            let rollbackDone = false;
             return {
                 decision: "block",
                 results,
                 combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
                 rollback: () => {
+                    if (rollbackDone)
+                        return;
+                    rollbackDone = true;
                     this.inspectedMessages.delete(sessionID);
                     this.sessionState.rollbackRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
                     this.sessionState.clearPendingRemediation(sessionID);

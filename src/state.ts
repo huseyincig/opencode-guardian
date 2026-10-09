@@ -164,6 +164,7 @@ export class SessionStateStore {
     progressKey: string
   ): void {
     const state = this.beginTurn(sessionID, turnKey);
+    if (state.continuationKeys.has(progressKey)) return;
     state.continuationCount += 1;
     state.continuationKeys.add(progressKey);
   }
@@ -174,9 +175,8 @@ export class SessionStateStore {
     progressKey: string
   ): void {
     const state = this.sessions.get(sessionID);
-    if (state && state.turnKey === turnKey) {
+    if (state && state.turnKey === turnKey && state.continuationKeys.delete(progressKey)) {
       state.continuationCount = Math.max(0, state.continuationCount - 1);
-      state.continuationKeys.delete(progressKey);
     }
   }
 

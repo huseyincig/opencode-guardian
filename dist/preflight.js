@@ -1,6 +1,6 @@
 import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "./evidence.js";
 import { assessCommandPreflight } from "./secrets/preflight.js";
-import { hasDynamicCommandName } from "./shell-risk.js";
+import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
 import { extractStructuredEditTexts } from "./tool-input.js";
 /**
@@ -90,8 +90,12 @@ function evaluateProcessStartPreflight(input) {
     return undefined;
 }
 /** Bounded recognition of literal Windows shell removal commands. */
-function isWindowsDestructiveCommand(command) {
-    return /(?:^|[;&|]\s*)(?:del|erase|rd|rmdir|remove-item|format)\b/i.test(command.trim());
+function isWindowsDestructiveCommand(command, depth = 0) {
+    // Inspect executable stages, not quoted arguments containing examples.
+    if (splitShellStages(command).flat().some((stage) => /^(?:del|erase|rd|rmdir|remove-item|format)\b/i.test(stage.trim())))
+        return true;
+    // cmd /c and PowerShell -Command execute literal quoted scripts.
+    return depth < 4 && literalWindowsShellScripts(command).some((script) => isWindowsDestructiveCommand(script, depth + 1));
 }
 export function evaluateFileMutationPreflight(tool, input) {
     if (!isFileMutationTool(tool))

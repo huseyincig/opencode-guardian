@@ -321,7 +321,7 @@ const LITERAL_FORK_BOMB =
 
 function isLegacyDestructiveCommand(command: string): boolean {
   return (
-    /(?:^|[;&|]\s*)(?:del|erase|rd|rmdir|remove-item|format)(?=\s|$)/i.test(command) ||
+    /^\s*(?:del|erase|rd|rmdir|remove-item|format)(?=\s|$)/i.test(command) ||
     GIT_RESET_INVOCATION.test(command) ||
     isDestructiveGitClean(command) ||
     GIT_FORCE_PUSH_INVOCATION.test(command) ||
@@ -350,6 +350,7 @@ export function isDestructiveCommand(command: string, depth = 0): boolean {
     ...activeCommandSubstitutions(command),
     ...activeBacktickSubstitutions(command),
     ...literalShellScripts(command),
+    ...literalWindowsShellScripts(command),
   ].some((nested) => isDestructiveCommand(nested, depth + 1));
 }
 

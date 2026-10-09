@@ -30,7 +30,6 @@ import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import {
   extractTaskContract,
-  isSourceReviewEvidence,
   latestMutationSequence,
 } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
@@ -669,11 +668,14 @@ export class GuardEngine {
             status: "handed_off",
           });
         }
+        let rollbackDone = false;
         return {
           decision: "block",
           results,
           combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
           rollback: () => {
+            if (rollbackDone) return;
+            rollbackDone = true;
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
             if (handoff) this.sessionState.clearActiveHandoff(sessionID);
@@ -771,11 +773,14 @@ export class GuardEngine {
           status: "handed_off",
         });
       }
+      let rollbackDone = false;
       return {
         decision: "block",
         results,
         combinedRemediationPrompt: composeCombinedRemediationPrompt(blockingPrompts, handoff),
         rollback: () => {
+          if (rollbackDone) return;
+          rollbackDone = true;
           this.inspectedMessages.delete(sessionID);
           this.sessionState.rollbackRemediation(
             sessionID,

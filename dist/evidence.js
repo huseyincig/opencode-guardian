@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { extractLikelyShellMutation, extractToolCommand } from "./tool-input.js";
-import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
+import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
     if (typeof value === "string")
@@ -244,7 +244,7 @@ function isFilesystemFormatCommand(command) {
 // This is deliberately not a general shell evaluation or fork-bomb detector.
 const LITERAL_FORK_BOMB = /^\s*([:a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*\)\s*\{\s*\1\s*\|\s*\1\s*&\s*\}\s*;\s*\1(?=\s*(?:;|&&|$))/i;
 function isLegacyDestructiveCommand(command) {
-    return (/(?:^|[;&|]\s*)(?:del|erase|rd|rmdir|remove-item|format)(?=\s|$)/i.test(command) ||
+    return (/^\s*(?:del|erase|rd|rmdir|remove-item|format)(?=\s|$)/i.test(command) ||
         GIT_RESET_INVOCATION.test(command) ||
         isDestructiveGitClean(command) ||
         GIT_FORCE_PUSH_INVOCATION.test(command) ||
@@ -272,6 +272,7 @@ export function isDestructiveCommand(command, depth = 0) {
         ...activeCommandSubstitutions(command),
         ...activeBacktickSubstitutions(command),
         ...literalShellScripts(command),
+        ...literalWindowsShellScripts(command),
     ].some((nested) => isDestructiveCommand(nested, depth + 1));
 }
 /** Recognize actual literal rm invocations, not quoted examples or help output.

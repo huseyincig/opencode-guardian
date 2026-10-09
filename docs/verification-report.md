@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.9.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.10.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.9.0`
+- **Package Version:** OpenCode Guardian `v0.10.0`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **545 / 545 unit, security, toast notification, and regression tests passed**
+- **Current Automated Source Suite:** **549 / 549 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.9.0 delivers clean isolation between V2 strict preflight and tool-after evidence hooks, robust finding identity hashing across superficial prompt wording changes, command-family streak resets in circuit breakers, and hardened provenance tracking, alongside color-coded toast notifications and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.9.0 V1/V2 acceptance run.
+> v0.10.0 delivers Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.10.0 V1/V2 acceptance run.
 
 ---
 
@@ -121,6 +121,19 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.10.0 Windows Command Parsing, Rollback Budget Preservation, and Synthetic Remediation Assertions
+
+The v0.10.0 release hardens cross-platform preflight and verification inspection:
+
+- **Windows Command Stage Parsing (`preflight` & `shell-risk`):**
+  - Robust recognition of literal Windows shell removal commands (`del`, `erase`, `rd`, `rmdir`, `remove-item`, `format`) across split command stages and nested `cmd /c` / `PowerShell -Command` wrappers while exempting quoted documentation examples.
+- **Rollback Budget Preservation (`engine`):**
+  - Preserves rollback and remediation budgets when operations are legitimately reset or rolled back without exhausting session quotas.
+- **Synthetic Remediation Assertions (`tests`):**
+  - Asserts actual synthetic remediation messages rather than visible transcript side effects, preventing race conditions and false negatives in automated test suites.
+- **Strict Typecheck Cleanliness (`evidence` & `index`):**
+  - Removed unused imports and strengthened strict typecheck invariants across dual-mode entrypoints.
 
 ## v0.9.0 Preflight Hook Isolation, Finding Identity Hardening, and Circuit Breaker Tracking
 

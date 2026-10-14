@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { extractLikelyShellMutation, extractToolCommand } from "./tool-input.js";
+import { extractLikelyShellMutation, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
@@ -391,27 +391,28 @@ function recordFromPart(part, sequence) {
         });
     }
     if (hasFileMutation(part)) {
-        const filePath = extractMutatedFilePath(part);
+        const paths = extractMutatedFilePaths(part);
         const mutationErrorFingerprint = outcome.status === "failure"
             ? normalizeErrorFingerprint(outcome.errorText || outputText)
             : undefined;
-        records.push({
-            kind: "file-mutation",
-            status: outcome.status === "failure"
-                ? "failure"
-                : outcome.status === "success"
-                    ? "success"
-                    : "unknown",
-            sequence,
-            toolName,
-            ...(command ? { command } : {}),
-            signature: `${baseSignature}:mutation`,
-            ...(filePath !== undefined ? { filePath } : {}),
-            ...(outputText ? { output: outputText } : {}),
-            ...(outcome.errorText ? { error: outcome.errorText } : {}),
-            ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
-            ...(mutationErrorFingerprint !== undefined ? { errorFingerprint: mutationErrorFingerprint } : {}),
-        });
+        for (const filePath of paths.length ? paths : [undefined])
+            records.push({
+                kind: "file-mutation",
+                status: outcome.status === "failure"
+                    ? "failure"
+                    : outcome.status === "success"
+                        ? "success"
+                        : "unknown",
+                sequence,
+                toolName,
+                ...(command ? { command } : {}),
+                signature: `${baseSignature}:mutation${paths.length > 1 ? ":" + filePath : ""}`,
+                ...(filePath !== undefined ? { filePath } : {}),
+                ...(outputText ? { output: outputText } : {}),
+                ...(outcome.errorText ? { error: outcome.errorText } : {}),
+                ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
+                ...(mutationErrorFingerprint !== undefined ? { errorFingerprint: mutationErrorFingerprint } : {}),
+            });
     }
     return records;
 }
@@ -449,16 +450,9 @@ export function extractMutatedFilePaths(part) {
     }
     const patchRaw = input.patchText ?? input.patch;
     if (typeof patchRaw === "string") {
-        const match = patchRaw.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
-        const filePath = match?.[1];
-        if (filePath && filePath !== "/dev/null")
-            add(filePath);
-        // A pure deletion patch has +++ /dev/null; retain the removed path so the
-        // post-verification fingerprint can prove that absence is still current.
-        if (/\+\+\+\s+\/dev\/null/.test(patchRaw)) {
-            const removed = /---\s+(?:a\/)?([^\s\t\n]+)/.exec(patchRaw)?.[1];
-            if (removed && removed !== "/dev/null")
-                add(removed);
+        for (const section of splitFilePatches(patchRaw)) {
+            add(section.previousPath);
+            add(section.filePath);
         }
     }
     return [...paths];
@@ -599,6 +593,8 @@ export function collectTurnEvidence(currentTurn, _directory, snapshots) {
     let mutationCount = 0;
     let lastMutationSequence = -1;
     for (const message of currentTurn) {
+        if (message.info.role !== "assistant")
+            continue;
         for (const part of message.parts) {
             const outputText = stringify(part.state?.output ?? part.state?.metadata?.output).trim();
             const outcome = statusFromPart(part, outputText);

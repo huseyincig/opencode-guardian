@@ -48,7 +48,7 @@ export const SAFE_KEY_NAMES = new Set<string>([
  * Regex matching sensitive key names in key-value pairs (env, JSON, YAML).
  */
 export const SENSITIVE_KEY_REGEX =
-  /^(?:.*[_-])?(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|BEARER[_-]?TOKEN|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|PASSWORD[_-]?HASH|PASS(?:WORD|WD)?|SECRET|TOKEN|CREDENTIALS?|DATABASE_URL|CONN(?:ECTION)?[_-]?STR(?:ING)?)(?:[_-].*)?$/i;
+  /^(?:.*[_-])?(?:AUTHORIZATION|PROXY[_-]AUTHORIZATION|COOKIE|SET[_-]COOKIE|API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|BEARER[_-]?TOKEN|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|PASSWORD[_-]?HASH|PASS(?:WORD|WD)?|SECRET|TOKEN|CREDENTIALS?|DATABASE_URL|CONN(?:ECTION)?[_-]?STR(?:ING)?)(?:[_-].*)?$/i;
 
 /**
  * Checks whether a key name represents a sensitive credential name.

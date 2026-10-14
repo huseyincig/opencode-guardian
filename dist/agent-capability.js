@@ -59,15 +59,31 @@ function resolveV1BashEffect(bash) {
         return norm === "allow" || norm === "deny" || norm === "ask" ? norm : "unset";
     }
     if (bash && typeof bash === "object" && !Array.isArray(bash)) {
-        const wildcard = bash["*"];
-        if (typeof wildcard === "string") {
-            const effect = wildcard.toLowerCase().trim();
-            if (effect === "allow" || effect === "deny" || effect === "ask") {
-                return effect;
+        let generalEffect;
+        let hasScopedRule = false;
+        let scopedOverride = false;
+        for (const [pattern, value] of Object.entries(bash)) {
+            if (typeof value !== "string")
+                continue;
+            const effect = value.toLowerCase().trim();
+            if (effect !== "allow" && effect !== "deny" && effect !== "ask")
+                continue;
+            // As in V2, only a final broad rule proves a uniform channel effect.
+            // A later scoped exception must not authorize autonomous remediation.
+            if (pattern === "*") {
+                generalEffect = effect;
+                scopedOverride = false;
+            }
+            else {
+                hasScopedRule = true;
+                if (generalEffect !== undefined && effect !== generalEffect) {
+                    scopedOverride = true;
+                }
             }
         }
-        if (Object.keys(bash).length > 0)
+        if (scopedOverride)
             return "restricted";
+        return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
     }
     return "unset";
 }
@@ -109,7 +125,8 @@ export function evaluateAgentMutationProfile(input) {
     }
     // 2. Resolve Shell/Bash channel
     let bashEffect = "unset";
-    if (tools.bash === false || tools.shell === false) {
+    if ((tools.bash === false || tools.shell === false) &&
+        tools.bash !== true && tools.shell !== true) {
         bashEffect = "disabled";
         reasons.push("bash/shell tool explicitly disabled in tools");
     }
@@ -251,17 +268,18 @@ export function isWriteCapableAgent(context) {
 const sessionCapabilityCache = new Map();
 const sessionV2PermissionCache = new Map();
 export function getCachedAgentCapability(sessionID) {
-    return sessionCapabilityCache.get(sessionID);
+    const profile = sessionCapabilityCache.get(sessionID);
+    return profile ? structuredClone(profile) : undefined;
 }
 export function cacheAgentCapability(sessionID, profile) {
-    sessionCapabilityCache.set(sessionID, profile);
+    sessionCapabilityCache.set(sessionID, structuredClone(profile));
 }
 export function cacheV2SessionPermissions(sessionID, permissions) {
     sessionV2PermissionCache.set(sessionID, permissions.map((rule) => ({ ...rule })));
     sessionCapabilityCache.delete(sessionID);
 }
 export function getCachedV2SessionPermissions(sessionID) {
-    return sessionV2PermissionCache.get(sessionID);
+    return sessionV2PermissionCache.get(sessionID)?.map((rule) => ({ ...rule }));
 }
 export function clearAgentCapability(sessionID) {
     sessionCapabilityCache.delete(sessionID);

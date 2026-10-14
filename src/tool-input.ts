@@ -1,3 +1,80 @@
+/** Render process argv as literal words, never as additional shell source. */
+export function quoteProcessArgument(value: string): string {
+  return /^[a-zA-Z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+export interface FilePatch {
+  filePath?: string;
+  previousPath?: string;
+  patch: string;
+  deleted: boolean;
+}
+
+/** Preserve per-file boundaries in unified and native apply_patch input. */
+export function splitFilePatches(value: unknown): FilePatch[] {
+  if (typeof value !== "string" || !value) return [];
+  const lines = value.split("\n");
+  const sections: FilePatch[] = [];
+  let current: FilePatch | undefined;
+  let nativeSection = false;
+  let oldRemaining = 0;
+  let newRemaining = 0;
+  const headerPath = (line: string): string => {
+    let name = line.replace(/^(?:---|\+\+\+)\s+/, "").split("\t")[0]?.trim() ?? "";
+    if (name.startsWith('"')) {
+      try { name = JSON.parse(name) as string; } catch { return ""; }
+    }
+    return name.replace(/^[ab]\//, "");
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const next = lines[i + 1] ?? "";
+    // Hunk contents are data, even when removed/added source resembles a pair
+    // of file headers. Only exhausted hunk counts permit a new file section.
+    if (current && (oldRemaining > 0 || newRemaining > 0)) {
+      current.patch += line + "\n";
+      if (line.startsWith(" ")) { oldRemaining--; newRemaining--; }
+      else if (line.startsWith("-")) oldRemaining--;
+      else if (line.startsWith("+")) newRemaining--;
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (current && !nativeSection && hunk) {
+      oldRemaining = Number(hunk[1] ?? 1);
+      newRemaining = Number(hunk[2] ?? 1);
+      current.patch += line + "\n";
+      continue;
+    }
+    const move = /^\*\*\* Move to: (.+)$/.exec(line);
+    if (current && nativeSection && move?.[1]) {
+      if (current.filePath) current.previousPath = current.filePath;
+      current.filePath = move[1].trim();
+      current.patch += line + "\n";
+      continue;
+    }
+    const native = /^\*\*\* (Update|Add|Delete) File: (.+)$/.exec(line);
+    const unified = !nativeSection && /^---\s+/.test(line) && /^\+\+\+\s+/.test(next);
+    if (native || unified) {
+      if (current) sections.push(current);
+      const deleted = native ? native[1] === "Delete" : headerPath(next) === "/dev/null";
+      const filePath = native ? native[2]?.trim() : headerPath(deleted ? line : next);
+      current = { ...(filePath && filePath !== "/dev/null" ? { filePath } : {}), patch: line + "\n", deleted };
+      nativeSection = Boolean(native);
+      if (unified && !deleted) {
+        const previous = headerPath(line);
+        if (previous && previous !== "/dev/null" && previous !== filePath) current.previousPath = previous;
+      }
+      if (unified) { current.patch += next + "\n"; i++; }
+    } else if (current) {
+      current.patch += line + "\n";
+    }
+  }
+  if (current) sections.push(current);
+  return sections.length ? sections : [{ patch: value, deleted: false }];
+}
+
 export function extractToolCommand(
   input: Record<string, unknown>
 ): string {
@@ -13,8 +90,8 @@ export function extractToolCommand(
               (Array.isArray(input.args) &&
                 input.args.every((arg) => typeof arg === "string")))
           ? [
-              input.executable.trim(),
-              ...((input.args as string[] | undefined) ?? []),
+              quoteProcessArgument(input.executable.trim()),
+              ...((input.args as string[] | undefined) ?? []).map(quoteProcessArgument),
             ].join(" ")
           : "";
 }

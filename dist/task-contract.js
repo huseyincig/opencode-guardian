@@ -123,7 +123,8 @@ export function isSourceReviewEvidence(record) {
     const directRead = /(?:^|[.:_-])(?:read|view)(?:$|[.:_-])/.test(tool);
     if (directRead) {
         return !/^\s*(?:error|failed|failure|exception)\b/i.test(output) &&
-            !/^\s*\{\s*"error"\s*:/i.test(output);
+            !/^\s*\{\s*"error"\s*:/i.test(output) &&
+            !/^\s*(?:ENOENT\b|not found\b|permission denied\b|no such file or directory\b)/i.test(output);
     }
     // Name-only searches, glob/find output and git diff --stat are not
     // evidence of inspecting file contents. Require an actual source snippet.

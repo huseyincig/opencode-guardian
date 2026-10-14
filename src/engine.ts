@@ -292,7 +292,7 @@ function isSyntheticUserMessage(
   return (
     message.info.role === "user" &&
     Boolean(
-      message.parts?.some(
+      message.parts?.length && message.parts.every(
         (part) =>
           part.synthetic === true ||
           (part as Record<string, unknown>).ignored === true ||
@@ -300,7 +300,7 @@ function isSyntheticUserMessage(
             typeof part.metadata === "object" &&
             ((part.metadata as Record<string, unknown>)["opencode-guardian-visible"] === true ||
              (part.metadata as Record<string, unknown>)["opencode-guardian-kind"] === "visible")) ||
-          isTrustedGuardianMetadata(sessionID, part.metadata, "visible")
+          isTrustedGuardianMetadata(sessionID, part.metadata)
       )
     )
   );
@@ -311,6 +311,7 @@ function isGuardianRemediationMessage(
   sessionID?: string
 ): boolean {
   if (message.info.role !== "user") return false;
+  if (!isSyntheticUserMessage(message, sessionID)) return false;
   return Boolean(
     message.parts?.some((part) => {
       const marker =

@@ -230,7 +230,13 @@ export function readGuardianStatus(
       let fd: number | undefined;
       try {
         fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-        const size = fs.fstatSync(fd).size;
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+            (process.platform !== "win32" && (stat.mode & 0o077) !== 0)) {
+          result.truncated = true;
+          continue;
+        }
+        const size = stat.size;
         const start = Math.max(0, size - maxBytes);
         const buffer = Buffer.alloc(size - start);
         const read = fs.readSync(fd, buffer, 0, buffer.length, start);

@@ -1,11 +1,68 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { canSubagentRemediate } from "../dist/agent-capability.js";
 import {
   OpencodeGuardian,
   GuardEngine,
   evaluateAgentMutationProfile,
   parseOpenCodeHandoff,
 } from "../dist/index.js";
+
+for (const [name, bash] of [
+  ["ask exception", { "*": "allow", "git *": "ask" }],
+  ["deny exception", { "*": "allow", "rm *": "deny" }],
+  ["allow exception", { "*": "deny", "npm test": "allow" }],
+]) {
+  test(`V1 scoped bash ${name} does not permit autonomous subagent remediation`, async () => {
+    const profile = evaluateAgentMutationProfile({ permission: { edit: "deny", bash } });
+    assert.equal(profile.evidence.bash, "restricted");
+    assert.equal(profile.capability, "unknown");
+    assert.equal(canSubagentRemediate(profile), false);
+    const engine = new GuardEngine({ rules: { "safety/destructive-operations": "error" } });
+    const result = await engine.inspect("scoped-child", "/tmp", [
+      { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "Inspect the repository." }] },
+      { info: { id: "a", role: "assistant" }, parts: [{ type: "tool", tool: "bash",
+        state: { status: "completed", input: { command: "rm -rf /" } } }] },
+    ], undefined, { isSubagent: true, agentCapability: profile.capability });
+    assert.equal(result.decision, "block");
+    assert.equal(result.combinedRemediationPrompt, undefined);
+  });
+}
+
+for (const effect of ["allow", "deny", "ask"]) {
+  test(`V1 uniform and final wildcard ${effect} retain the channel effect`, () => {
+    for (const bash of [
+      { "*": effect },
+      { "*": effect, "npm test": effect },
+      { "npm test": effect === "allow" ? "deny" : "allow", "*": effect },
+    ]) {
+      const profile = evaluateAgentMutationProfile({ permission: { edit: "deny", bash } });
+      assert.equal(profile.evidence.bash, effect);
+    }
+  });
+}
+
+for (const [host, input] of [
+  ["V1", { tools: { bash: true, shell: false }, permission: { edit: "deny", bash: "allow" } }],
+  ["V2", { tools: { bash: false, shell: true }, permissions: [
+    { action: "edit", effect: "deny" }, { action: "shell", effect: "allow" },
+  ] }],
+]) {
+  test(`${host} enabled execution tool survives a disabled alternate alias`, () => {
+    const profile = evaluateAgentMutationProfile(input);
+    assert.equal(profile.evidence.bash, "allow");
+    assert.equal(profile.capability, "write-allowed");
+    assert.equal(canSubagentRemediate(profile), true);
+  });
+}
+
+test("disabled shell channels retain conservative capability classification", () => {
+  for (const tools of [{ bash: false }, { shell: false }, { bash: false, shell: false }]) {
+    const profile = evaluateAgentMutationProfile({ tools, permission: { edit: "deny", bash: "allow" } });
+    assert.equal(profile.evidence.bash, "disabled");
+    assert.equal(profile.capability, "read-only");
+  }
+});
 
 // Scenario 1: Read-only child completion result
 test("Scenario 1: Read-only child subagent completion result receives zero remediation (V1 and V2)", async () => {

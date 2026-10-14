@@ -1,0 +1,25 @@
+import vm from 'node:vm';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import {dispatchGuardianToast,clearToastListeners} from '../../dist/toast.js';
+const states=[];const timers=[];
+const realm=vm.createContext({console,URL,AbortController,process,setInterval:(fn)=>{timers.push(fn);return timers.length;},clearInterval:()=>{},setTimeout,clearTimeout});
+const url=new URL('../../dist/tui-runtime.js',import.meta.url);
+const module=new vm.SourceTextModule(fs.readFileSync(url,'utf8'),{context:realm,identifier:url.href,initializeImportMeta(meta){meta.url=url.href;}});
+const renderer={createComponent:(component,props)=>({component:component.name,props}),createElement:(name)=>({name}),createTextNode:(text)=>({text}),insertNode(){},insert(){},setProp(){},effect(){},memo:(fn)=>fn};
+const solid={createSignal:(value)=>{const record={value};states.push(record);return [()=>record.value,(next)=>{record.value=typeof next==='function'?next(record.value):next;}];},onCleanup(){},Show:(props)=>props};
+await module.link(async(specifier,ref)=>{let exports;if(specifier==='opentui:runtime-module:solid-js')exports=solid;else if(specifier==='opentui:runtime-module:%40opentui%2Fsolid')exports=renderer;else exports=await import(specifier.startsWith('.')?new URL(specifier,ref.identifier).href:specifier);const keys=Object.keys(exports);return new vm.SyntheticModule(keys,function(){for(const k of keys)this.setExport(k,exports[k]);},{context:realm});});
+await module.evaluate();const Tui=module.namespace.default;
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'guardian-feedback-tui-'));const invalid=path.join(root,'invalid');fs.mkdirSync(invalid);
+fs.writeFileSync(path.join(root,'opencode-guardian.json'),JSON.stringify({enabled:true,updateNotice:{enabled:false}}));fs.writeFileSync(path.join(invalid,'opencode-guardian.json'),'{');
+let deletionHandler;let deletionDisposals=0;
+const evidence=[];const record=(id,status,data)=>{evidence.push({id,status,evidence:data});console.log(JSON.stringify(evidence.at(-1)));};
+const makeHost=(sessions,claims,rpc)=>({location:{directory:root},theme:{text:{base:'white',muted:'gray',action:{primary:{base:'white'}}}},ui:{router:{current:()=>({type:'session',sessionID:'s1'})},slot:(claim)=>{claims.push(claim);return ()=>{};},toast:{show(){} }},data:{on(type,handler){if(type!=='session.deleted')throw new Error('wrong event');deletionHandler=handler;return()=>{deletionHandler=undefined;deletionDisposals++;};},session:{get:(sid)=>sessions.get(sid)},location:{default:()=>({directory:root})}},...(rpc?{client:{rpc:()=>rpc}}:{})});
+let release;const response=new Promise(r=>{release=r;});let sessions=new Map([['s1',{location:{directory:root}}]]);let claims=[];
+const cleanup=Tui.setup(makeHost(sessions,claims,{latest:()=>response}));const state=states.at(-1);sessions.delete('s1');release({active:true,title:'Guardian',message:'stale-rpc',variant:'error',duration:5000});await new Promise(r=>setImmediate(r));
+record(9,state.value.s1?'CONFIRMED':'NOT_REPRODUCED',{deletedSession:sessions.has('s1'),revivedPayload:state.value.s1});cleanup();clearToastListeners();
+sessions=new Map([['s1',{location:{directory:root}}],['s2',{location:{directory:invalid}}]]);claims=[];
+const cleanup2=Tui.setup(makeHost(sessions,claims));const state2=states.at(-1);
+dispatchGuardianToast({title:'Guardian',message:'existing-warning',variant:'warning',duration:4000},{directory:root,sessionID:'s1'});
+sessions.delete('s1');deletionHandler({data:{sessionID:'s1'}});const view=claims.find(c=>c.append==='session.composer.top').render({sessionID:'s1'});
+record(19,view.props.payload?'CONFIRMED':'NOT_REPRODUCED',{deletedSession:sessions.has('s1'),retainedPayload:view.props.payload});
+try{const sidebar=claims.find(c=>c.append==='sidebar.content').render({sessionID:'s2'});void sidebar.props.checkUpdates;record(10,'NOT_REPRODUCED',{});}catch(e){record(10,'PARTIAL',{name:e.name,scope:'Invalid second-project config throws from sidebar render; unhandled asynchronous host rejection not established.'});}
+cleanup2();record(21,!state2.value.s1&&deletionDisposals===2&&deletionHandler===undefined?'NOT_REPRODUCED':'CONFIRMED',{storedPayloadCleared:!state2.value.s1,disposals:deletionDisposals});clearToastListeners();fs.rmSync(root,{recursive:true});

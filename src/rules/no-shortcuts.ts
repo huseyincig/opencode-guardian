@@ -4,6 +4,7 @@ import {
   extractLikelyShellMutation,
   extractStructuredEditTexts,
   extractToolCommand,
+  splitFilePatches,
 } from "../tool-input.js";
 import { extractGitCommitMessage } from "../preflight.js";
 import { extractFilePathFromPatch } from "./no-secrets.js";
@@ -407,14 +408,16 @@ export const noShortcutsRule: GuardRule = {
               edit.filePath
             );
           }
-          const patchText = extractAddedPatchLines(patchRaw);
-          if (patchText) {
-            checkText(
-              extractCodeComments(patchText),
-              "patch added comments",
-              true,
-              targetFile
-            );
+          for (const section of splitFilePatches(patchRaw)) {
+            const patchText = extractAddedPatchLines(section.patch);
+            if (patchText) {
+              checkText(
+                extractCodeComments(patchText),
+                "patch added comments",
+                true,
+                section.filePath ?? targetFile
+              );
+            }
           }
           const shellMutation = extractLikelyShellMutation(input);
           if (shellMutation) {

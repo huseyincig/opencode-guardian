@@ -112,6 +112,22 @@ export function sanitizeString(text, options = {}) {
             }
         }
         let result = text;
+        // Credential context is meaningful even when a query value has no known
+        // token format and is not registered as a runtime literal.
+        result = result.replace(/([?&])([^=&#\s]+)=([^&#\s]*)/g, (match, lead, key) => {
+            let decoded;
+            try {
+                decoded = decodeURIComponent(key.replace(/\+/g, " "));
+            }
+            catch {
+                decoded = key;
+            }
+            if (!isSensitiveKey(decoded, options.customSensitiveKeys, options.safeKeyNames))
+                return match;
+            redactedCount++;
+            findings.push({ kind: "key-value", category: "URL Query Credential" });
+            return `${lead}${key}=${replacement}`;
+        });
         // 1. Multiline PEM Private Key Blocks
         PEM_PRIVATE_KEY_REGEX.lastIndex = 0;
         if (PEM_PRIVATE_KEY_REGEX.test(result)) {
@@ -250,6 +266,12 @@ export function sanitizeObject(data, options = {}) {
                 return res.sanitized;
             }
             if (val instanceof Error) {
+                const nameRes = sanitizeString(val.name, options);
+                if (nameRes.redactedCount > 0) {
+                    val.name = nameRes.sanitized;
+                    redactedCount += nameRes.redactedCount;
+                    findings.push(...nameRes.findings);
+                }
                 const msgRes = sanitizeString(val.message, options);
                 if (msgRes.redactedCount > 0) {
                     redactedCount += msgRes.redactedCount;
@@ -314,7 +336,7 @@ export function sanitizeToolResult(result, options = {}) {
         if (result instanceof Error) {
             const sanitizedMsg = sanitizeString(result.message, options).sanitized;
             const errCopy = new Error(sanitizedMsg);
-            errCopy.name = result.name;
+            errCopy.name = sanitizeString(result.name, options).sanitized;
             if (result.stack) {
                 errCopy.stack = sanitizeString(result.stack, options).sanitized;
             }
@@ -325,12 +347,9 @@ export function sanitizeToolResult(result, options = {}) {
             const resObj = result;
             // 1. OpenCode V1/V2 tool output shape: { title?, output, metadata? }
             if ('output' in resObj && typeof resObj.output === 'string') {
-                const sanitizedOutput = sanitizeString(resObj.output, options).sanitized;
-                return {
-                    ...resObj,
-                    output: sanitizedOutput,
-                    ...(resObj.metadata ? { metadata: sanitizeObject(resObj.metadata, options).sanitized } : {}),
-                };
+                // output may coexist with content, title and provider-specific fields.
+                // Redact the complete envelope before returning any sibling to a host.
+                return sanitizeObject(resObj, options).sanitized;
             }
             // 2. Process stdout/stderr shape: { stdout, stderr, ... }.
             // Sanitize the complete envelope so sibling metadata/raw fields cannot

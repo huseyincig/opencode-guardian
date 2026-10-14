@@ -1,3 +1,13 @@
+/** Render process argv as literal words, never as additional shell source. */
+export declare function quoteProcessArgument(value: string): string;
+export interface FilePatch {
+    filePath?: string;
+    previousPath?: string;
+    patch: string;
+    deleted: boolean;
+}
+/** Preserve per-file boundaries in unified and native apply_patch input. */
+export declare function splitFilePatches(value: unknown): FilePatch[];
 export declare function extractToolCommand(input: Record<string, unknown>): string;
 /**
  * Returns shell source only when the command appears to mutate file contents.

@@ -265,16 +265,18 @@ export function loadConfig(directory) {
 }
 function isSyntheticUserMessage(message, sessionID) {
     return (message.info.role === "user" &&
-        Boolean(message.parts?.some((part) => part.synthetic === true ||
+        Boolean(message.parts?.length && message.parts.every((part) => part.synthetic === true ||
             part.ignored === true ||
             (part.metadata &&
                 typeof part.metadata === "object" &&
                 (part.metadata["opencode-guardian-visible"] === true ||
                     part.metadata["opencode-guardian-kind"] === "visible")) ||
-            isTrustedGuardianMetadata(sessionID, part.metadata, "visible"))));
+            isTrustedGuardianMetadata(sessionID, part.metadata))));
 }
 function isGuardianRemediationMessage(message, sessionID) {
     if (message.info.role !== "user")
+        return false;
+    if (!isSyntheticUserMessage(message, sessionID))
         return false;
     return Boolean(message.parts?.some((part) => {
         const marker = part.type === "text" &&

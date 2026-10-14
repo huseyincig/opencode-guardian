@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 export const SECRET_PATTERNS = [
     { regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{32,}\b/, name: "OpenAI API Key (sk-...)" },
     { regex: /\bghp_[a-zA-Z0-9]{36}\b/, name: "GitHub Personal Access Token (ghp_...)" },
@@ -18,8 +18,7 @@ export const SECRET_PATTERNS = [
 export function extractFilePathFromPatch(patch) {
     if (typeof patch !== "string")
         return undefined;
-    const match = patch.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
-    return match ? match[1] : undefined;
+    return splitFilePatches(patch)[0]?.filePath;
 }
 export function extractAddedLines(text) {
     if (typeof text !== "string")
@@ -129,9 +128,11 @@ export const noSecretsRule = {
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkCode(edit.text, edit.filePath);
                 }
-                const patchText = extractAddedLines(patchRaw);
-                if (patchText)
-                    checkCode(patchText, targetFile);
+                for (const section of splitFilePatches(patchRaw)) {
+                    const patchText = extractAddedLines(section.patch);
+                    if (patchText)
+                        checkCode(patchText, section.filePath ?? targetFile);
+                }
                 const shellMutation = extractLikelyShellMutation(input);
                 if (shellMutation)
                     checkCode(shellMutation, undefined, "shell file mutation");

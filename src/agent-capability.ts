@@ -117,14 +117,27 @@ function resolveV1BashEffect(
   }
 
   if (bash && typeof bash === "object" && !Array.isArray(bash)) {
-    const wildcard = bash["*"];
-    if (typeof wildcard === "string") {
-      const effect = wildcard.toLowerCase().trim();
-      if (effect === "allow" || effect === "deny" || effect === "ask") {
-        return effect;
+    let generalEffect: "allow" | "deny" | "ask" | undefined;
+    let hasScopedRule = false;
+    let scopedOverride = false;
+    for (const [pattern, value] of Object.entries(bash)) {
+      if (typeof value !== "string") continue;
+      const effect = value.toLowerCase().trim();
+      if (effect !== "allow" && effect !== "deny" && effect !== "ask") continue;
+      // As in V2, only a final broad rule proves a uniform channel effect.
+      // A later scoped exception must not authorize autonomous remediation.
+      if (pattern === "*") {
+        generalEffect = effect;
+        scopedOverride = false;
+      } else {
+        hasScopedRule = true;
+        if (generalEffect !== undefined && effect !== generalEffect) {
+          scopedOverride = true;
+        }
       }
     }
-    if (Object.keys(bash).length > 0) return "restricted";
+    if (scopedOverride) return "restricted";
+    return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
   }
 
   return "unset";
@@ -204,7 +217,10 @@ export function evaluateAgentMutationProfile(
 
   // 2. Resolve Shell/Bash channel
   let bashEffect: "allow" | "deny" | "ask" | "restricted" | "disabled" | "unset" = "unset";
-  if (tools.bash === false || tools.shell === false) {
+  if (
+    (tools.bash === false || tools.shell === false) &&
+    tools.bash !== true && tools.shell !== true
+  ) {
     bashEffect = "disabled";
     reasons.push("bash/shell tool explicitly disabled in tools");
   } else if (v2Permissions) {
@@ -358,11 +374,12 @@ const sessionCapabilityCache = new Map<string, AgentMutationProfile>();
 const sessionV2PermissionCache = new Map<string, V2PermissionRule[]>();
 
 export function getCachedAgentCapability(sessionID: string): AgentMutationProfile | undefined {
-  return sessionCapabilityCache.get(sessionID);
+  const profile = sessionCapabilityCache.get(sessionID);
+  return profile ? structuredClone(profile) : undefined;
 }
 
 export function cacheAgentCapability(sessionID: string, profile: AgentMutationProfile): void {
-  sessionCapabilityCache.set(sessionID, profile);
+  sessionCapabilityCache.set(sessionID, structuredClone(profile));
 }
 
 export function cacheV2SessionPermissions(
@@ -379,7 +396,7 @@ export function cacheV2SessionPermissions(
 export function getCachedV2SessionPermissions(
   sessionID: string
 ): readonly V2PermissionRule[] | undefined {
-  return sessionV2PermissionCache.get(sessionID);
+  return sessionV2PermissionCache.get(sessionID)?.map((rule) => ({ ...rule }));
 }
 
 export function clearAgentCapability(sessionID: string): void {

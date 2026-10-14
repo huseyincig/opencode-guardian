@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.10.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.11.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.10.0`
+- **Package Version:** OpenCode Guardian `v0.11.0`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **549 / 549 unit, security, toast notification, and regression tests passed**
+- **Current Automated Source Suite:** **597 / 597 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.10.0 delivers Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.10.0 V1/V2 acceptance run.
+> v0.11.0 delivers evidence trust boundaries, per-file patch attribution, credential redaction in telemetry and secret sanitizers, idle queue coalescing with stable turn inspection, Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.11.0 V1/V2 acceptance run.
 
 ---
 
@@ -119,6 +119,23 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 2. **Reload Idempotence:**
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
+
+---
+
+## v0.11.0 Evidence Trust Boundaries, Credential Redaction, Idle Queue Coalescing, and Lifecycle Cleanup
+
+The v0.11.0 release addresses comprehensive audit findings across evidence trust, data privacy, task lifecycle, and subagent capability:
+
+- **Evidence Trust Boundaries & Per-File Patch Attribution (`evidence` & `tool-input`):**
+  - Strict validation of tool execution evidence and per-file diff attribution ensuring patches map accurately to verified modified paths.
+- **Credential Redaction & Privacy Isolation (`secrets` & `telemetry`):**
+  - Hardened pattern matching and output masking in secret sanitization, preventing accidental exposure of tokens or keys in telemetry events or error states.
+- **Idle Queue Coalescing & V1 Turn Watcher (`idle-queue` & `index`):**
+  - Introduced `IdleQueue` to coalesce rapid successive idle notifications, preventing redundant evaluations and race conditions during high-turn agent executions.
+- **Subagent Capability Cache Integrity (`agent-capability`):**
+  - Ensured immutable capability evaluation and protected capability caches from poisoned child states.
+- **TUI Cleanup & Feedback Regression Suite (`tui` & `tests`):**
+  - Cleaned up TUI state transitions and added 48 new regression tests covering audit scenarios, bringing the test suite to 597 passing tests.
 
 ---
 

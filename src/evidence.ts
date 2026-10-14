@@ -9,7 +9,7 @@ import type {
   SessionMessage,
   TurnEvidence,
 } from "./types.js";
-import { extractLikelyShellMutation, extractToolCommand } from "./tool-input.js";
+import { extractLikelyShellMutation, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import {
   activeBacktickSubstitutions,
   activeCommandSubstitutions,
@@ -487,11 +487,11 @@ function recordFromPart(part: MessagePart, sequence: number): EvidenceRecord[] {
   }
 
   if (hasFileMutation(part)) {
-    const filePath = extractMutatedFilePath(part);
+    const paths = extractMutatedFilePaths(part);
     const mutationErrorFingerprint = outcome.status === "failure"
       ? normalizeErrorFingerprint(outcome.errorText || outputText)
       : undefined;
-    records.push({
+    for (const filePath of paths.length ? paths : [undefined]) records.push({
       kind: "file-mutation",
       status:
         outcome.status === "failure"
@@ -502,7 +502,7 @@ function recordFromPart(part: MessagePart, sequence: number): EvidenceRecord[] {
       sequence,
       toolName,
       ...(command ? { command } : {}),
-      signature: `${baseSignature}:mutation`,
+      signature: `${baseSignature}:mutation${paths.length > 1 ? ":" + filePath : ""}`,
       ...(filePath !== undefined ? { filePath } : {}),
       ...(outputText ? { output: outputText } : {}),
       ...(outcome.errorText ? { error: outcome.errorText } : {}),
@@ -549,14 +549,9 @@ export function extractMutatedFilePaths(part: MessagePart): string[] {
 
   const patchRaw = (input.patchText as string) ?? (input.patch as string);
   if (typeof patchRaw === "string") {
-    const match = patchRaw.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
-    const filePath = match?.[1];
-    if (filePath && filePath !== "/dev/null") add(filePath);
-    // A pure deletion patch has +++ /dev/null; retain the removed path so the
-    // post-verification fingerprint can prove that absence is still current.
-    if (/\+\+\+\s+\/dev\/null/.test(patchRaw)) {
-      const removed = /---\s+(?:a\/)?([^\s\t\n]+)/.exec(patchRaw)?.[1];
-      if (removed && removed !== "/dev/null") add(removed);
+    for (const section of splitFilePatches(patchRaw)) {
+      add(section.previousPath);
+      add(section.filePath);
     }
   }
 
@@ -714,6 +709,7 @@ export function collectTurnEvidence(
   let lastMutationSequence = -1;
 
   for (const message of currentTurn) {
+    if (message.info.role !== "assistant") continue;
     for (const part of message.parts) {
       const outputText = stringify(part.state?.output ?? part.state?.metadata?.output).trim();
       const outcome = statusFromPart(part, outputText);

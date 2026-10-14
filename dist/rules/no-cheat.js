@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches, } from "../tool-input.js";
 import { isAuthorizedTestEdit, isTestBypassProhibited, isSpecificTestBypassAuthorized } from "../locale-intents.js";
 import { currentHumanMessage } from "../task-contract.js";
 /**
@@ -350,32 +350,36 @@ export const noCheatRule = {
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkTestCode(edit.text, edit.filePath);
                 }
-                const patchText = extractAddedLines(patchRaw);
-                if (patchText)
-                    checkTestCode(patchText, targetFile);
-                if (typeof patchRaw === "string") {
-                    const weakening = detectAssertionWeakening(patchRaw, targetFile);
-                    if (weakening)
-                        addFinding(weakening, blockStructuralTestChanges);
-                    const coverage = detectCoverageReduction(patchRaw, targetFile);
-                    if (coverage)
-                        addFinding(coverage, blockStructuralTestChanges);
-                    const ciRemoval = detectCiTestRemoval(patchRaw, targetFile);
-                    if (ciRemoval)
-                        addFinding(ciRemoval, blockStructuralTestChanges);
-                }
-                if (detectsTestFileDeletion(input, patchRaw, targetFile)) {
-                    addFinding({
-                        ruleId: "testing/no-cheat",
-                        pattern: "test file deleted",
-                        messageSnippet: targetFile ?? "test file",
-                        description: "A test file was deleted; this becomes blocking when paired with failed-test evidence or strict structural-test mode",
-                        confidence: hasFailedTestEvidence ? "high" : "medium",
-                        ...(targetFile ? {
-                            filePath: targetFile,
-                            fingerprint: `${targetFile}:test file deleted`,
-                        } : {}),
-                    }, blockStructuralTestChanges);
+                const sections = splitFilePatches(patchRaw);
+                for (const section of sections.length ? sections : [{ patch: "", deleted: false, filePath: targetFile }]) {
+                    const sectionPath = section.filePath ?? targetFile;
+                    const patchText = extractAddedLines(section.patch);
+                    if (patchText)
+                        checkTestCode(patchText, sectionPath);
+                    if (section.patch) {
+                        const weakening = detectAssertionWeakening(section.patch, sectionPath);
+                        if (weakening)
+                            addFinding(weakening, blockStructuralTestChanges);
+                        const coverage = detectCoverageReduction(section.patch, sectionPath);
+                        if (coverage)
+                            addFinding(coverage, blockStructuralTestChanges);
+                        const ciRemoval = detectCiTestRemoval(section.patch, sectionPath);
+                        if (ciRemoval)
+                            addFinding(ciRemoval, blockStructuralTestChanges);
+                    }
+                    if (detectsTestFileDeletion(section.deleted ? { ...input, action: "delete" } : input, section.patch, sectionPath)) {
+                        addFinding({
+                            ruleId: "testing/no-cheat",
+                            pattern: "test file deleted",
+                            messageSnippet: sectionPath ?? "test file",
+                            description: "A test file was deleted; this becomes blocking when paired with failed-test evidence or strict structural-test mode",
+                            confidence: hasFailedTestEvidence ? "high" : "medium",
+                            ...(sectionPath ? {
+                                filePath: sectionPath,
+                                fingerprint: `${sectionPath}:test file deleted`,
+                            } : {}),
+                        }, blockStructuralTestChanges);
+                    }
                 }
                 const shellMutation = extractLikelyShellMutation(input);
                 if (shellMutation) {

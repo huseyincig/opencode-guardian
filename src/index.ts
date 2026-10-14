@@ -10,6 +10,7 @@ import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
 import { createV1TurnWatcher } from "./v1-turn-watcher.js";
+import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import {
   type AgentMutationProfile,
@@ -642,6 +643,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     text: string,
     ruleIds: readonly string[]
   ): Promise<void> => {
+    if (updateNoticeController.signal.aborted) return;
     const remediationText = sanitizerOpts
       ? sanitizeString(text, sanitizerOpts).sanitized
       : text;
@@ -660,6 +662,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     if (response.error) {
       throw new Error("V1 host rejected the Guardian remediation request.");
     }
+    if (updateNoticeController.signal.aborted) return;
 
     // The remediation above is intentionally synthetic and hidden by OpenCode.
     // Add a second, display-only transcript row without triggering a model turn.
@@ -747,7 +750,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
           async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds),
           engine,
           verificationStore.snapshots(sessionID),
-          undefined,
+          updateNoticeController.signal,
           relation.known ? Boolean(relation.parentID) : undefined,
           relation.known && relation.parentID
             ? async () => {
@@ -909,6 +912,9 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         }
 
         if (sanitizerOpts && output) {
+          if (typeof output.title === "string") {
+            output.title = sanitizeString(output.title, sanitizerOpts).sanitized;
+          }
           if (typeof output.output === "string") {
             const sanitized = sanitizeString(output.output, sanitizerOpts);
             output.output = sanitized.sanitized;
@@ -1072,7 +1078,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds),
         engine,
         verificationStore.snapshots(sessionID),
-        undefined,
+        updateNoticeController.signal,
         isSubagent,
         isSubagent
           ? async () => {
@@ -1217,6 +1223,9 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const registrations: Array<{ dispose(): Promise<void> | void }> = [];
   const interventionSnapshots = new Map<string, GuardianToastPayload>();
   const toastNotifiersByDirectory = new Map<string, GuardianToastNotifier>();
+  const idleQueue = createIdleQueue(controller.signal, () => {
+    recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
+  });
 
   if (typeof context.rpc?.register === "function") {
     try {
@@ -1616,20 +1625,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       taskRegistrations.push(contextRegistration);
 
       if (sanitizerOpts) {
-        const compactionRegistration = await context.session.hook("compaction", async (event) => {
-          await sanitizeV2ModelRequest(event);
-        });
-        const generateRegistration = await context.session.hook("generate", async (event) => {
-          await sanitizeV2ModelRequest(event);
-        });
-        const titleRegistration = await context.session.hook("title", async (event) => {
-          await sanitizeV2ModelRequest(event);
-        });
-        for (const registration of [
-          compactionRegistration,
-          generateRegistration,
-          titleRegistration,
-        ]) {
+        for (const kind of ["compaction", "generate", "title"] as const) {
+          const registration = await context.session.hook(kind, async (event) => {
+            await sanitizeV2ModelRequest(event);
+          });
           if (!registration || typeof registration.dispose !== "function") {
             throw new Error("V2 auxiliary model hook did not return a valid registration.");
           }
@@ -1689,6 +1688,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           const deletedSessionID =
             eventData.data?.sessionID ?? eventData.data?.info?.id;
           if (deletedSessionID) {
+            idleQueue.forget(deletedSessionID);
             forgetSessionRuntime(deletedSessionID);
             verificationStore.forget(deletedSessionID);
             contracts.delete(deletedSessionID);
@@ -1725,6 +1725,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (eventData.type === "session.moved") {
           const movedSessionID = eventData.data?.sessionID;
           if (movedSessionID) {
+            idleQueue.forget(movedSessionID);
             forgetSessionRuntime(movedSessionID);
             rememberSessionDirectory(
               movedSessionID,
@@ -1762,60 +1763,61 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         const sessionID = eventData.data?.sessionID;
         if (!sessionID) continue;
 
-        let activeDirectory = await resolveSessionDirectory(sessionID);
-        let sessionIsSubagent: boolean | undefined;
-        let sessionParentID: string | undefined;
-        try {
-          if (typeof context.session.get === "function") {
-            const session = await context.session.get({ sessionID });
-            activeDirectory = rememberSessionDirectory(
-              sessionID,
-              session.location?.directory
-            );
-            sessionParentID =
-              typeof session.parentID === "string" && session.parentID.length > 0
-                ? session.parentID
-                : undefined;
-            sessionIsSubagent = Boolean(sessionParentID);
+        idleQueue.enqueue(sessionID, async (idleSignal) => {
+          let activeDirectory = await resolveSessionDirectory(sessionID);
+          let sessionIsSubagent: boolean | undefined;
+          let sessionParentID: string | undefined;
+          try {
+            if (typeof context.session.get === "function") {
+              const session = await context.session.get({ sessionID });
+              activeDirectory = rememberSessionDirectory(
+                sessionID,
+                session.location?.directory
+              );
+              sessionParentID =
+                typeof session.parentID === "string" && session.parentID.length > 0
+                  ? session.parentID
+                  : undefined;
+              sessionIsSubagent = Boolean(sessionParentID);
+            }
+          } catch {
+            // A transient/partial host must not disable the existing idle path.
           }
-        } catch {
-          // A transient/partial host must not disable the existing idle path.
-        }
 
-        if (sessionParentID && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
-          continue;
-        }
+          if (sessionParentID && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
+            return;
+          }
 
-        const runtime = runtimeForDirectory(activeDirectory);
-        if (runtime.config.enabled === false) continue;
+          const runtime = runtimeForDirectory(activeDirectory);
+          if (runtime.config.enabled === false || idleSignal.aborted) return;
 
-        await handleSessionIdle(
-          sessionID,
-          activeDirectory,
-          async () => {
-            const messages = await context.session.context({ sessionID });
-            const normalized = normalizeV2Messages(messages, sessionID);
-            const contract = extractTaskContract(normalized);
-            if (contract) contracts.set(sessionID, contract);
-            return normalized;
-          },
-          async (text) => {
-            if (controller.signal.aborted) return;
-            const remediationText = runtime.sanitizer
-              ? sanitizeString(text, runtime.sanitizer).sanitized
-              : text;
-            await context.session.synthetic({
-              sessionID,
-              text: remediationText,
-              description: "OpenCode Guardian remediation",
-              metadata: v2GuardianMetadata(sessionID, "remediation"),
-              delivery: "queue",
-              resume: true,
+          await handleSessionIdle(
+            sessionID,
+            activeDirectory,
+            async () => {
+              const messages = await context.session.context({ sessionID });
+              const normalized = normalizeV2Messages(messages, sessionID);
+              const contract = extractTaskContract(normalized);
+              if (contract) contracts.set(sessionID, contract);
+              return normalized;
+            },
+            async (text) => {
+              if (idleSignal.aborted) return;
+              const remediationText = runtime.sanitizer
+                ? sanitizeString(text, runtime.sanitizer).sanitized
+                : text;
+              await context.session.synthetic({
+                sessionID,
+                text: remediationText,
+                description: "OpenCode Guardian remediation",
+                metadata: v2GuardianMetadata(sessionID, "remediation"),
+                delivery: "queue",
+                resume: true,
             });
           },
           runtime.engine,
           verificationStore.snapshots(sessionID),
-          controller.signal,
+          idleSignal,
           sessionIsSubagent,
           sessionIsSubagent
             ? async () => {
@@ -1840,6 +1842,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             : undefined,
           toastNotifier
         );
+        });
         }
         if (controller.signal.aborted) return;
         throw new Error("V2 event stream ended before plugin teardown.");

@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 import { extractFilePathFromPatch } from "./no-secrets.js";
 /**
  * Patterns that indicate fake or stubbed implementations in code.
@@ -110,9 +110,10 @@ export const noStubsRule = {
                     for (const edit of extractStructuredEditTexts(input, targetFile)) {
                         checkCode(edit.text, "structured file edit", edit.filePath);
                     }
-                    const patchText = extractAddedLines(patchRaw);
-                    if (patchText) {
-                        checkCode(patchText, "patch added lines", targetFile);
+                    for (const section of splitFilePatches(patchRaw)) {
+                        const patchText = extractAddedLines(section.patch);
+                        if (patchText)
+                            checkCode(patchText, "patch added lines", section.filePath ?? targetFile);
                     }
                     const shellMutation = extractLikelyShellMutation(input);
                     if (shellMutation) {

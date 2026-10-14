@@ -2,7 +2,7 @@ import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } fro
 import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
-import { extractStructuredEditTexts } from "./tool-input.js";
+import { extractStructuredEditTexts, quoteProcessArgument } from "./tool-input.js";
 /**
  * Shell tools known to execute shell commands.
  */
@@ -69,13 +69,16 @@ function evaluateProcessStartPreflight(input) {
             /^(?:-encodedcommand|-enc)$/i.test(shellOption)) {
             return "uninspectable-shell-input";
         }
-        return evaluatePreflight("bash", { command: args.slice(option + 1).join(" ") });
+        const script = ["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(executable)
+            ? args[option + 1]
+            : args.slice(option + 1).join(" ");
+        return evaluatePreflight("bash", { command: script });
     }
     if (["node", "python", "python3", "ruby", "perl"].includes(executable) &&
         args.some((arg) => ["-e", "--eval", "-c", "-E"].includes(arg))) {
         return "uninspectable-shell-input";
     }
-    const command = [executable, ...args].join(" ");
+    const command = [executable, ...args].map(quoteProcessArgument).join(" ");
     if (assessCommandPreflight(command).isHighRiskEnvDump) {
         return "high-risk-environment-dump";
     }

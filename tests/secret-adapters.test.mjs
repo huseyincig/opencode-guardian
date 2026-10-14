@@ -33,7 +33,7 @@ test('V1 ADAPTER: tool.execute.after redacts secrets from output and metadata', 
   };
 
   const output = {
-    title: 'bash: docker exec app env',
+    title: `bash: TOKEN=${canary}`,
     output: [
       'PATH=/usr/bin:/bin',
       `PADDLE_API_KEY=${canary}`,
@@ -47,6 +47,7 @@ test('V1 ADAPTER: tool.execute.after redacts secrets from output and metadata', 
 
   await hooks['tool.execute.after'](input, output);
 
+  assert.equal(output.title.includes(canary), false, 'V1 tool title must not contain raw secret');
   assert.equal(output.output.includes(canary), false, 'V1 output must not contain raw secret');
   assert.equal(output.metadata.envDump.includes(canary), false, 'V1 metadata must not contain raw secret');
   assert.match(output.output, /PADDLE_API_KEY=\[REDACTED\]/);
@@ -181,10 +182,14 @@ test('V2 ADAPTER: setup registers tool and session hooks, redacting output and L
     messageID: 'msg-01',
     result: {
       output: `DATABASE_PASSWORD=${canary}\nDB_PORT=5432`,
+      title: `Result ${canary}`,
+      content: `Sibling content ${canary}`,
+      metadata: { exitCode: 0 },
     },
   };
 
   await executeAfterHandler(toolEvent);
+  assert.equal(JSON.stringify(toolEvent.result).includes(canary), false, 'V2 result siblings must be redacted');
   assert.equal(toolEvent.result.output.includes(canary), false, 'V2 tool result must be redacted');
   assert.match(toolEvent.result.output, /DATABASE_PASSWORD=\[REDACTED\]/);
   assert.match(toolEvent.result.output, /DB_PORT=5432/);

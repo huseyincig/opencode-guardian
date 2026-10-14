@@ -20,6 +20,54 @@ const messages = (complete = false) => [
     parts: [{ type: "text", text: "Tests passed." }] },
 ];
 
+test("V1 dispose cancels an idle inspection waiting on session messages", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v1-dispose-idle-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let releaseMessages;
+  let enteredMessages;
+  const started = new Promise(resolve => { enteredMessages = resolve; });
+  const response = new Promise(resolve => { releaseMessages = resolve; });
+  let prompts = 0;
+  const hooks = await Guardian.server({ directory, client: { session: {
+    async get() { return { data: { id: 'disposing-session' } }; },
+    async messages() { enteredMessages(); return response; },
+    async promptAsync() { prompts++; return {}; },
+  } } });
+  const idle = hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'disposing-session' } } });
+  await started;
+  await hooks.dispose();
+  releaseMessages({ data: [
+    { info: { id: 'u-dispose', role: 'user' }, parts: [{ type: 'text', text: 'Complete this task.' }] },
+    { info: { id: 'a-dispose', role: 'assistant' }, parts: [{ type: 'text', text: 'I am sorry.' }] },
+  ] });
+  await idle;
+  assert.equal(prompts, 0, 'unloaded plugin must not restart a model turn or emit a transcript row');
+});
+
+test("V1 dispose suppresses a visible row after an in-flight remediation request", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v1-dispose-prompt-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let releasePrompt;
+  let enteredPrompt;
+  const started = new Promise(resolve => { enteredPrompt = resolve; });
+  const response = new Promise(resolve => { releasePrompt = resolve; });
+  let prompts = 0;
+  const hooks = await Guardian.server({ directory, client: { session: {
+    async get() { return { data: { id: 'disposing-session' } }; },
+    async messages() { return { data: [
+      { info: { id: 'u-prompt', role: 'user' }, parts: [{ type: 'text', text: 'Complete this task.' }] },
+      { info: { id: 'a-prompt', role: 'assistant' }, parts: [{ type: 'text', text: 'I am sorry.' }] },
+    ] }; },
+    async promptAsync() { prompts++; if (prompts === 1) { enteredPrompt(); return response; } return {}; },
+  } } });
+  const idle = hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'disposing-session' } } });
+  await started;
+  await hooks.dispose();
+  releasePrompt({});
+  await idle;
+  assert.equal(prompts, 1, 'teardown cannot undo a sent request, but must prevent the follow-up request');
+});
+
 test("V1 watcher only inspects completed assistant turns after two stable idle checks", async () => {
   let state = "busy";
   let complete = false;

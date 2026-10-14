@@ -100,6 +100,13 @@ function v2CommandDirectory(context: GuardianV2Context, fallback: string): strin
   return context.data.location.default()?.directory ?? fallback;
 }
 
+/** A broken project config must not reject the host's UI render callback. */
+function v2UiConfig(directory: string, options: unknown) {
+  try { return resolveEffectiveConfig(loadConfig(directory), options); } catch {
+    return { enabled: false, notifications: { enabled: false }, updateNotice: { enabled: false } };
+  }
+}
+
 async function v2PerformCommand(
   context: GuardianV2Context, command: GuardianCommand, directory: string
 ): Promise<void> {
@@ -455,8 +462,10 @@ const v2Plugin: Plugin.Definition = {
           sessionLocation ? { location: sessionLocation } : undefined
         );
         if (disposed || generation !== rpcGeneration) return;
+        const currentSession = context.data.session.get(sessionID);
+        if (!currentSession) return;
         const currentDirectory =
-          context.data.session.get(sessionID)?.location?.directory ??
+          currentSession.location?.directory ??
           context.location?.directory;
         if (currentDirectory !== requestedDirectory) return;
         const snapshot = parseGuardianInterventionSnapshot(raw);
@@ -513,12 +522,9 @@ const v2Plugin: Plugin.Definition = {
         scope.sessionID
           ? v2SessionDirectory(context, scope.sessionID, directory)
           : scope.directory ?? directory;
-      const toastConfig = resolveEffectiveConfig(
-        loadConfig(toastDirectory),
-        context.options
-      );
+      const toastConfig = v2UiConfig(toastDirectory, context.options);
       if (
-        toastConfig.notifications?.enabled !== false &&
+        toastConfig.enabled !== false && toastConfig.notifications?.enabled !== false &&
         typeof context.ui.toast?.show === "function"
       ) {
         try {
@@ -538,6 +544,12 @@ const v2Plugin: Plugin.Definition = {
         storeIntervention(scope.sessionID, undefined);
       }
     });
+    const unregisterSessionDelete = typeof context.data?.on === "function"
+      ? context.data.on("session.deleted", (event) => {
+          storeIntervention(event.data.sessionID, undefined);
+          rpcInFlight.delete(event.data.sessionID);
+        })
+      : undefined;
 
     // Main conversation column: visible Guardian interventions belong next to
     // the active chat, not only in the sidebar/toast layer.
@@ -545,7 +557,7 @@ const v2Plugin: Plugin.Definition = {
       append: "session.composer.top",
       render: ({ sessionID }) => (
         <GuardianConversationIntervention
-          payload={interventions()[sessionID]}
+          payload={context.data.session.get(sessionID) ? interventions()[sessionID] : undefined}
           colors={colors()}
         />
       ),
@@ -558,7 +570,7 @@ const v2Plugin: Plugin.Definition = {
         const sessionDirectory = () =>
           v2SessionDirectory(context, sessionID, directory);
         const sessionConfig = () =>
-          resolveEffectiveConfig(loadConfig(sessionDirectory()), context.options);
+          v2UiConfig(sessionDirectory(), context.options);
         return <GuardianSidebar directory={directory}
           currentDirectory={sessionDirectory}
           checkUpdates={sessionConfig().updateNotice?.enabled !== false}
@@ -574,6 +586,7 @@ const v2Plugin: Plugin.Definition = {
       if (rpcPoll) clearInterval(rpcPoll);
       try { unregisterToast?.(); } catch {}
       try { unregisterToastClear?.(); } catch {}
+      try { unregisterSessionDelete?.(); } catch {}
       try { conversationSlotDisposer?.(); } catch {}
       try { sidebarSlotDisposer?.(); } catch {}
     };

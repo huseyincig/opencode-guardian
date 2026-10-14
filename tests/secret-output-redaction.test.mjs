@@ -10,6 +10,23 @@ import {
 
 const SYNTHETIC_CANARY_SECRET = 'canary_secret_ABC123_DEF456_789XYZ';
 
+test('string output envelopes redact title and content siblings without altering safe fields', () => {
+  const secret = 'guardianSyntheticSiblingSecret7654321';
+  const input = {
+    output: 'finished', title: secret,
+    content: [{ type: 'text', text: secret }],
+    raw: { detail: secret }, metadata: { exitCode: 0, region: 'eu-central-1' },
+  };
+  const sanitized = sanitizeToolResult(input, { includeRuntimeEnv: false, customSecretValues: [secret] });
+  assert.equal(JSON.stringify(sanitized).includes(secret), false);
+  assert.equal(sanitized.output, 'finished');
+  assert.equal(sanitized.title, '[REDACTED]');
+  assert.deepEqual(sanitized.content, [{ type: 'text', text: '[REDACTED]' }]);
+  assert.deepEqual(sanitized.raw, { detail: '[REDACTED]' });
+  assert.deepEqual(sanitized.metadata, input.metadata);
+  assert.equal(input.title, secret, 'sanitization must not mutate the source result');
+});
+
 test('REPRODUCTION & VERIFICATION: Tool output leak in docker exec ... env', () => {
   const rawToolOutput = [
     'PATH=/usr/local/bin:/usr/bin:/bin',

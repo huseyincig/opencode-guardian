@@ -1,5 +1,5 @@
 import { sanitizeProseForInspection } from "../prose.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches, } from "../tool-input.js";
 import { extractGitCommitMessage } from "../preflight.js";
 import { extractFilePathFromPatch } from "./no-secrets.js";
 import { isAuthorizedStubOrPlaceholder, isCodePlaceholderRequested, isPlaceholderProhibited, } from "../locale-intents.js";
@@ -337,9 +337,11 @@ export const noShortcutsRule = {
                     for (const edit of extractStructuredEditTexts(input, targetFile)) {
                         checkText(extractCodeComments(edit.text), "structured file edit comments", true, edit.filePath);
                     }
-                    const patchText = extractAddedPatchLines(patchRaw);
-                    if (patchText) {
-                        checkText(extractCodeComments(patchText), "patch added comments", true, targetFile);
+                    for (const section of splitFilePatches(patchRaw)) {
+                        const patchText = extractAddedPatchLines(section.patch);
+                        if (patchText) {
+                            checkText(extractCodeComments(patchText), "patch added comments", true, section.filePath ?? targetFile);
+                        }
                     }
                     const shellMutation = extractLikelyShellMutation(input);
                     if (shellMutation) {

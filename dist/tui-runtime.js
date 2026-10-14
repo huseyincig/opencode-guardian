@@ -100,6 +100,23 @@ function v2CommandDirectory(context, fallback) {
   }
   return context.data.location.default()?.directory ?? fallback;
 }
+
+/** A broken project config must not reject the host's UI render callback. */
+function v2UiConfig(directory, options) {
+  try {
+    return resolveEffectiveConfig(loadConfig(directory), options);
+  } catch {
+    return {
+      enabled: false,
+      notifications: {
+        enabled: false
+      },
+      updateNotice: {
+        enabled: false
+      }
+    };
+  }
+}
 async function v2PerformCommand(context, command, directory) {
   if (command === "reset") {
     const confirmed = await context.ui.dialog.confirm({
@@ -598,7 +615,9 @@ const v2Plugin = {
           location: sessionLocation
         } : undefined);
         if (disposed || generation !== rpcGeneration) return;
-        const currentDirectory = context.data.session.get(sessionID)?.location?.directory ?? context.location?.directory;
+        const currentSession = context.data.session.get(sessionID);
+        if (!currentSession) return;
+        const currentDirectory = currentSession.location?.directory ?? context.location?.directory;
         if (currentDirectory !== requestedDirectory) return;
         const snapshot = parseGuardianInterventionSnapshot(raw);
         if (!snapshot) return;
@@ -640,8 +659,8 @@ const v2Plugin = {
         storeIntervention(scope.sessionID, toast);
       }
       const toastDirectory = scope.sessionID ? v2SessionDirectory(context, scope.sessionID, directory) : scope.directory ?? directory;
-      const toastConfig = resolveEffectiveConfig(loadConfig(toastDirectory), context.options);
-      if (toastConfig.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
+      const toastConfig = v2UiConfig(toastDirectory, context.options);
+      if (toastConfig.enabled !== false && toastConfig.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
         try {
           context.ui.toast.show({
             title: toast.title,
@@ -661,6 +680,10 @@ const v2Plugin = {
         storeIntervention(scope.sessionID, undefined);
       }
     });
+    const unregisterSessionDelete = typeof context.data?.on === "function" ? context.data.on("session.deleted", event => {
+      storeIntervention(event.data.sessionID, undefined);
+      rpcInFlight.delete(event.data.sessionID);
+    }) : undefined;
 
     // Main conversation column: visible Guardian interventions belong next to
     // the active chat, not only in the sidebar/toast layer.
@@ -670,7 +693,7 @@ const v2Plugin = {
         sessionID
       }) => _$createComponent(GuardianConversationIntervention, {
         get payload() {
-          return interventions()[sessionID];
+          return _$memo(() => !!context.data.session.get(sessionID))() ? interventions()[sessionID] : undefined;
         },
         get colors() {
           return colors();
@@ -685,7 +708,7 @@ const v2Plugin = {
         sessionID
       }) => {
         const sessionDirectory = () => v2SessionDirectory(context, sessionID, directory);
-        const sessionConfig = () => resolveEffectiveConfig(loadConfig(sessionDirectory()), context.options);
+        const sessionConfig = () => v2UiConfig(sessionDirectory(), context.options);
         return _$createComponent(GuardianSidebar, {
           directory: directory,
           currentDirectory: sessionDirectory,
@@ -709,6 +732,9 @@ const v2Plugin = {
       } catch {}
       try {
         unregisterToastClear?.();
+      } catch {}
+      try {
+        unregisterSessionDelete?.();
       } catch {}
       try {
         conversationSlotDisposer?.();

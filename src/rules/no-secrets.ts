@@ -1,5 +1,5 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 
 export const SECRET_PATTERNS: { regex: RegExp; name: string }[] = [
   { regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{32,}\b/, name: "OpenAI API Key (sk-...)" },
@@ -20,8 +20,7 @@ export const SECRET_PATTERNS: { regex: RegExp; name: string }[] = [
 
 export function extractFilePathFromPatch(patch: unknown): string | undefined {
   if (typeof patch !== "string") return undefined;
-  const match = patch.match(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/);
-  return match ? match[1] : undefined;
+  return splitFilePatches(patch)[0]?.filePath;
 }
 
 export function extractAddedLines(text: unknown): string {
@@ -152,8 +151,10 @@ export const noSecretsRule: GuardRule = {
           checkCode(edit.text, edit.filePath);
         }
 
-        const patchText = extractAddedLines(patchRaw);
-        if (patchText) checkCode(patchText, targetFile);
+        for (const section of splitFilePatches(patchRaw)) {
+          const patchText = extractAddedLines(section.patch);
+          if (patchText) checkCode(patchText, section.filePath ?? targetFile);
+        }
 
         const shellMutation = extractLikelyShellMutation(input);
         if (shellMutation) checkCode(shellMutation, undefined, "shell file mutation");

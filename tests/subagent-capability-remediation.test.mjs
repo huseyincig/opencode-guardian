@@ -182,9 +182,9 @@ test("Scenario 1: Read-only child subagent completion result receives zero remed
     input: { agent: "code-reviewer" },
     status: "completed",
     result: {
-      output: { sessionID: "v2-child-1", status: "completed", output: "Review output preserved" },
-      content: '<subagent sessionID="v2-child-1" state="completed">Review output preserved</subagent>',
-      metadata: { sessionID: "v2-child-1", status: "completed" },
+      output: '<task id="v2-child-1" state="completed">Review output preserved</task>',
+      content: '<task id="v2-child-1" state="completed">Review output preserved</task>',
+      metadata: { sessionId: "v2-child-1" },
     },
   };
   for (const cb of v2Hooks.get("execute.after") ?? []) {

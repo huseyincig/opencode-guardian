@@ -279,6 +279,8 @@ function GuardianSidebar(props) {
         return "▲ warning";
       case "preflight-allowed":
         return "● allowed";
+      case "post-inspected":
+        return "● inspected";
       case "runtime-started":
         return "● Active";
       default:
@@ -299,6 +301,7 @@ function GuardianSidebar(props) {
         return props.colors.accent;
       case "remediation-verified":
       case "preflight-allowed":
+      case "post-inspected":
       case "runtime-started":
         return successColor();
       default:
@@ -447,7 +450,7 @@ function GuardianSidebar(props) {
             return props.colors.text;
           }
         }), _$createComponent(StatRow, {
-          label: "Blocked",
+          label: "Tool Blocks",
           get value() {
             return status().blocked;
           },

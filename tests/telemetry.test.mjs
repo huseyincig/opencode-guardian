@@ -30,6 +30,71 @@ const client = { session: {
   async promptAsync() {},
 } };
 
+test("preflight-disabled project records real rule inspections but no blocked tools", (t) => {
+  isolated(t);
+  recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "disabled" });
+  recordGuardianEvent({ kind: "post-inspected", session: sessionFingerprint("secret-session") });
+  recordGuardianEvent({ kind: "post-warning", rules: ["quality/no-shortcuts"] });
+  const status = readGuardianStatus();
+  assert.deepEqual([status.preflight, status.inspected, status.blocked, status.warnings], ["disabled", 1, 0, 1]);
+  assert.doesNotMatch(fs.readFileSync(guardianEventPath(), "utf8"), /secret-session/);
+});
+
+test("V1 idle counts each assistant turn only once when preflight is disabled", async (t) => {
+  isolated(t);
+  const directory = setupConfig(t, { enabled: true, updateNotice: { enabled: false }, secrets: { enabled: false } });
+  let assistantID = "a1";
+  const host = { session: {
+    async get({ path: { id } }) { return { data: { id } }; },
+    async messages() { return { data: [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Review the source." }] },
+      { info: { id: assistantID, role: "assistant" }, parts: [{ type: "text", text: "Reviewed the source." }] },
+    ] }; },
+    async promptAsync() { return { data: {} }; },
+  } };
+  const hooks = await Guardian.server({ directory, client: host });
+  t.after(() => hooks.dispose());
+  const idle = () => hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } });
+  await idle();
+  await idle();
+  assert.equal(readGuardianStatus().inspected, 1);
+  assistantID = "a2";
+  await idle();
+  assert.deepEqual([readGuardianStatus().inspected, readGuardianStatus().blocked], [2, 0]);
+});
+
+test("V2 idle counts a real rule evaluation once, not duplicate idle events", async (t) => {
+  isolated(t);
+  const directory = setupConfig(t, { enabled: true, updateNotice: { enabled: false }, secrets: { enabled: false } });
+  const host = {
+    location: { directory },
+    event: { subscribe({ signal }) { return (async function* () {
+      yield { type: "session.idle", data: { sessionID: "v2-idle" } };
+      yield { type: "session.idle", data: { sessionID: "v2-idle" } };
+      await new Promise((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", resolve, { once: true });
+      });
+    })(); } },
+    session: {
+      async get({ sessionID }) { return { id: sessionID, location: { directory } }; },
+      async context() { return [
+        { id: "u2", type: "user", text: "Review the source." },
+        { id: "a2", type: "assistant", content: [{ type: "text", text: "Reviewed the source." }] },
+      ]; },
+      async synthetic() {},
+    },
+  };
+  const dispose = await Guardian.setup(host);
+  t.after(() => dispose?.());
+  const deadline = Date.now() + 1200;
+  while (readGuardianStatus().inspected < 1 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  await new Promise((r) => setTimeout(r, 25));
+  assert.deepEqual([readGuardianStatus().inspected, readGuardianStatus().blocked, readGuardianStatus().errors], [1, 0, 0]);
+});
+
 test("JSONL events are restrictive, command-free, and have correct bounded counters", (t) => {
   isolated(t);
   assert.equal(readGuardianStatus().preflight, "unknown");

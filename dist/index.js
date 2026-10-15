@@ -249,6 +249,13 @@ function latestAssistantText(messages) {
 }
 function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
     const findings = result.results.filter((item) => item.findings.length > 0);
+    // Only completed, non-duplicate rule evaluations count toward Inspected.
+    if (result.results.length > 0) {
+        recordGuardianEvent({
+            kind: "post-inspected",
+            session: sessionFingerprint(sessionID),
+        }, directory);
+    }
     if (result.remediationStatus === "verified") {
         toastNotifier?.clear?.(sessionID);
         const verifiedRules = result.pendingRemediationRules?.length
@@ -1190,11 +1197,17 @@ const setup = async (context) => {
                             : undefined;
                         const childID = typeof current.metadata?.sessionID === "string"
                             ? current.metadata.sessionID
-                            : typeof structured?.sessionID === "string"
-                                ? structured.sessionID
-                                : undefined;
-                        const completed = current.metadata?.status === "completed" ||
-                            structured?.status === "completed";
+                            : typeof current.metadata?.sessionId === "string"
+                                ? current.metadata.sessionId
+                                : typeof structured?.sessionID === "string"
+                                    ? structured.sessionID
+                                    : typeof structured?.sessionId === "string"
+                                        ? structured.sessionId
+                                        : undefined;
+                        // The completed tool event is authoritative when child status is omitted.
+                        // Explicit failed/incomplete child states must still be ignored.
+                        const childStatus = current.metadata?.status ?? structured?.status;
+                        const completed = childStatus === undefined || childStatus === "completed";
                         if (childID && completed) {
                             const child = await context.session.get({ sessionID: childID });
                             if (child.parentID !== event.sessionID) {

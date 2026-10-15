@@ -270,6 +270,7 @@ function GuardianSidebar(props: {
       case "verification-unavailable": return "▲ verification unavailable";
       case "post-warning": return "▲ warning";
       case "preflight-allowed": return "● allowed";
+      case "post-inspected": return "● inspected";
       case "runtime-started": return "● Active";
       default: return "○ Idle";
     }
@@ -286,6 +287,7 @@ function GuardianSidebar(props: {
       case "post-remediation": return props.colors.accent;
       case "remediation-verified":
       case "preflight-allowed":
+      case "post-inspected":
       case "runtime-started": return successColor();
       default: return props.colors.muted;
     }
@@ -357,7 +359,7 @@ function GuardianSidebar(props: {
           text={props.colors.text}
         />
         <StatRow
-          label="Blocked"
+          label="Tool Blocks"
           value={status().blocked}
           valueColor={status().blocked > 0 ? errorColor() : props.colors.muted}
           muted={props.colors.muted}

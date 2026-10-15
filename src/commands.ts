@@ -39,8 +39,8 @@ export async function guardianCommandReport(
         title: "Guardian: Project Status",
         message: [
           "Preflight (last start): " + status.preflight,
-          "Tool calls inspected: " + status.inspected,
-          "Blocked: " + status.blocked,
+          "Inspections (tool + turn): " + status.inspected,
+          "Blocked tools (preflight): " + status.blocked,
           "Warnings: " + status.warnings,
           "Remediation requests: " + status.remediations,
           "Verified / failed / unverified: " +

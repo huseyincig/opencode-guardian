@@ -142,7 +142,7 @@ test("V1 uses the installed command.register contract and requires reset confirm
   const status = registered.find((c) => c.value.endsWith(".status"));
   await status.onSelect();
   assert.equal(dialogState.type, "alert");
-  assert.match(dialogState.message, /Blocked: 1/);
+  assert.ok(dialogState.message.includes("Blocked tools (preflight): 1"));
   const reset = registered.find((c) => c.value.endsWith(".reset"));
   await reset.onSelect();
   assert.equal(dialogState.type, "confirm");
@@ -182,7 +182,7 @@ test("V2 registers a pure keymap layer with Ctrl+P and slash and prompts for res
   const status = commands.find((c) => c.id === "opencode-guardian.status");
   recordGuardianEvent({ kind: "preflight-blocked", tool: "bash", rules: ["destructive-command"] }, dir);
   await status.run();
-  assert.match(opened.at(-1).message, /Blocked: 1/);
+  assert.ok(opened.at(-1).message.includes("Blocked tools (preflight): 1"));
   await help.run("/guardian activity");
   assert.match(opened.at(-1).message, /preflight-blocked/);
   await help.run("/guardian unsupported");
@@ -268,10 +268,10 @@ test("V2 command actions resolve the current project at invocation time", async 
   const commands = register().commands;
   const status = commands.find((c) => c.id === "opencode-guardian.status");
   await status.run();
-  assert.match(shown.at(-1).message, /Blocked: 1/);
+  assert.ok(shown.at(-1).message.includes("Blocked tools (preflight): 1"));
   current = b;
   await status.run();
-  assert.match(shown.at(-1).message, /Blocked: 0/);
+  assert.ok(shown.at(-1).message.includes("Blocked tools (preflight): 0"));
   assert.match(shown.at(-1).message, /Warnings: 1/);
   const reset = commands.find((c) => c.id === "opencode-guardian.reset");
   await reset.run();

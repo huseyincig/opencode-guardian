@@ -6,11 +6,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { SAFE_REASON_CODES, SAFE_RULE_IDS, type AuditReason } from "./audit.js";
 
 export type GuardianEventKind =
-  | "runtime-started" | "preflight-allowed" | "preflight-blocked"
+  | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected"
   | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
 export type GuardianAction =
-  | "started" | "allowed" | "blocked-before-execution" | "warned"
+  | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned"
   | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
 export type GuardianOutcome =
   | "started" | "allowed" | "prevented" | "reported"
@@ -54,6 +54,7 @@ const ACTIONS: Record<GuardianEventKind, [GuardianAction, GuardianOutcome]> = {
   "runtime-started": ["started", "started"],
   "preflight-allowed": ["allowed", "allowed"],
   "preflight-blocked": ["blocked-before-execution", "prevented"],
+  "post-inspected": ["inspected", "reported"],
   "post-warning": ["warned", "reported"],
   // Queuing an instruction proves nothing about whether the agent fixed it.
   "post-remediation": ["remediation-requested", "unverified"],
@@ -276,7 +277,7 @@ export function readGuardianStatus(
         result.errors = result.verified = result.failed = result.unverified = 0;
         continue;
       }
-      if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked") result.inspected++;
+      if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked" || entry.kind === "post-inspected") result.inspected++;
       if (entry.kind === "preflight-blocked") result.blocked++;
       if (entry.kind === "post-warning") result.warnings++;
       if (entry.kind === "post-remediation") result.remediations++;

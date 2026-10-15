@@ -10,6 +10,7 @@ const ACTIONS = {
     "runtime-started": ["started", "started"],
     "preflight-allowed": ["allowed", "allowed"],
     "preflight-blocked": ["blocked-before-execution", "prevented"],
+    "post-inspected": ["inspected", "reported"],
     "post-warning": ["warned", "reported"],
     // Queuing an instruction proves nothing about whether the agent fixed it.
     "post-remediation": ["remediation-requested", "unverified"],
@@ -242,7 +243,7 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
                 result.errors = result.verified = result.failed = result.unverified = 0;
                 continue;
             }
-            if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked")
+            if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked" || entry.kind === "post-inspected")
                 result.inspected++;
             if (entry.kind === "preflight-blocked")
                 result.blocked++;

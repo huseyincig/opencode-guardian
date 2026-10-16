@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.11.0 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.11.1 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.11.0`
+- **Package Version:** OpenCode Guardian `v0.11.1`
 - **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **597 / 597 unit, security, toast notification, and regression tests passed**
+- **Current Automated Source Suite:** **600 / 600 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.11.0 delivers evidence trust boundaries, per-file patch attribution, credential redaction in telemetry and secret sanitizers, idle queue coalescing with stable turn inspection, Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.11.0 V1/V2 acceptance run.
+> v0.11.1 delivers accurate post-turn inspection telemetry counting, robust V2 subagent handoff recognition across metadata and structured outputs, evidence trust boundaries, per-file patch attribution, credential redaction in telemetry and secret sanitizers, idle queue coalescing with stable turn inspection, Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.11.1 V1/V2 acceptance run.
 
 ---
 
@@ -119,6 +119,19 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 2. **Reload Idempotence:**
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
+
+---
+
+## v0.11.1 Post-Turn Inspection Counting and V2 Subagent Handoff Recognition
+
+The v0.11.1 release enhances telemetry precision and strengthens subagent handoff coordination:
+
+- **Accurate Post-Turn Inspection Telemetry Counting (`telemetry` & `index`):**
+  - Ensured `post-inspected` events accurately increment on completed non-duplicate rule evaluations without inflating counters on synthetic turns or failed message fetches.
+- **Robust V2 Subagent Handoff Recognition (`index` & `agent-capability`):**
+  - Enhanced `finalizeSubagentHandoff` to recognize subagent results across metadata, structured tool outputs, and child session ownership verification.
+- **Suite Expansion (`tests`):**
+  - Added dedicated telemetry regression tests, expanding the automated suite to 600 passing tests (100% pass).
 
 ---
 

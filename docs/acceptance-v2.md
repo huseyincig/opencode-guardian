@@ -1,5 +1,7 @@
 # OpenCode V2 Acceptance Result
 
+> Historical host-acceptance record. The recorded versions, commits and results below are retained. Guardian v0.11.2 and Smart Questions v0.8.2 have not undergone a new live-host run in this update; see [current automated verification](verification-report.md).
+
 **Status: PASS**
 
 Guardian ve Smart Questions, gerçek OpenCode V2 hostunda hem bağımsız hem birlikte çalışma açısından kabul testlerinden geçirilmiştir.

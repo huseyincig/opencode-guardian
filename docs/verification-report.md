@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.11.1 automated verification suite** and preserves the latest completed **dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.11.2 automated verification suite**, evaluated on **20 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.11.1`
-- **Previous Release Baseline:** `v0.6.0` (dual-host acceptance evidence retained below)
-- **Current Automated Source Suite:** **600 / 600 unit, security, toast notification, and regression tests passed**
+- **Package Version:** OpenCode Guardian `v0.11.2`
+- **Previous Package Version:** `v0.11.1` (historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **619 / 619 unit, security, toast notification, and regression tests passed**
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Dependency Audits:** **0 vulnerabilities** across production and development lockfiles
+- **Dependency Audits:** Not rerun for v0.11.2; dependency versions unchanged
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.11.1 delivers accurate post-turn inspection telemetry counting, robust V2 subagent handoff recognition across metadata and structured outputs, evidence trust boundaries, per-file patch attribution, credential redaction in telemetry and secret sanitizers, idle queue coalescing with stable turn inspection, Windows command stage parsing, rollback budget preservation, synthetic remediation assertions, and strict typecheck cleanliness, alongside clean preflight/verification hook isolation, color-coded toast notifications, and multi-layer secret protection across OpenCode V1 and V2. The complete dual-host matrix below is historical v0.6.0 evidence and is not relabeled as a fresh v0.11.1 V1/V2 acceptance run.
+> v0.11.2 adds recursive Error redaction, safe serialization, V1 session cancellation and capability-permission fixes. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.11.2.
 
 ---
 
@@ -121,6 +121,14 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.11.2 Error Redaction, Session Cancellation and Mutation Permissions
+
+- **Secret sanitization:** All own Error properties are sanitized recursively, including non-enumerable `cause`, aggregate errors and provider metadata. Sanitization copies errors instead of modifying the originals. Executable `toJSON` callbacks are omitted, and reserved JSON keys remain own properties without changing prototypes.
+- **V1 session lifecycle:** Native `session.deleted` events read `properties.info.id`. Per-session cancellation stops stale idle work on deletion, disposal and new human messages, including attachment-only prompts. Previous task guidance is cleared on a new human turn.
+- **Capability cache:** Cancelled agent queries cannot restore deleted-session permission profiles, and cancellation is rechecked before engine inspection.
+- **Mutation authorization:** Enabling a V1 mutation tool does not override explicit `deny`/`ask` or the shared edit restriction. The previous test expecting enabled `apply_patch` to override an edit denial now checks that autonomous remediation is forbidden.
+- **Regression suite:** [19 debugging cases](../tests/debug-regressions.test.mjs) cover these paths; the complete source suite passes 619 tests.
 
 ## v0.11.1 Post-Turn Inspection Counting and V2 Subagent Handoff Recognition
 
@@ -242,19 +250,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results
+## Automated Source Verification Results — v0.11.2
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 521 tests across all 14 rules, secret redaction, adapters, telemetry, handoff protocol and preflight | **521 / 521 PASS** |
+| **Unit & Regression Suite** | 619 tests across all 14 rules, secret redaction, adapters, telemetry, handoff protocol and preflight | **619 / 619 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | Package entrypoints, exports, and status CLI | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
 | **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
-| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS (5 MD, 22 links, 1 SVG)** |
-| **Production Audit** | `npm audit --omit=dev` | **0 vulnerabilities** |
-| **Development Audit** | Full lockfile dependency audit | **0 vulnerabilities** |
-| **Packaging Dry Run** | `npm pack --dry-run` (complete entrypoint bundle) | **PASS** |
+| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
+| **Production Audit** | `npm audit --omit=dev` | Not rerun for this patch |
+| **Development Audit** | Full lockfile dependency audit | Not rerun for this patch |
+| **Packaging Dry Run** | `npm pack --dry-run` (entrypoints, declarations and release documents) | **PASS** |
+| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.11.2 on pinned hosts | **NOT RUN** |
 
 ---
 

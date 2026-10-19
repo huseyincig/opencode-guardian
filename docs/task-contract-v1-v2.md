@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.11.1**.
+Documentation for OpenCode Guardian **v0.11.2**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -16,7 +16,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 | **Dispatch Remediation** | `client.session.promptAsync(...)` | `ctx.session.synthetic({ sessionID, text, ... })` |
 | **Lifecycle Events** | Native event callback when delivered; otherwise prompt-scoped status probing | ctx.event.subscribe({ signal }) async iterable |
 | **Resolve Project Directory** | Plugin load directory argument | `ctx.session.get().location.directory` / `ctx.location.directory` |
-| **Plugin Teardown** | V1 dispose() cancels outstanding completion probes | AbortController signal and disposer handles |
+| **Plugin Teardown** | V1 dispose() cancels outstanding probes and per-session idle work | AbortController signal and disposer handles |
 | **Pre-Execution Shell Check** | `tool.execute.before` | `ctx.tool.hook("execute.before")` |
 | **Foreground Subagent Finalization** | `task` execute-before/after coordination + `client.session.prompt(...)` | `subagent` execute-before/after coordination + `ctx.session.synthetic(...)` + `ctx.session.wait(...)` |
 | **TUI Sidebar Extension** | `tui(api)` → `api.slots.register({ sidebar_content })` | `setup(ctx)` → `ctx.ui.slot({ append: "sidebar.content" })` |
@@ -25,6 +25,8 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 ---
 
 ## Task Contract Lifecycle
+
+In v0.11.2, a new V1 human prompt cancels prior idle inspection and clears previous task guidance before extracting its text contract. Attachment-only prompts also end the prior task. Native `session.deleted` uses `properties.info.id`; cancelled capability queries cannot restore that session's cache. These paths have dedicated [debugging regressions](../tests/debug-regressions.test.mjs).
 
 1. **Extraction on Human Turn:**
    - Filters out synthetic prompts and previous remediation cycles.

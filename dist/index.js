@@ -420,6 +420,8 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 };
             }
         }
+        if (signal?.aborted)
+            return;
         const agentCapability = resolvedCapability?.capability ?? (effectiveIsSubagent ? "unknown" : undefined);
         const result = await engine.inspect(sessionID, directory, messages, snapshots, { isSubagent: effectiveIsSubagent, ...(agentCapability ? { agentCapability } : {}) });
         if (signal?.aborted) {
@@ -518,6 +520,21 @@ const server = async ({ client, directory }, pluginOptions) => {
     let promptSequence = 0;
     let updateChecked = false;
     const updateNoticeController = new AbortController();
+    const sessionControllers = new Map();
+    const sessionSignal = (sessionID) => {
+        if (updateNoticeController.signal.aborted)
+            return updateNoticeController.signal;
+        let controller = sessionControllers.get(sessionID);
+        if (!controller) {
+            controller = new AbortController();
+            sessionControllers.set(sessionID, controller);
+        }
+        return controller.signal;
+    };
+    const cancelSessionInspection = (sessionID) => {
+        sessionControllers.get(sessionID)?.abort();
+        sessionControllers.delete(sessionID);
+    };
     const strictPreflight = mergedConfig.preflight?.enabled === true;
     const foregroundHandoffs = new Map();
     const provenanceSessions = new Set();
@@ -525,8 +542,8 @@ const server = async ({ client, directory }, pluginOptions) => {
         provenanceSessions.add(sessionID);
         return createGuardianMessageMetadata(sessionID, kind, base);
     };
-    const sendV1Remediation = async (sessionID, text, ruleIds) => {
-        if (updateNoticeController.signal.aborted)
+    const sendV1Remediation = async (sessionID, text, ruleIds, signal) => {
+        if (signal.aborted)
             return;
         const remediationText = sanitizerOpts
             ? sanitizeString(text, sanitizerOpts).sanitized
@@ -546,7 +563,7 @@ const server = async ({ client, directory }, pluginOptions) => {
         if (response.error) {
             throw new Error("V1 host rejected the Guardian remediation request.");
         }
-        if (updateNoticeController.signal.aborted)
+        if (signal.aborted)
             return;
         // The remediation above is intentionally synthetic and hidden by OpenCode.
         // Add a second, display-only transcript row without triggering a model turn.
@@ -619,21 +636,25 @@ const server = async ({ client, directory }, pluginOptions) => {
                 return response.data;
             },
             onIdle: async (sessionID, messages) => {
+                const signal = sessionSignal(sessionID);
                 const relation = await hostSessionRelation(sessionID);
+                if (signal.aborted)
+                    return;
                 if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
                     return;
                 }
                 const contract = extractTaskContract(messages);
                 if (contract)
                     contracts.set(sessionID, contract);
-                await handleSessionIdle(sessionID, directory, async () => messages, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds), engine, verificationStore.snapshots(sessionID), updateNoticeController.signal, relation.known ? Boolean(relation.parentID) : undefined, relation.known && relation.parentID
+                await handleSessionIdle(sessionID, directory, async () => messages, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds, signal), engine, verificationStore.snapshots(sessionID), signal, relation.known ? Boolean(relation.parentID) : undefined, relation.known && relation.parentID
                     ? async () => {
                         const cached = getCachedAgentCapability(sessionID);
                         if (cached)
                             return cached;
                         const agentName = extractAgentNameFromMessages(messages);
                         const p = await resolveV1AgentCapability(client, directory, agentName);
-                        cacheAgentCapability(sessionID, p);
+                        if (!signal.aborted)
+                            cacheAgentCapability(sessionID, p);
                         return p;
                     }
                     : undefined, toastNotifier);
@@ -654,6 +675,9 @@ const server = async ({ client, directory }, pluginOptions) => {
     return {
         dispose: async () => {
             updateNoticeController.abort();
+            for (const controller of sessionControllers.values())
+                controller.abort();
+            sessionControllers.clear();
             watcher?.stopAll();
             verificationStore.clear();
             contracts.clear();
@@ -813,10 +837,10 @@ const server = async ({ client, directory }, pluginOptions) => {
             const text = output.parts
                 .map((part) => part.type === "text" ? part.text : "")
                 .join("\n");
-            if (!text)
-                return;
             if (!guardianRemediation) {
+                cancelSessionInspection(input.sessionID);
                 verificationStore.beginTurn(input.sessionID);
+                contracts.delete(input.sessionID);
                 const contract = extractTaskContract([{
                         info: { id: input.messageID ?? ("v1-prompt-" + (++promptSequence)), role: "user" },
                         parts: [{ type: "text", text }],
@@ -872,9 +896,11 @@ const server = async ({ client, directory }, pluginOptions) => {
             }
             if (eventData.type === "session.deleted") {
                 const deletedSessionID = eventData.properties?.sessionID ??
+                    eventData.properties?.info?.id ??
                     eventData.data?.sessionID ??
                     eventData.data?.info?.id;
                 if (deletedSessionID) {
+                    cancelSessionInspection(deletedSessionID);
                     watcher?.stop(deletedSessionID);
                     engine.forgetSession(deletedSessionID);
                     verificationStore.forget(deletedSessionID);
@@ -891,8 +917,11 @@ const server = async ({ client, directory }, pluginOptions) => {
             const sessionID = eventData.properties?.sessionID ?? eventData.data?.sessionID;
             if (!sessionID)
                 return;
+            const signal = sessionSignal(sessionID);
             watcher?.stop(sessionID);
             const relation = await hostSessionRelation(sessionID);
+            if (signal.aborted)
+                return;
             if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
                 return;
             }
@@ -902,6 +931,8 @@ const server = async ({ client, directory }, pluginOptions) => {
                     path: { id: sessionID },
                     query: { directory },
                 });
+                if (signal.aborted)
+                    return [];
                 if (res?.error || !Array.isArray(res?.data)) {
                     throw new Error("V1 session.messages() failed during idle inspection.");
                 }
@@ -910,7 +941,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                 if (contract)
                     contracts.set(sessionID, contract);
                 return messages;
-            }, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds), engine, verificationStore.snapshots(sessionID), updateNoticeController.signal, isSubagent, isSubagent
+            }, async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds, signal), engine, verificationStore.snapshots(sessionID), signal, isSubagent, isSubagent
                 ? async () => {
                     const cached = getCachedAgentCapability(sessionID);
                     if (cached)
@@ -922,7 +953,8 @@ const server = async ({ client, directory }, pluginOptions) => {
                     const msgs = Array.isArray(res?.data) ? res.data : [];
                     const agentName = extractAgentNameFromMessages(msgs);
                     const p = await resolveV1AgentCapability(client, directory, agentName);
-                    cacheAgentCapability(sessionID, p);
+                    if (!signal.aborted)
+                        cacheAgentCapability(sessionID, p);
                     return p;
                 }
                 : undefined, toastNotifier);

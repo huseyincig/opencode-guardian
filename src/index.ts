@@ -529,6 +529,7 @@ async function handleSessionIdle(
         };
       }
     }
+    if (signal?.aborted) return;
     const agentCapability = resolvedCapability?.capability ?? (effectiveIsSubagent ? "unknown" : undefined);
     const result = await engine.inspect(
       sessionID,
@@ -633,6 +634,20 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   let promptSequence = 0;
   let updateChecked = false;
   const updateNoticeController = new AbortController();
+  const sessionControllers = new Map<string, AbortController>();
+  const sessionSignal = (sessionID: string): AbortSignal => {
+    if (updateNoticeController.signal.aborted) return updateNoticeController.signal;
+    let controller = sessionControllers.get(sessionID);
+    if (!controller) {
+      controller = new AbortController();
+      sessionControllers.set(sessionID, controller);
+    }
+    return controller.signal;
+  };
+  const cancelSessionInspection = (sessionID: string): void => {
+    sessionControllers.get(sessionID)?.abort();
+    sessionControllers.delete(sessionID);
+  };
   const strictPreflight = mergedConfig.preflight?.enabled === true;
   const foregroundHandoffs = new Map<string, Set<string>>();
   const provenanceSessions = new Set<string>();
@@ -648,9 +663,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   const sendV1Remediation = async (
     sessionID: string,
     text: string,
-    ruleIds: readonly string[]
+    ruleIds: readonly string[],
+    signal: AbortSignal
   ): Promise<void> => {
-    if (updateNoticeController.signal.aborted) return;
+    if (signal.aborted) return;
     const remediationText = sanitizerOpts
       ? sanitizeString(text, sanitizerOpts).sanitized
       : text;
@@ -669,7 +685,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     if (response.error) {
       throw new Error("V1 host rejected the Guardian remediation request.");
     }
-    if (updateNoticeController.signal.aborted) return;
+    if (signal.aborted) return;
 
     // The remediation above is intentionally synthetic and hidden by OpenCode.
     // Add a second, display-only transcript row without triggering a model turn.
@@ -746,7 +762,9 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         return response.data as SessionMessage[];
       },
       onIdle: async (sessionID, messages) => {
+        const signal = sessionSignal(sessionID);
         const relation = await hostSessionRelation(sessionID);
+        if (signal.aborted) return;
         if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
           return;
         }
@@ -754,10 +772,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         if (contract) contracts.set(sessionID, contract);
         await handleSessionIdle(
           sessionID, directory, async () => messages,
-          async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds),
+          async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds, signal),
           engine,
           verificationStore.snapshots(sessionID),
-          updateNoticeController.signal,
+          signal,
           relation.known ? Boolean(relation.parentID) : undefined,
           relation.known && relation.parentID
             ? async () => {
@@ -765,7 +783,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
                 if (cached) return cached;
                 const agentName = extractAgentNameFromMessages(messages);
                 const p = await resolveV1AgentCapability(client, directory, agentName);
-                cacheAgentCapability(sessionID, p);
+                if (!signal.aborted) cacheAgentCapability(sessionID, p);
                 return p;
               }
             : undefined,
@@ -789,6 +807,8 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   return {
     dispose: async () => {
       updateNoticeController.abort();
+      for (const controller of sessionControllers.values()) controller.abort();
+      sessionControllers.clear();
       watcher?.stopAll();
       verificationStore.clear();
       contracts.clear();
@@ -970,9 +990,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
       const text = output.parts
         .map((part) => part.type === "text" ? part.text : "")
         .join("\n");
-      if (!text) return;
       if (!guardianRemediation) {
+        cancelSessionInspection(input.sessionID);
         verificationStore.beginTurn(input.sessionID);
+        contracts.delete(input.sessionID);
         const contract = extractTaskContract([{
           info: { id: input.messageID ?? ("v1-prompt-" + (++promptSequence)), role: "user" },
           parts: [{ type: "text", text }],
@@ -1022,7 +1043,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     event: async ({ event }) => {
       const eventData = event as {
         type?: string;
-        properties?: { sessionID?: string };
+        properties?: { sessionID?: string; info?: { id?: string } };
         data?: { sessionID?: string; info?: { id?: string } };
       };
 
@@ -1040,9 +1061,11 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
       if (eventData.type === "session.deleted") {
         const deletedSessionID =
           eventData.properties?.sessionID ??
+          eventData.properties?.info?.id ??
           eventData.data?.sessionID ??
           eventData.data?.info?.id;
         if (deletedSessionID) {
+          cancelSessionInspection(deletedSessionID);
           watcher?.stop(deletedSessionID);
           engine.forgetSession(deletedSessionID);
           verificationStore.forget(deletedSessionID);
@@ -1059,8 +1082,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
       const sessionID =
         eventData.properties?.sessionID ?? eventData.data?.sessionID;
       if (!sessionID) return;
+      const signal = sessionSignal(sessionID);
       watcher?.stop(sessionID);
       const relation = await hostSessionRelation(sessionID);
+      if (signal.aborted) return;
       if (relation.parentID && hasForegroundHandoff(foregroundHandoffs, relation.parentID)) {
         return;
       }
@@ -1074,6 +1099,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
             path: { id: sessionID },
             query: { directory },
           });
+          if (signal.aborted) return [];
           if (res?.error || !Array.isArray(res?.data)) {
             throw new Error("V1 session.messages() failed during idle inspection.");
           }
@@ -1082,10 +1108,10 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
           if (contract) contracts.set(sessionID, contract);
           return messages;
         },
-        async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds),
+        async (text, ruleIds) => sendV1Remediation(sessionID, text, ruleIds, signal),
         engine,
         verificationStore.snapshots(sessionID),
-        updateNoticeController.signal,
+        signal,
         isSubagent,
         isSubagent
           ? async () => {
@@ -1098,7 +1124,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
               const msgs = Array.isArray(res?.data) ? (res.data as SessionMessage[]) : [];
               const agentName = extractAgentNameFromMessages(msgs);
               const p = await resolveV1AgentCapability(client, directory, agentName);
-              cacheAgentCapability(sessionID, p);
+              if (!signal.aborted) cacheAgentCapability(sessionID, p);
               return p;
             }
           : undefined,

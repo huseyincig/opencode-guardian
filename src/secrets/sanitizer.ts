@@ -307,8 +307,20 @@ export function sanitizeObject<T>(
   let redactedCount = 0;
 
   try {
+    function propertyValue(key: string, value: unknown): unknown {
+      if (isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
+        redactedCount++;
+        findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
+        return replacement;
+      }
+      return recurse(value);
+    }
+
     function recurse(val: unknown): unknown {
       if (val === null || val === undefined) return val;
+      // Retained callbacks (notably toJSON) could reintroduce raw data later,
+      // when the host serializes a result that has already been sanitized.
+      if (typeof val === 'function') return undefined;
 
       if (typeof val === 'string') {
         const res = sanitizeString(val, options);
@@ -320,25 +332,19 @@ export function sanitizeObject<T>(
       }
 
       if (val instanceof Error) {
-        const nameRes = sanitizeString(val.name, options);
-        if (nameRes.redactedCount > 0) {
-          val.name = nameRes.sanitized;
-          redactedCount += nameRes.redactedCount;
-          findings.push(...nameRes.findings);
+        const output = new Error();
+        // Error.cause and AggregateError.errors are non-enumerable. Inspect
+        // every own property, including provider metadata, at the same boundary.
+        for (const key of new Set(['name', ...Object.getOwnPropertyNames(val)])) {
+          const value = (val as unknown as Record<string, unknown>)[key];
+          Object.defineProperty(output, key, {
+            value: propertyValue(key, value),
+            enumerable: Object.getOwnPropertyDescriptor(val, key)?.enumerable ?? false,
+            writable: true,
+            configurable: true,
+          });
         }
-        const msgRes = sanitizeString(val.message, options);
-        if (msgRes.redactedCount > 0) {
-          redactedCount += msgRes.redactedCount;
-          findings.push(...msgRes.findings);
-          val.message = msgRes.sanitized;
-        }
-        if (val.stack) {
-          const stackRes = sanitizeString(val.stack, options);
-          if (stackRes.redactedCount > 0) {
-            val.stack = stackRes.sanitized;
-          }
-        }
-        return val;
+        return output;
       }
 
       if (Array.isArray(val)) {
@@ -348,16 +354,9 @@ export function sanitizeObject<T>(
       if (typeof val === 'object') {
         const output: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-          if (isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)) {
-            redactedCount++;
-            findings.push({ kind: 'key-value', category: 'Object Property', keyName: k });
-            // A sensitive key defines the trust boundary for its complete value.
-            // Do not recurse into nested objects/arrays and retain an arbitrary
-            // secret under a non-sensitive child key.
-            output[k] = replacement;
-          } else {
-            output[k] = recurse(v);
-          }
+          Object.defineProperty(output, k, {
+            value: propertyValue(k, v), enumerable: true, writable: true, configurable: true,
+          });
         }
         return output;
       }
@@ -391,13 +390,7 @@ export function sanitizeToolResult<T>(result: T, options: SanitizerOptions = {})
     }
 
     if (result instanceof Error) {
-      const sanitizedMsg = sanitizeString(result.message, options).sanitized;
-      const errCopy = new Error(sanitizedMsg);
-      errCopy.name = sanitizeString(result.name, options).sanitized;
-      if (result.stack) {
-        errCopy.stack = sanitizeString(result.stack, options).sanitized;
-      }
-      return errCopy as unknown as T;
+      return sanitizeObject(result, options).sanitized;
     }
 
     if (typeof result === 'object') {

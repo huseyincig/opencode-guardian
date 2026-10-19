@@ -738,11 +738,11 @@ test("Scenario 11: V1 and V2 parity across normalized capability evaluation", as
   });
   assert.equal(v1WithUnknownTool.capability, "unknown");
 
-  // 6. Mutating tool with edit deny still recognized as mutating channel
+  // 6. Availability of a mutation alias cannot override the shared edit deny.
   const v1MutatingTool = evaluateAgentMutationProfile({
     name: "v1-agent",
     permission: { edit: "deny", bash: "deny" },
     tools: { apply_patch: true },
   });
-  assert.equal(v1MutatingTool.capability, "write-allowed");
+  assert.equal(canSubagentRemediate(v1MutatingTool), false);
 });

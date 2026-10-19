@@ -172,8 +172,19 @@ export function evaluateAgentMutationProfile(input) {
             }
         }
         else {
-            // In V1, active mutating tool without deny allows mutation
-            mutatingToolAllowed = true;
+            // An enabled tool is availability, not authorization. Respect its
+            // explicit V1 rule and the shared edit/bash permission where applicable.
+            const setting = v1Permission?.[mTool] ??
+                (isFileMutationTool(mTool) ? v1Permission?.edit : v1Permission?.bash) ??
+                v1Permission?.['*'];
+            const effect = resolveV1BashEffect(typeof setting === 'string' ||
+                (setting && typeof setting === 'object' && !Array.isArray(setting))
+                ? setting
+                : undefined);
+            if (effect === 'allow' || effect === 'unset')
+                mutatingToolAllowed = true;
+            else if (effect === 'ask')
+                mutatingToolRequiresApproval = true;
         }
     }
     // 4. Decision logic

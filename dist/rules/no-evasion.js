@@ -57,6 +57,28 @@ export const DEFAULT_PATTERNS = [
     "separate bug from",
     "separate concern from",
 ];
+function claimPaths(text) {
+    const tokens = text.slice(0, 64_000).match(/[a-zA-Z0-9_@./-]+/g) ?? [];
+    return [...new Set(tokens.map((token) => token.replace(/\.+$/, "")).filter((token) => /\.[a-zA-Z][a-zA-Z0-9]{0,12}$/.test(token))
+            .map((file) => file.replace(/^\.\//, "")))].slice(0, 20);
+}
+function baselineCovers(record, path) {
+    if (record.kind !== "baseline" || record.status !== "success")
+        return false;
+    const command = record.command ?? "";
+    // Literal file scopes, or observed diff headers. Merely mentioning a file
+    // in output prose is not a comparison of it.
+    const show = /\bgit\s+show\s+[^\s;&|]+:([^\s;&|]+)/.exec(command);
+    if (show)
+        return show[1]?.replace(/^["']|["']$/g, "").replace(/^\.\//, "") === path;
+    if (/\bgit\s+(?:diff|blame)\b/.test(command)) {
+        const tail = command.split(/\s--\s/, 2)[1];
+        if (tail && tail.split(/\s+/).some((token) => token.replace(/^["']|["']$/g, "").replace(/^\.\//, "") === path))
+            return true;
+        return (record.output ?? "").split("\n").some((line) => line === `+++ b/${path}` || line === `--- a/${path}`);
+    }
+    return false;
+}
 function canBeSupportedByBaseline(pattern) {
     const lower = pattern.toLowerCase();
     return (lower.includes("pre-existing") ||
@@ -105,7 +127,9 @@ export const noEvasionRule = {
                 if (part.type !== "text" || !part.text || typeof part.text !== "string") {
                     continue;
                 }
-                const cleanText = sanitizeProseForInspection(part.text);
+                // Preserve file mentions inside inline code while still excluding quoted
+                // examples and code blocks from claims.
+                const cleanText = sanitizeProseForInspection(part.text.slice(0, 64_000).replace(/`([^`\n]+)`/g, (span, value) => claimPaths(value).includes(value) ? value : span));
                 if (!cleanText)
                     continue;
                 const lowerText = cleanText.toLowerCase();
@@ -122,8 +146,13 @@ export const noEvasionRule = {
                             searchFrom = matchIdx + lowerPattern.length;
                             continue;
                         }
-                        if (canBeSupportedByBaseline(pattern) &&
-                            hasSuccessfulEvidence(context.evidence, "baseline")) {
+                        const sentenceStart = Math.max(cleanText.lastIndexOf(". ", matchIdx), cleanText.lastIndexOf("! ", matchIdx), cleanText.lastIndexOf("? ", matchIdx));
+                        const sentenceEnd = cleanText.indexOf(". ", matchIdx);
+                        const paths = claimPaths(cleanText.slice(sentenceStart < 0 ? 0 : sentenceStart + 2, sentenceEnd < 0 ? undefined : sentenceEnd));
+                        const supported = paths.length > 0
+                            ? paths.every((path) => context.evidence?.records.some((record) => baselineCovers(record, path)))
+                            : hasSuccessfulEvidence(context.evidence, "baseline");
+                        if (canBeSupportedByBaseline(pattern) && supported) {
                             break;
                         }
                         seenPatterns.add(lowerPattern);
@@ -136,7 +165,7 @@ export const noEvasionRule = {
                                 ? `Baseline/pre-existing claim lacks a successful baseline check: "${pattern}" → "${snippet}"`
                                 : `Evasion phrase detected: "${pattern}" → "${snippet}"`,
                             ...(canBeSupportedByBaseline(pattern) ? {
-                                evidence: ["No successful baseline comparison observed in this turn"],
+                                evidence: ["No successful baseline comparison matching this claim observed in this turn"],
                             } : {}),
                             confidence: "high",
                         });

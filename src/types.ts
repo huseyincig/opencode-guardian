@@ -99,6 +99,20 @@ export type EvidenceKind =
 
 export type EvidenceStatus = "success" | "failure" | "unknown";
 
+/** Observed aggregate counts, never inferred from assistant prose. */
+export interface TestSummary {
+  format: "node" | "pytest" | "jest" | "vitest";
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  todo: number;
+}
+
+export type OutcomeReason = "success" | "unknown" | "cancelled" | "timeout" |
+  "no-tests" | "skipped-only" | "masked" | "execution-failure" | "summary-conflict";
+
 export interface EvidenceRecord {
   kind: EvidenceKind;
   status: EvidenceStatus;
@@ -114,6 +128,9 @@ export interface EvidenceRecord {
   stateFingerprint?: string;
   snapshotFiles?: string[];
   filePath?: string;
+  testSummary?: TestSummary;
+  outcomeReason?: OutcomeReason;
+  editIntegrity?: import("./edit-integrity.js").EditIntegrityEvidence;
 }
 
 export interface TurnEvidence {

@@ -167,6 +167,24 @@ export const noUnverifiedClaimsRule: GuardRule = {
         const text = sanitizeProseForInspection(part.text);
         if (!text) continue;
 
+        // Compare explicit pass-count claims only to fresh, matching test evidence.
+        const testRecord = latestEvidence(context.evidence, "test");
+        const counts = testRecord?.testSummary;
+        if (counts && !staleAfterMutation(context.evidence, testRecord, context.directory)) {
+          for (const countClaim of text.matchAll(/\b(?:all\s+)?(\d+)\s+(?:tests?\s+(?:passed|passing)|passed\s+tests?)\b/gi)) {
+            const sentence = sentenceAround(text, countClaim.index);
+            if (isUncertaintyClaim(sentence) || /\b(?:before|previously|earlier|expected|would|will|should)\b/i.test(sentence)) continue;
+            if (Number(countClaim[1]) === counts.passed) continue;
+            const finding: RuleFinding = {
+              ruleId: "integrity/no-unverified-claims", pattern: "test count contradicts observed summary", messageSnippet: sentence,
+              description: `Claimed ${countClaim[1]} passed tests; observed ${counts.passed} passed, ${counts.skipped} skipped and ${counts.failed} failed`,
+              confidence: "high",
+            };
+            findings.push(finding);
+            contradictions.push(finding);
+          }
+        }
+
         for (const claim of CLAIM_PATTERNS) {
           claim.regex.lastIndex = 0;
           const match = claim.regex.exec(text);

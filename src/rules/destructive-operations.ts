@@ -5,8 +5,8 @@ import type {
   TurnInspectionContext,
 } from "../types.js";
 import { gitCleanInvocation, isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "../evidence.js";
-import { hasFindDeletion } from "../shell-risk.js";
-import { currentHumanMessage } from "../task-contract.js";
+import { hasFindDeletion, literalShellScripts, splitShellStages } from "../shell-risk.js";
+import { authorizationText, latestHumanInstruction } from "../task-constraints.js";
 import { extractToolCommand } from "../tool-input.js";
 import {
   isAuthorizedGitClean,
@@ -19,19 +19,106 @@ import {
 } from "../locale-intents.js";
 
 function latestHumanRequest(context: TurnInspectionContext): string {
-  const user = currentHumanMessage(context.currentTurn);
-  if (!user) return "";
-  return user.parts
-    .filter(
-      (part) =>
-        part.type === "text" &&
-        typeof part.text === "string" &&
-        part.synthetic !== true &&
-        part.ignored !== true
-    )
-    .map((part) => part.text ?? "")
-    .join("\n")
-    .toLowerCase();
+  return authorizationText(latestHumanInstruction(context)).toLowerCase();
+}
+
+/** Only inspect literal git invocations, not echoed examples or comments. */
+function guardBypass(command: string, depth = 0): { flag: string; action: string; confidence: "high" | "medium" } | undefined {
+  if (depth > 2) return undefined;
+  for (const stage of splitShellStages(command.slice(0, 64_000)).flat()) {
+    // Remove comments without erasing # inside a quoted commit message.
+    let quoted: string | undefined;
+    let end = stage.length;
+    for (let i = 0; i < stage.length; i++) {
+      const char = stage[i];
+      if (char === "\\" && quoted !== "'") { i++; continue; }
+      if ((char === '"' || char === "'") && (!quoted || quoted === char)) {
+        quoted = quoted ? undefined : char;
+      } else if (!quoted && char === "#" && (i === 0 || /\s/.test(stage[i - 1] ?? ""))) { end = i; break; }
+    }
+    const tokens = simpleShellTokens(stage.slice(0, end));
+    while (/^[A-Za-z_]\w*=/.test(tokens[0] ?? "")) tokens.shift();
+    if (tokens[0] === "env") {
+      tokens.shift();
+      while (tokens.length) {
+        if (/^[A-Za-z_]\w*=/.test(tokens[0] ?? "") || ["-i", "--ignore-environment", "--"].includes(tokens[0] ?? "")) tokens.shift();
+        else if (["-u", "--unset"].includes(tokens[0] ?? "")) tokens.splice(0, 2);
+        else break;
+      }
+    }
+    if (!/^(?:[^\s]*\/)?git(?:\.exe)?$/i.test(tokens[0] ?? "")) continue;
+    let i = 1;
+    let hooks = false;
+    while (tokens[i]?.startsWith("-")) {
+      const option = tokens[i++];
+      if (option === "-C" || option === "-c" || option === "--git-dir" || option === "--work-tree") {
+        const value = tokens[i++] ?? "";
+        if (option === "-c" && /^core\.hookspath=/i.test(value)) hooks = true;
+      } else if (/^-ccore\.hookspath=/i.test(option ?? "")) hooks = true;
+    }
+    const action = tokens[i++] ?? "";
+    if (hooks && ["commit", "push", "merge", "rebase", "am"].includes(action)) {
+      return { flag: "core.hooksPath", action, confidence: "medium" };
+    }
+    const args = tokens.slice(i);
+    if (action === "config" && !args.some((arg) => /^--(?:get|list|show|unset|remove)/.test(arg))) {
+      const key = args.findIndex((arg) => /^core\.hookspath$/i.test(arg));
+      if (key >= 0 && args[key + 1] !== undefined) return { flag: "core.hooksPath", action, confidence: "medium" };
+    }
+    if (["commit", "push", "merge", "rebase", "am"].includes(action)) {
+      for (let n = 0; n < args.length; n++) {
+        // Commit messages are data even when they contain an option literal.
+        if (["-m", "--message", "-F", "--file"].includes(args[n] ?? "")) { n++; continue; }
+        if (args[n] === "--") break;
+        if (args[n] === "--no-verify" || action === "commit" && args[n] === "-n") {
+          return { flag: args[n] ?? "--no-verify", action, confidence: "high" };
+        }
+      }
+    }
+  }
+  for (const script of literalShellScripts(command.slice(0, 64_000))) {
+    const bypass = guardBypass(script, depth + 1);
+    if (bypass) return bypass;
+  }
+  return undefined;
+}
+
+function bypassAuthorized(request: string, command: string, bypass: { flag: string; action: string }): boolean {
+  if (!request || /\b(?:not|don't|never|without|avoid)\b|(?:kullanma|yapma)/iu.test(request)) return false;
+  if (!request.includes(bypass.flag.toLowerCase()) &&
+      !(bypass.flag === "-n" && request.includes("--no-verify"))) return false;
+  if (!new RegExp(`\\b${bypass.action}\\b`, "i").test(request)) return false;
+  if (!gitScopeAuthorized(request, command)) return false;
+  const requestedScope = /\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i.exec(request);
+  if (requestedScope) {
+    const actualScope = /\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i.exec(command);
+    if (!actualScope || normalizeLiteralTarget(requestedScope[1] ?? requestedScope[2] ?? requestedScope[3] ?? "") !==
+        normalizeLiteralTarget(actualScope[1] ?? actualScope[2] ?? actualScope[3] ?? "")) return false;
+  }
+  if (bypass.action === "push" && !gitActionTargetAuthorized(request, command, "push")) return false;
+  return isImperativeExecutionRequest(request) ||
+    /^(?:please\s+)?(?:commit|push|merge|rebase|configure|disable)\b/i.test(request) ||
+    request.trim() === command.trim().toLowerCase();
+}
+
+/** An explicit ref/remote in the request cannot authorize a different one. */
+function gitActionTargetAuthorized(request: string, command: string, action: "push" | "reset"): boolean {
+  if (action === "reset") {
+    const requested = /\b(?:reset(?:\s+--hard)?|hard\s+reset)\s+(?:to\s+)?([a-z0-9_/-]+(?:[~^]\d*)?)(?=\s|[.,;]|$)/i.exec(request)?.[1];
+    if (!requested || /^(?:the|this|current|my|our|repo|repository|ile|yap|yapın|using|with)$/i.test(requested)) return true;
+    const actual = /\breset\s+(?:--hard\s+)?([^\s;&|]+)/i.exec(command)?.[1];
+    return actual?.toLowerCase() === requested.toLowerCase();
+  }
+  const tail = /\b(?:force\s+push|push\s+--force(?:-with-lease)?|push\s+(?:with\s+)?--no-verify|zorla\s+push)\s+([^;\n]+)/i.exec(request)?.[1];
+  if (!tail || /^(?:the|this|current|my|our|repo|repository|changes|branch)\b/i.test(tail)) return true;
+  const requestedText = tail.replace(/^(?:(?:only|to)\s+)+/i, "")
+    .split(/\s+(?:and|then|ve|sonra)\s+/i)[0]?.replace(/[.!?]+$/, "") ?? "";
+  const requested = simpleShellTokens(requestedText).filter((token) => !token.startsWith("-")).slice(0, 16);
+  if (!requested.length) return true;
+  const match = /\bpush\b([^;&|\n]*)/i.exec(command);
+  const actual = simpleShellTokens(match?.[1] ?? "").filter((token) => !token.startsWith("-"));
+  return requested.length === actual.length &&
+    requested.every((target, index) => actual[index]?.toLowerCase() === target.toLowerCase());
 }
 
 function explicitlyAllowedSudo(request: string): boolean {
@@ -217,6 +304,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b/i.test(command)) {
     return (
       gitScopeAuthorized(request, command) &&
+      gitActionTargetAuthorized(request, command, "push") &&
       /\b(?:force\s+push|zorla\s+push|--force|force-with-lease)\b/iu.test(
         request
       )
@@ -226,6 +314,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i.test(command)) {
     return (
       gitScopeAuthorized(request, command) &&
+      gitActionTargetAuthorized(request, command, "reset") &&
       /\b(?:hard\s+reset|reset(?:le|leyin)?|sıfırla|sıfırlayın)\b/iu.test(
         request
       )
@@ -395,6 +484,15 @@ export const destructiveOperationsRule: GuardRule = {
         const input = part.state.input;
         const command = extractToolCommand(input);
         if (!command) continue;
+        const bypass = guardBypass(command);
+        if (bypass && !bypassAuthorized(request, command, bypass)) {
+          findings.push({
+            ruleId: "safety/destructive-operations", pattern: "guard bypass",
+            messageSnippet: command.replace(/\s+/g, " ").slice(0, 240),
+            description: `Observed ${bypass.flag} guard override without explicit human authorization for this operation.`,
+            confidence: bypass.confidence,
+          });
+        }
         const destructive = isDestructiveCommand(command);
         const opaque = isOpaqueShellExecution(command);
         const simpleRemoval = isSimpleFileRemoval(command);

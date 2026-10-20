@@ -16,6 +16,8 @@ export * from "./rules/no-unverified-claims.js";
 export * from "./rules/no-silent-failure.js";
 export * from "./rules/destructive-operations.js";
 export * from "./evidence.js";
+export * from "./verification-report.js";
+export * from "./edit-integrity.js";
 export * from "./state.js";
 export * from "./task-contract.js";
 export * from "./locale-intents.js";

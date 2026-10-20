@@ -1,6 +1,7 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
 import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 import { extractFilePathFromPatch } from "./no-secrets.js";
+import { maskCodeLiterals } from "../code-context.js";
 
 /**
  * Patterns that indicate fake or stubbed implementations in code.
@@ -70,10 +71,20 @@ export const noStubsRule: GuardRule = {
     const checkCode = (code: string, source: string, filePath?: string) => {
       if (!code || typeof code !== "string") return;
 
+      const executable = maskCodeLiterals(code, false, filePath);
+      const withComments = maskCodeLiterals(code, true, filePath);
+      const fixture = /(?:^|[/\\])(?:__fixtures__|fixtures)(?:[/\\]|$)/i.test(filePath ?? "");
+      if (fixture || /\.d\.[cm]?ts$/i.test(filePath ?? "")) return;
+
       for (const pattern of STUB_PATTERNS) {
         if (seen.has(pattern.name)) continue;
 
-        const match = pattern.regex.exec(code);
+        const view = /comment|placeholder (?:constant return|return None)/.test(pattern.name) ? withComments : executable;
+        const regex = new RegExp(pattern.regex.source, `${pattern.regex.flags.replace(/g/g, "")}g`);
+        let match = regex.exec(code);
+        // Message-bearing throws need their original string content. Only the
+        // actual syntax start is checked against the lexical view.
+        while (match && view[match.index] !== code[match.index]) match = regex.exec(code);
         if (match) {
           seen.add(pattern.name);
           const snippet = extractSnippet(code, match.index, match[0].length);
@@ -86,6 +97,25 @@ export const noStubsRule: GuardRule = {
               filePath,
               fingerprint: `${filePath}:${pattern.name}:${match[0].trim()}`,
             } : {}),
+          });
+        }
+      }
+
+      const emptyPatterns = [
+        /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
+        /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{\s*\}/g,
+        /(?:^|[{};\n])\s*(?:(?:public|private|protected|static|async|override)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
+      ];
+      for (const regex of emptyPatterns) {
+        for (const match of executable.matchAll(regex)) {
+          if (/^(?:constructor|noop|if|for|while|switch|catch)$/i.test(match[1] ?? "")) continue;
+          const name = "empty named JavaScript/TypeScript implementation";
+          if (seen.has(name)) continue;
+          seen.add(name);
+          findings.push({ ruleId: "integrity/no-stubs", pattern: name,
+            messageSnippet: extractSnippet(code, match.index, match[0].length),
+            description: `Empty named implementation detected in ${source}; implement it or use an explicit no-op callback contract.`,
+            ...(filePath ? { filePath, fingerprint: `${filePath}:${name}:${match[1]}` } : {}),
           });
         }
       }

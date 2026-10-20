@@ -12,6 +12,7 @@ import {
 } from "../tool-input.js";
 import { isAuthorizedTestEdit, isTestBypassProhibited, isSpecificTestBypassAuthorized } from "../locale-intents.js";
 import { currentHumanMessage } from "../task-contract.js";
+import { maskCodeLiterals } from "../code-context.js";
 
 /**
  * High-confidence patterns that directly disable or bypass tests.
@@ -379,8 +380,11 @@ export const noCheatRule: GuardRule = {
     ) => {
       if (!code || typeof code !== "string") return;
 
+      const executable = maskCodeLiterals(code, false, filePath);
+      const withComments = maskCodeLiterals(code, true, filePath);
+
       const isTestFile = isTestFilePath(filePath);
-      const isTestCode = isTestFile || (!filePath && hasTestContext(code));
+      const isTestCode = isTestFile || (!filePath && hasTestContext(executable));
 
       for (const pattern of TEST_CHEAT_PATTERNS) {
         pattern.regex.lastIndex = 0;
@@ -391,9 +395,9 @@ export const noCheatRule: GuardRule = {
         ) {
           continue;
         }
-        if (filePath && !isTestFile && !hasTestContext(code)) continue;
+        if (filePath && !isTestFile && !hasTestContext(executable)) continue;
 
-        const match = pattern.regex.exec(code);
+        const match = pattern.regex.exec(pattern.name.includes("commented-out") ? withComments : executable);
         if (!match) continue;
 
         addFinding(
@@ -410,6 +414,14 @@ export const noCheatRule: GuardRule = {
           },
           directPatternsBlock || pattern.alwaysBlock === true
         );
+      }
+      if (isTestCode) {
+        const conditional = /\bif\s*\([^\n{};]{1,300}\)\s*\{?\s*(?:expect\s*\(|assert(?:\.|\s*\())/.exec(executable);
+        if (conditional) addFinding({ ruleId: "testing/no-cheat", pattern: "conditional assertion",
+          messageSnippet: extractSnippet(code, conditional.index, conditional[0].length),
+          description: "An assertion executes only conditionally; review that the test still fails when the behavior is broken.",
+          confidence: "medium", ...(filePath ? { filePath } : {}),
+        }, false);
       }
     };
 

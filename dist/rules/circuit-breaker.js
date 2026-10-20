@@ -1,4 +1,19 @@
 import { collectTurnEvidence } from "../evidence.js";
+function isUserCancellation(record) {
+    const reason = "outcomeReason" in record ? record.outcomeReason : undefined;
+    if (reason === "cancelled")
+        return true;
+    if (typeof reason === "string" && reason !== "unknown")
+        return false;
+    // Legacy hosts may supply only an error envelope. Do not classify arbitrary
+    // cancellation-related assertion text or a timeout as a user cancellation.
+    const texts = [record.error, record.output].filter((text) => typeof text === "string");
+    return texts.some((value) => {
+        const text = value.trim();
+        return /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled|canceled|aborted|interrupted)\s+by\s+(?:the\s+)?user[.!]?(?:\s|$)/i.test(text) ||
+            /^user\s+(?:cancelled|canceled|aborted|interrupted)(?:\s+(?:the\s+)?(?:tool|command|operation|execution))?[.!]?$/i.test(text);
+    });
+}
 function commandFamily(record) {
     const command = record.command?.trim().toLowerCase() ?? "";
     if (!command)
@@ -47,6 +62,8 @@ export const circuitBreakerRule = {
         const findings = [];
         const exactCounts = new Map();
         for (const record of records) {
+            if (isUserCancellation(record))
+                continue;
             const family = commandFamily(record);
             if (record.status === "success") {
                 for (const [signature, state] of exactCounts) {
@@ -84,6 +101,8 @@ export const circuitBreakerRule = {
         // family resets the streak.
         const streaks = new Map();
         for (const record of records) {
+            if (isUserCancellation(record))
+                continue;
             const family = commandFamily(record);
             if (record.status === "success") {
                 for (const key of streaks.keys()) {

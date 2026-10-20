@@ -123,14 +123,14 @@ function nearestFile(
   }
 }
 
-function dependenciesFromPackage(pkg: Record<string, unknown>): Set<string> {
+function dependenciesFromPackage(pkg: Record<string, unknown>, productionOnly = false): Set<string> {
   const deps = new Set<string>();
   if (typeof pkg.name === "string" && pkg.name.trim()) {
     deps.add(pkg.name.trim());
   }
   for (const section of [
     pkg.dependencies,
-    pkg.devDependencies,
+    productionOnly ? undefined : pkg.devDependencies,
     pkg.peerDependencies,
     pkg.optionalDependencies,
   ]) {
@@ -142,9 +142,9 @@ function dependenciesFromPackage(pkg: Record<string, unknown>): Set<string> {
   return deps;
 }
 
-function loadNodeDependencies(directory: string): Set<string> | null {
+function loadNodeDependencies(directory: string, productionOnly = false): Set<string> | null {
   const resolvedDir = path.resolve(directory);
-  const cacheKey = `node:${resolvedDir}`;
+  const cacheKey = `node:${productionOnly ? "production:" : ""}${resolvedDir}`;
   const manifest = nearestFile(resolvedDir, ["package.json"]);
   if (!manifest) return null;
 
@@ -158,7 +158,7 @@ function loadNodeDependencies(directory: string): Set<string> | null {
   try {
     const pkg = JSON.parse(fs.readFileSync(manifest.path, "utf8"));
     const result = pkg && typeof pkg === "object" && !Array.isArray(pkg)
-      ? dependenciesFromPackage(pkg as Record<string, unknown>) : null;
+      ? dependenciesFromPackage(pkg as Record<string, unknown>, productionOnly) : null;
     DEPS_CACHE.set(cacheKey, { timestamp: now, deps: result, manifestPath: manifest.path, revision, files });
     return result;
   } catch {
@@ -853,16 +853,26 @@ function buildJsCodeMask(
   return mask;
 }
 
-function extractJsImports(code: string): string[] {
-  const imports: string[] = [];
+function extractJsImports(code: string): { path: string; typeOnly: boolean }[] {
+  const imports: { path: string; typeOnly: boolean }[] = [];
   const mask = buildJsCodeMask(code);
+  // Preserve offsets and import strings while allowing comments between bindings.
+  const executable = code.split("").map((char, index) => mask[index] === 0 ? " " : char).join("");
 
   for (const regex of JS_IMPORT_REGEXES) {
     regex.lastIndex = 0;
-    let match = regex.exec(code);
+    let match = regex.exec(executable);
     while (match !== null) {
-      if (mask[match.index] === 1 && match[1]) imports.push(match[1]);
-      match = regex.exec(code);
+      if (mask[match.index] === 1 && match[1]) {
+        const statement = match[0];
+        const named = /^(?:import|export)\s*\{([^}]*)\}\s*from\b/.exec(statement)?.[1];
+        const specifiers = named?.split(",").map((item) => item.trim()).filter(Boolean);
+        const typeOnly = /^(?:import|export)\s+type\s+(?:[{*]|(?!from\b)[\w$]+\s+from\b)/.test(statement) ||
+          (specifiers !== undefined && specifiers.length > 0 &&
+            specifiers.every((item) => /^type\s+\w+(?:\s+as\s+\w+)?$/.test(item)));
+        imports.push({ path: match[1], typeOnly });
+      }
+      match = regex.exec(executable);
     }
   }
 
@@ -1131,6 +1141,15 @@ function extensionOf(targetFile?: string): string {
   return targetFile ? path.extname(targetFile).toLowerCase() : "";
 }
 
+/** File role is a bounded convention check, not a bundler or reachability analysis. */
+function isDevelopmentNodeFile(targetFile: string): boolean {
+  const normalized = targetFile.replace(/\\/g, "/");
+  return /(?:^|\/)(?:tests?|__tests__|__mocks__|scripts|tools)(?:\/|$)/i.test(normalized) ||
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(normalized) ||
+    /\.d\.[cm]?ts$/i.test(normalized) ||
+    /(?:^|\/)[^/]+\.config\.[cm]?[jt]s$/i.test(normalized);
+}
+
 export const noGhostDepsRule: GuardRule = {
   id: "manifest/no-ghost-deps",
   description:
@@ -1148,16 +1167,17 @@ export const noGhostDepsRule: GuardRule = {
       importPath: string,
       source: string,
       manifestName: string,
-      shouldBlock = true
+      shouldBlock = true,
+      description?: string
     ) => {
-      const key = `${ecosystem}:${packageName}`;
+      const key = `${ecosystem}:${packageName}:${shouldBlock ? "block" : "advisory"}`;
       if (seen.has(key)) return;
       seen.add(key);
       const finding: RuleFinding = {
         ruleId: "manifest/no-ghost-deps",
         pattern: packageName,
         messageSnippet: importPath,
-        description: `Undeclared ${ecosystem} dependency "${packageName}" imported in ${source} but missing from ${manifestName}`,
+        description: description ?? `Undeclared ${ecosystem} dependency "${packageName}" imported in ${source} but missing from ${manifestName}`,
         confidence: shouldBlock ? "high" : "medium",
       };
       findings.push(finding);
@@ -1173,10 +1193,14 @@ export const noGhostDepsRule: GuardRule = {
       const dir = targetDirectory(targetFile, context.directory);
       if (!dir) return;
 
-      if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"].includes(ext) || !ext) {
+      if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"].includes(ext) || !ext) {
         const declared = loadNodeDependencies(dir);
+        const production = loadNodeDependencies(dir, true);
+        const productionFile = targetFile !== undefined &&
+          !isDevelopmentNodeFile(path.relative(context.directory, path.resolve(context.directory, targetFile)));
         if (declared) {
-          for (const importPath of extractJsImports(code)) {
+          for (const imported of extractJsImports(code)) {
+            const importPath = imported.path;
             const pkg = getNodePackageName(importPath);
             if (pkg && isHallucinatedOrSuspiciousPackage(pkg)) {
               addFinding("Node", pkg, importPath, source, "package.json (suspicious typosquatting)");
@@ -1184,9 +1208,16 @@ export const noGhostDepsRule: GuardRule = {
             }
             if (
               !pkg ||
-              NODE_BUILTINS.has(pkg) ||
-              declared.has(pkg)
+              NODE_BUILTINS.has(pkg)
             ) {
+              continue;
+            }
+            if (declared.has(pkg)) {
+              if (productionFile && !imported.typeOnly && production && !production.has(pkg)) {
+                addFinding("Node", pkg, importPath, source, "package.json",
+                  context.ruleConfig.productionOnly === true,
+                  `Runtime import "${importPath}" in ${targetFile} uses "${pkg}" declared only in devDependencies; verify bundling or declare it as a production dependency.`);
+              }
               continue;
             }
             addFinding("Node", pkg, importPath, source, "package.json");

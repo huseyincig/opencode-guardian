@@ -22,7 +22,8 @@ export function evaluateTaskPolicy(contract, evidence) {
             .sort((left, right) => right.sequence - left.sequence)[0];
         const status = record?.status === "success"
             ? "passed"
-            : record?.status === "failure"
+            : record?.status === "failure" || record?.outcomeReason === "no-tests" ||
+                record?.outcomeReason === "skipped-only" || record?.outcomeReason === "summary-conflict"
                 ? "failed"
                 : "unknown";
         return { kind, status, ...(record ? { evidence: record } : {}) };

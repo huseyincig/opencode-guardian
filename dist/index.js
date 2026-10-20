@@ -29,6 +29,8 @@ export * from "./rules/no-unverified-claims.js";
 export * from "./rules/no-silent-failure.js";
 export * from "./rules/destructive-operations.js";
 export * from "./evidence.js";
+export * from "./verification-report.js";
+export * from "./edit-integrity.js";
 export * from "./state.js";
 export * from "./task-contract.js";
 export * from "./locale-intents.js";
@@ -693,6 +695,7 @@ const server = async ({ client, directory }, pluginOptions) => {
             const args = output.args && typeof output.args === "object" && !Array.isArray(output.args)
                 ? output.args
                 : {};
+            verificationStore.observeBefore(input.sessionID, input.callID, input.tool, args, directory);
             if (input.tool === "task" &&
                 typeof input.sessionID === "string" &&
                 typeof input.callID === "string" &&
@@ -1162,7 +1165,7 @@ const setup = async (context) => {
             typeof context.session.context === "function" &&
             typeof context.session.synthetic === "function" &&
             typeof context.session.wait === "function";
-        if (strictPreflight || canFinalizeSubagent) {
+        {
             try {
                 const before = await context.tool.hook("execute.before", (event) => {
                     if (controller.signal.aborted)
@@ -1171,6 +1174,9 @@ const setup = async (context) => {
                     const runtime = runtimeForDirectory(runtimeDirectory);
                     if (runtime.config.enabled === false)
                         return;
+                    if (event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
+                        verificationStore.observeBefore(event.sessionID, event.id, event.tool, event.input, runtimeDirectory);
+                    }
                     if (runtime.config.preflight?.enabled === true) {
                         inspectPreflight(event.tool, event.input, event.sessionID, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier);
                     }

@@ -83,15 +83,16 @@ export function isSensitiveKey(key, customKeys, safeKeyNames) {
  * Known autonomous credential format patterns (can match value even without key name).
  */
 export const KNOWN_CREDENTIAL_PATTERNS = [
-    { name: 'OpenAI API Key', regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{20,}\b/g },
+    { name: 'OpenAI API Key', regex: /\b(?:sk-proj-|sk-)[a-zA-Z0-9_-]{20,}(?![a-zA-Z0-9_-])/g },
     { name: 'GitHub Token', regex: /\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36}\b/g },
     { name: 'GitHub Fine-Grained Token', regex: /\bgithub_pat_[a-zA-Z0-9_]{50,}\b/g },
     { name: 'Slack Token', regex: /\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}\b/g },
     { name: 'AWS Access Key ID', regex: /\bAKIA[0-9A-Z]{16}\b/g },
-    { name: 'Google API Key', regex: /\bAIza[0-9A-Za-z_-]{35}\b/g },
-    { name: 'npm Access Token', regex: /\bnpm_[a-zA-Z0-9]{36}\b/g },
-    { name: 'GitLab Token', regex: /\bglpat-[a-zA-Z0-9_-]{20,}\b/g },
+    { name: 'Google API Key', regex: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g },
+    { name: 'npm Access Token', regex: /\bnpm_[a-zA-Z0-9]{32,}\b/g },
+    { name: 'GitLab Token', regex: /\bglpat-[a-zA-Z0-9_-]{20,}(?![a-zA-Z0-9_-])/g },
     { name: 'Stripe Live Secret Key', regex: /\b(?:sk|rk)_live_[0-9A-Za-z]{20,}\b/g },
+    { name: 'JSON Web Token (JWT)', regex: /\beyJ[a-zA-Z0-9_-]{15,}\.eyJ[a-zA-Z0-9_-]{15,}\.[a-zA-Z0-9_-]{15,}(?![a-zA-Z0-9_-])/g },
 ];
 /**
  * PEM Private Key Block Regex (matches entire multi-line block).

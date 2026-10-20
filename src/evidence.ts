@@ -9,6 +9,8 @@ import type {
   SessionMessage,
   TurnEvidence,
 } from "./types.js";
+import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
+import { captureBeforeEdit, finishEditObservation, type BeforeEditState, type EditIntegrityEvidence } from "./edit-integrity.js";
 import { extractLikelyShellMutation, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import {
   activeBacktickSubstitutions,
@@ -156,6 +158,7 @@ function executableShellStages(command: string): string[] {
         .replace(/^\s*sudo(?:\s+-\S+)*\s+/i, "")
         .replace(/^\s*env(?:\s+(?:-\S+|[a-z_][a-z0-9_]*=\S+))*\s+/i, "")
         .replace(/^(?:[a-z_][a-z0-9_]*=\S+\s+)*/i, "")
+        .replace(/^(?:npx(?:\s+--no-install)?|pnpm\s+exec|npm\s+exec\s+--)\s+/i, "")
         .trim()
     )
     .filter(Boolean);
@@ -402,7 +405,8 @@ function hasFileMutation(part: MessagePart): boolean {
 
   if (
     ["content", "new_string", "newString", "patch", "patchText"].some(
-      (key) => typeof input[key] === "string" && (input[key] as string).length > 0
+      (key) => typeof input[key] === "string" &&
+        (["content", "new_string", "newString"].includes(key) || (input[key] as string).length > 0)
     )
   ) {
     return true;
@@ -452,9 +456,16 @@ function recordFromPart(part: MessagePart, sequence: number): EvidenceRecord[] {
       isVerificationFailureMask(command);
     const ambiguousVerification =
       isVerification && (nonSequentialCompound || pipedWithoutPipefail);
+    const testSummary = kind === "test" ? parseTestSummary(outputText) : undefined;
+    const testReason = kind === "test" ? testOutcomeReason(command, outcome.exitCode, testSummary) : undefined;
+    const cancelled = (outcome.exitCode === 130 || part.state.status === "error") &&
+      /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText) ||
+      part.state.metadata?.cancelled === true || part.state.metadata?.canceled === true;
     const evidenceStatus =
       maskedVerification || ambiguousVerification
         ? "unknown"
+        : commandStatus === "success" && (testReason || cancelled)
+          ? "unknown"
         : commandStatus;
 
     const recordError =
@@ -475,6 +486,9 @@ function recordFromPart(part: MessagePart, sequence: number): EvidenceRecord[] {
       toolName,
       ...(command ? { command } : {}),
       signature: `${baseSignature}:${kind}`,
+      outcomeReason: maskedVerification || ambiguousVerification ? "masked" :
+        cancelled ? "cancelled" : testReason ?? (evidenceStatus === "success" ? "success" : evidenceStatus === "failure" ? "execution-failure" : "unknown"),
+      ...(testSummary ? { testSummary } : {}),
       ...(outputText ? { output: outputText } : {}),
       ...(recordError !== undefined ? { error: recordError } : {}),
       ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
@@ -639,13 +653,29 @@ export function calculateProductFingerprint(
 }
 
 /** Captured by a real tool-after event, not reconstructed from message history. */
-export interface VerificationSnapshot { fingerprint: string; files: string[]; }
+export interface VerificationSnapshot { fingerprint: string; files: string[]; editIntegrity?: EditIntegrityEvidence; }
 
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export class VerificationSnapshotStore {
   private readonly sessions = new Map<string, {
-    paths: Set<string>; snapshots: Map<string, VerificationSnapshot>;
+    paths: Set<string>; snapshots: Map<string, VerificationSnapshot>; before: Map<string, BeforeEditState>;
   }>();
+
+  observeBefore(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, directory: string): void {
+    if (!sessionID || !callID) return;
+    const before = captureBeforeEdit(tool, input, directory);
+    if (!before) return;
+    let session = this.sessions.get(sessionID);
+    if (!session) {
+      session = { paths: new Set(), snapshots: new Map(), before: new Map() };
+      this.sessions.set(sessionID, session);
+    }
+    session.before.set(callID, before);
+    if (session.before.size > 32) {
+      const oldest = session.before.keys().next().value;
+      if (oldest !== undefined) session.before.delete(oldest);
+    }
+  }
 
   observe(sessionID: string, callID: string, tool: string,
     input: Record<string, unknown>, output: unknown, metadata: Record<string, unknown>,
@@ -658,8 +688,13 @@ export class VerificationSnapshotStore {
     ]);
     let session = this.sessions.get(sessionID);
     if (!session) {
-      session = { paths: new Set<string>(), snapshots: new Map() };
+      session = { paths: new Set<string>(), snapshots: new Map(), before: new Map() };
       this.sessions.set(sessionID, session);
+    }
+    const before = session.before.get(callID);
+    session.before.delete(callID);
+    if (before && status === "completed" && evidence.fileMutations.some(r => r.status === "success")) {
+      session.snapshots.set(callID, { fingerprint: "", files: [before.filePath], editIntegrity: finishEditObservation(before) });
     }
     for (const mutation of evidence.fileMutations) {
       if (mutation.status === "success") {
@@ -686,6 +721,7 @@ export class VerificationSnapshotStore {
     this.sessions.set(sessionID, {
       paths: new Set<string>(),
       snapshots: new Map<string, VerificationSnapshot>(),
+      before: new Map<string, BeforeEditState>(),
     });
   }
 
@@ -724,8 +760,12 @@ export function collectTurnEvidence(
       }
       const partRecords = recordFromPart(part, sequence++);
       for (const record of partRecords) {
+        const callID = typeof part.callID === "string" ? part.callID : undefined;
+        const observedEdit = callID ? snapshots?.get(callID)?.editIntegrity : undefined;
+        if (record.kind === "file-mutation" && observedEdit && record.filePath === observedEdit.filePath) {
+          record.editIntegrity = observedEdit;
+        }
         if (VERIFICATION_KINDS.has(record.kind)) {
-          const callID = typeof part.callID === "string" ? part.callID : undefined;
           // Historical message replay cannot recreate the disk state at test
           // time. Only a live after-hook may supply an observed fingerprint.
           const snapshot = callID ? snapshots?.get(callID) : undefined;

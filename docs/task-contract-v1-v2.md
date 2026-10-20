@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.11.2**.
+Documentation for OpenCode Guardian **v0.12.0**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -18,6 +18,7 @@ Guardian implements a robust dual-mode architecture that connects to both **Open
 | **Resolve Project Directory** | Plugin load directory argument | `ctx.session.get().location.directory` / `ctx.location.directory` |
 | **Plugin Teardown** | V1 dispose() cancels outstanding probes and per-session idle work | AbortController signal and disposer handles |
 | **Pre-Execution Shell Check** | `tool.execute.before` | `ctx.tool.hook("execute.before")` |
+| **Whole-File Edit Observations** | Existing `tool.execute.before` / `tool.execute.after` | Optional `execute.before` / `execute.after` hooks; no old-content reconstruction without before evidence |
 | **Foreground Subagent Finalization** | `task` execute-before/after coordination + `client.session.prompt(...)` | `subagent` execute-before/after coordination + `ctx.session.synthetic(...)` + `ctx.session.wait(...)` |
 | **TUI Sidebar Extension** | `tui(api)` → `api.slots.register({ sidebar_content })` | `setup(ctx)` → `ctx.ui.slot({ append: "sidebar.content" })` |
 | **TUI Commands / Slash** | `api.command.register` (when available) and `/guardian-status` | Global `ctx.keymap.layer` and `/guardian status` dispatcher |
@@ -34,19 +35,30 @@ In v0.11.2, a new V1 human prompt cancels prior idle inspection and clears previ
 2. **Context Guidance:**
    - Injects structured guidance before the agent calls the model, preventing it from prioritizing earlier deferrals or hallucinating completion.
 3. **Evidence Collection after `session.idle`:**
-   - Gathers recorded tool invocations into a unified `EvidenceCollector` snapshot.
+   - Normalizes recorded tool invocations through `collectTurnEvidence` into shared evidence records.
+   - Supported complete Node/pytest/Jest/Vitest summaries add reconciled counts and outcome reasons. Unknown formats do not invent counts; host failures cannot become success because output prints a passing summary.
    - Validates chronological order: verifications run *before* the latest file edit are marked stale.
    - Substantive source inspections (file reads, line-bearing search/diff matches) are distinguished from superficial filename listings. Note that observable inspection of modified files confirms post-change re-inspection but cannot prove exhaustive whole-repository coverage (`reviewProvesFullCoverage: false`).
 4. **Completion Evaluation:**
    - If an explicit iterative review task terminates without observing the required post-change verification, an automated remediation is triggered.
+   - A required test run cannot be satisfied by a recognized zero-test, skipped-only or conflicting summary.
    - Continues up to `iterationBudget` (default `3`, max `5`), requiring observable progress on each turn.
 5. **Circuit Breaking:**
    - Detects explicit blockers (unmet dependencies, missing credentials, system errors) and halts automatic retry loops to present a transparent report to the user.
+   - Explicit user cancellation is distinguished from repeated execution failures. Pytest exit 2 alone is not cancellation evidence because collection errors also use it.
 6. **Foreground Subagent Handoff Finalization:**
    - A synchronous V1 `task` or V2 `subagent` call is tracked from execute-before to execute-after.
    - If the child session has blocking Guardian findings, the parent-facing tool result is held while Guardian sends bounded remediation to the child and waits for that turn to finish.
    - The child is re-inspected before release. When remediation produces a revised final report, that report replaces the stale first-pass child output returned to the parent.
    - Background subagents do not enter this blocking handoff path; their existing idle-remediation behavior remains independent.
+
+---
+
+## v0.12.0 Evidence and Constraint Boundaries
+
+Supported whole-file writes can carry before/after hashes, sizes and declaration-name loss into idle inspection. Suspicious content loss remains advisory, and a missing before hook cannot establish old file content. Source truncation placeholders can be rejected by strict preflight. See [edit observation limits](discipline-coverage.md#edit-observations-and-safety) for project confinement and memory bounds.
+
+Research-only enforcement recognizes narrow English/Turkish phrases and checks observed writes, installs and pushes after the turn. It does not cover every language supported by task-contract extraction and cannot undo a completed mutation. File-specific baseline claims need matching comparison targets; quoted examples cannot grant destructive-operation permission.
 
 ---
 
@@ -59,7 +71,7 @@ In v0.11.2, a new V1 human prompt cancels prior idle inspection and clears previ
 
 ## V2 Instance and Session Scope
 
-V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian uses `ctx.session.get({ sessionID })` when available to route post-turn inspection and local telemetry to the session directory. The rule engine and strict preflight hook are configured at plugin setup from the instance directory; a session in a different project does not dynamically enable a new pre-execution hook. Use independent plugin instances for projects requiring different strict policies.
+V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian uses `ctx.session.get({ sessionID })` when available to route post-turn inspection, engine configuration and local telemetry to the resolved session directory. Tool-before checks use the already-known session directory, falling back to the instance directory if it is not yet known. Hook registration and fail-fast strict-preflight availability checks happen at instance setup; another project's configuration cannot supply a missing host hook. Use independent plugin instances for projects requiring different strict policies.
 
 When an event subscription unexpectedly ends or fails, Guardian records an inspection error and makes up to three bounded stream attempts. Teardown aborts pending reconnects. Failure to restore the stream is logged visibly; this is not a substitute for monitoring host health.
 

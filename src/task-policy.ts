@@ -49,7 +49,8 @@ export function evaluateTaskPolicy(
     const status: VerificationDecision["status"] =
       record?.status === "success"
         ? "passed"
-        : record?.status === "failure"
+        : record?.status === "failure" || record?.outcomeReason === "no-tests" ||
+          record?.outcomeReason === "skipped-only" || record?.outcomeReason === "summary-conflict"
           ? "failed"
           : "unknown";
     return { kind, status, ...(record ? { evidence: record } : {}) };

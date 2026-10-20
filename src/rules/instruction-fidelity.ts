@@ -1,5 +1,6 @@
 import type { GuardRule, RuleFinding, RuleResult } from "../types.js";
-import { currentHumanMessage } from "../task-contract.js";
+import { hasResearchOnlyConstraint, latestHumanInstruction } from "../task-constraints.js";
+import { collectTurnEvidence } from "../evidence.js";
 import { sanitizeProseForInspection } from "../prose.js";
 import { detectInstructionFidelitySignals } from "../locale-intents.js";
 
@@ -8,11 +9,26 @@ export const instructionFidelityRule: GuardRule = {
   id: "task/instruction-fidelity",
   description: "Detects historical refusals and redundant confirmation handoffs that conflict with the current explicit task.",
   inspect(context): RuleResult {
-    const user = currentHumanMessage(context.currentTurn);
-    const instruction = user?.parts
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text ?? "")
-      .join("\n") ?? "";
+    const instruction = latestHumanInstruction(context);
+    const evidence = context.evidence ?? collectTurnEvidence(context.currentTurn);
+    if (hasResearchOnlyConstraint(instruction)) {
+      const mutations = evidence.records.filter((record) =>
+        record.status !== "failure" &&
+        ["file-mutation", "install", "git-push"].includes(record.kind));
+      if (mutations.length > 0) {
+        return {
+          ruleId: this.id, decision: "block",
+          findings: mutations.slice(0, 20).map((record) => ({
+            ruleId: this.id,
+            pattern: "research-only scope violation",
+            messageSnippet: (record.command ?? record.filePath ?? record.toolName).slice(0, 240),
+            description: "Observed mutation conflicts with the latest human research-only/no-edits instruction.",
+            confidence: record.status === "success" ? "high" as const : "medium" as const,
+          })),
+          remediationPrompt: "Respect the current research-only/no-edits constraint. Report the observed mutation and continue with read-only investigation; do not perform more changes or automatically undo user work.",
+        };
+      }
+    }
     const assistant = context.currentTurn
       .findLast((message) => message.info.role === "assistant")?.parts
       .filter((part) => part.type === "text" && typeof part.text === "string")

@@ -1,5 +1,6 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
+import { findTruncationPlaceholder, TRUNCATION_PLACEHOLDERS } from "../edit-integrity.js";
 
 /**
  * Regex patterns that detect lazy file truncation comments like:
@@ -7,12 +8,7 @@ import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-
  * "# ... rest of code ..."
  * "<!-- ... previous content ... -->"
  */
-export const TRUNCATION_PATTERNS: RegExp[] = [
-  /(?:\/\/|#|\/\*|<!--)\s*\.{3}\s*(?:existing|rest\s+of|remaining|previous|earlier|unchanged|keep\s+existing|other|more|code\s+here)\b/i,
-  /(?:\/\/|#|\/\*|<!--)\s*(?:existing|rest\s+of|remaining|previous|earlier|unchanged)\s*(?:code|methods|functions|implementation|content|logic)\s*(?:remains|here|unchanged|as\s+is|continues)?\s*\.{3}/i,
-  /(?:\/\/|#|\/\*|<!--)\s*\[?\.\.\.\s*(?:rest|existing|code|truncated)\s*(?:of\s+code)?\s*\.?\]?/i,
-  /(?:\/\/|#)\s*\.{3}\s*$/m,
-];
+export const TRUNCATION_PATTERNS = TRUNCATION_PLACEHOLDERS;
 
 function extractAddedLines(text: unknown): string {
   if (typeof text !== "string") return "";
@@ -41,17 +37,29 @@ export const noTruncationRule: GuardRule = {
     const findings: RuleFinding[] = [];
     const seen = new Set<string>();
 
-    const checkCode = (code: string, source: string) => {
+    for (const record of context.evidence?.fileMutations ?? []) {
+      const edit = record.editIntegrity;
+      if (record.status !== "success" || edit?.status !== "observed" ||
+          (edit.removedDefinitions ?? 0) < 2 || !edit.beforeBytes ||
+          (edit.afterBytes ?? edit.beforeBytes) >= edit.beforeBytes / 2) continue;
+      findings.push({ ruleId: "safety/no-truncation", pattern: "observed whole-file content loss",
+        messageSnippet: "Whole-file replacement removed multiple observed definitions.",
+        description: `Observed replacement reduced ${edit.beforeBytes} bytes to ${edit.afterBytes} and removed ${edit.removedDefinitions} definitions; confirm this matches the requested change`,
+        filePath: edit.filePath, confidence: "medium",
+        fingerprint: `${edit.filePath}:${edit.beforeHash}:${edit.afterHash}` });
+    }
+
+    const checkCode = (code: string, source: string, filePath?: string) => {
       if (!code || typeof code !== "string") return;
 
-      for (const regex of TRUNCATION_PATTERNS) {
-        const match = regex.exec(code);
+      {
+        const match = findTruncationPlaceholder(code, filePath);
         if (match) {
           const matchedText = match[0].trim();
-          if (seen.has(matchedText)) continue;
+          if (seen.has(matchedText)) return;
           seen.add(matchedText);
 
-          const snippet = extractSnippet(code, match.index, match[0].length);
+          const snippet = extractSnippet(code, match.index ?? 0, match[0].length);
           findings.push({
             ruleId: "safety/no-truncation",
             pattern: matchedText,
@@ -68,21 +76,23 @@ export const noTruncationRule: GuardRule = {
       for (const part of msg.parts) {
         if (part.type === "tool" && part.state?.input) {
           const input = part.state.input;
+          const target = input.path ?? input.filePath ?? input.file ?? input.targetFile;
+          const filePath = typeof target === "string" ? target : undefined;
           if (typeof input.content === "string") {
-            checkCode(input.content, "file write content");
+            checkCode(input.content, "file write content", filePath);
           }
           if (typeof input.new_string === "string") {
-            checkCode(input.new_string, "file edit");
+            checkCode(input.new_string, "file edit", filePath);
           }
           if (typeof input.newString === "string") {
-            checkCode(input.newString, "file edit");
+            checkCode(input.newString, "file edit", filePath);
           }
           for (const edit of extractStructuredEditTexts(input)) {
-            checkCode(edit.text, "structured file edit");
+            checkCode(edit.text, "structured file edit", edit.filePath ?? filePath);
           }
-          const patchText = extractAddedLines(input.patchText ?? input.patch);
-          if (patchText) {
-            checkCode(patchText, "patch added lines");
+          for (const section of splitFilePatches(input.patchText ?? input.patch)) {
+            const patchText = extractAddedLines(section.patch);
+            if (patchText) checkCode(patchText, "patch added lines", section.filePath ?? filePath);
           }
           const shellMutation = extractLikelyShellMutation(input);
           if (shellMutation) {
@@ -100,7 +110,10 @@ export const noTruncationRule: GuardRule = {
       };
     }
 
-    const list = findings.map((f) => `  - "${f.pattern}" → ${f.messageSnippet}`).join("\n");
+    const blocking = findings.filter(f => f.pattern !== "observed whole-file content loss");
+    if (!blocking.length) return { ruleId: "safety/no-truncation", decision: "pass", findings };
+
+    const list = blocking.map((f) => `  - "${f.pattern}" → ${f.messageSnippet}`).join("\n");
     const remediationPrompt =
       `Lazy code truncation placeholder detected in this turn:\n${list}\n\n` +
       `Never use placeholders like '// ... existing code unchanged ...' or '// ...' when modifying files. ` +

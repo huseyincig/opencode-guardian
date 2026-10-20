@@ -1,4 +1,5 @@
 import { sanitizeProseForInspection } from "../prose.js";
+import { withinConfiguredException } from "../code-context.js";
 import { getApologyPatterns } from "../locale-intents.js";
 /**
  * Universal multi-lingual apology and sycophancy patterns, centralized in the locale adapter.
@@ -51,7 +52,9 @@ export const noApologyRule = {
                         : `${pattern.regex.flags}g`);
                     let match = regex.exec(cleanText);
                     while (match !== null) {
-                        if (isReportedApologyToken(cleanText, match.index)) {
+                        const leadingSpace = match[0].length - match[0].trimStart().length;
+                        if (isReportedApologyToken(cleanText, match.index) ||
+                            withinConfiguredException(cleanText, match.index + leadingSpace, match[0].trim().length, context.ruleConfig.exceptions ?? [])) {
                             match = regex.exec(cleanText);
                             continue;
                         }

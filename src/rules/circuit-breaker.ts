@@ -7,6 +7,20 @@ import type {
 } from "../types.js";
 import { collectTurnEvidence } from "../evidence.js";
 
+function isUserCancellation(record: EvidenceRecord): boolean {
+  const reason = "outcomeReason" in record ? record.outcomeReason : undefined;
+  if (reason === "cancelled") return true;
+  if (typeof reason === "string" && reason !== "unknown") return false;
+  // Legacy hosts may supply only an error envelope. Do not classify arbitrary
+  // cancellation-related assertion text or a timeout as a user cancellation.
+  const texts = [record.error, record.output].filter((text): text is string => typeof text === "string");
+  return texts.some((value) => {
+    const text = value.trim();
+    return /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled|canceled|aborted|interrupted)\s+by\s+(?:the\s+)?user[.!]?(?:\s|$)/i.test(text) ||
+    /^user\s+(?:cancelled|canceled|aborted|interrupted)(?:\s+(?:the\s+)?(?:tool|command|operation|execution))?[.!]?$/i.test(text);
+  });
+}
+
 function commandFamily(record: EvidenceRecord): string {
   const command = record.command?.trim().toLowerCase() ?? "";
   if (!command) return record.toolName.toLowerCase();
@@ -67,6 +81,7 @@ export const circuitBreakerRule: GuardRule = {
       { count: number; last: EvidenceRecord }
     >();
     for (const record of records) {
+      if (isUserCancellation(record)) continue;
       const family = commandFamily(record);
 
       if (record.status === "success") {
@@ -111,6 +126,7 @@ export const circuitBreakerRule: GuardRule = {
     >();
 
     for (const record of records) {
+      if (isUserCancellation(record)) continue;
       const family = commandFamily(record);
 
       if (record.status === "success") {

@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.11.2 automated verification suite**, evaluated on **20 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.12.0 automated verification suite**, evaluated on **20 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.11.2`
-- **Previous Package Version:** `v0.11.1` (historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **619 / 619 unit, security, toast notification, and regression tests passed**
+- **Package Version:** OpenCode Guardian `v0.12.0`
+- **Previous Package Version:** `v0.11.2` (619 passing tests; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **725 / 725 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Dependency Audits:** Not rerun for v0.11.2; dependency versions unchanged
+- **Dependency Audits:** Not rerun for v0.12.0; dependency versions unchanged
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.11.2 adds recursive Error redaction, safe serialization, V1 session cancellation and capability-permission fixes. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.11.2.
+> v0.12.0 adds normalized test summaries, observed edit-integrity advisories and context-aware discipline checks. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.12.0.
 
 ---
 
@@ -122,13 +122,21 @@ Independent live-host acceptance tests were conducted on real host environments 
 
 ---
 
+## v0.12.0 Engine Evidence and Discipline Hardening
+
+- **Verification semantics:** bounded complete Node/pytest/Jest/Vitest summaries distinguish executed tests, skipped-only and zero-test outcomes. Actual host failures remain failures; explicit cancellation is distinct from collection errors. Fresh supported counts can contradict explicit current passed-test claims.
+- **Edit observations:** V1/V2 before/after callbacks capture bounded, project-confined whole-file facts. Suspicious definition loss is advisory; missing before hooks do not invent old content. Strict preflight rejects source truncation placeholders.
+- **Context and scope:** code checks distinguish executable code from literal examples. Runtime dev-only imports are advisory by default, with optional `productionOnly` enforcement. Credential formats are shared between write detection and output redaction. Research-only phrases, baseline targets, repository/refspec authorization and hook bypasses have focused regressions.
+- **Balanced regression baseline:** [28 labeled cases across fourteen rules](../tests/discipline-coverage.test.mjs), plus focused boundary tests. [Coverage and limitations](discipline-coverage.md) document the supported subsets. This synthetic corpus does not establish equal real-world accuracy across disciplines or languages.
+- **Adapter boundary:** simulated V1/V2 callbacks verify before/after observation delivery and the absent-before-hook negative case. Live-host compatibility and interactive TUI acceptance remain separate, unperformed checks for this release.
+
 ## v0.11.2 Error Redaction, Session Cancellation and Mutation Permissions
 
 - **Secret sanitization:** All own Error properties are sanitized recursively, including non-enumerable `cause`, aggregate errors and provider metadata. Sanitization copies errors instead of modifying the originals. Executable `toJSON` callbacks are omitted, and reserved JSON keys remain own properties without changing prototypes.
 - **V1 session lifecycle:** Native `session.deleted` events read `properties.info.id`. Per-session cancellation stops stale idle work on deletion, disposal and new human messages, including attachment-only prompts. Previous task guidance is cleared on a new human turn.
 - **Capability cache:** Cancelled agent queries cannot restore deleted-session permission profiles, and cancellation is rechecked before engine inspection.
 - **Mutation authorization:** Enabling a V1 mutation tool does not override explicit `deny`/`ask` or the shared edit restriction. The previous test expecting enabled `apply_patch` to override an edit denial now checks that autonomous remediation is forbidden.
-- **Regression suite:** [19 debugging cases](../tests/debug-regressions.test.mjs) cover these paths; the complete source suite passes 619 tests.
+- **Regression suite:** [19 debugging cases](../tests/debug-regressions.test.mjs) cover these paths; the v0.11.2 source suite passed 619 tests. These regressions remain included in the current suite.
 
 ## v0.11.1 Post-Turn Inspection Counting and V2 Subagent Handoff Recognition
 
@@ -250,20 +258,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.11.2
+## Automated Source Verification Results — v0.12.0
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 619 tests across all 14 rules, secret redaction, adapters, telemetry, handoff protocol and preflight | **619 / 619 PASS** |
+| **Unit & Regression Suite** | 725 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol and preflight | **725 / 725 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
-| **Smoke Test** | Package entrypoints, exports, and status CLI | **PASS** |
+| **Smoke Test** | V1 plugin initialization, idle inspection and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
 | **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
-| **Production Audit** | `npm audit --omit=dev` | Not rerun for this patch |
-| **Development Audit** | Full lockfile dependency audit | Not rerun for this patch |
-| **Packaging Dry Run** | `npm pack --dry-run` (entrypoints, declarations and release documents) | **PASS** |
-| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.11.2 on pinned hosts | **NOT RUN** |
+| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.12.0 |
+| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.12.0 |
+| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.12.0 metadata and file manifest; no archive created) | **PASS** |
+| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.12.0 on pinned hosts | **NOT RUN** |
 
 ---
 

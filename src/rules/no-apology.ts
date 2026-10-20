@@ -1,5 +1,6 @@
 import type { GuardRule, RuleFinding, RuleResult, TurnInspectionContext } from "../types.js";
 import { sanitizeProseForInspection } from "../prose.js";
+import { withinConfiguredException } from "../code-context.js";
 import { type ApologyPattern, getApologyPatterns } from "../locale-intents.js";
 export type { ApologyPattern };
 
@@ -70,7 +71,9 @@ export const noApologyRule: GuardRule = {
           );
           let match = regex.exec(cleanText);
           while (match !== null) {
-            if (isReportedApologyToken(cleanText, match.index)) {
+            const leadingSpace = match[0].length - match[0].trimStart().length;
+            if (isReportedApologyToken(cleanText, match.index) ||
+                withinConfiguredException(cleanText, match.index + leadingSpace, match[0].trim().length, context.ruleConfig.exceptions ?? [])) {
               match = regex.exec(cleanText);
               continue;
             }

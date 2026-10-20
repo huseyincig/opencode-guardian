@@ -3,12 +3,14 @@ import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
 import { extractStructuredEditTexts, quoteProcessArgument } from "./tool-input.js";
+import { findTruncationPlaceholder } from "./edit-integrity.js";
 
 export type PreflightFinding =
   | "destructive-command"
   | "opaque-shell-execution"
   | "uninspectable-shell-input"
   | "hardcoded-secret-in-file-write"
+  | "truncation-placeholder-in-file-write"
   | "uninspectable-file-input"
   | "high-risk-environment-dump"
   | "lazy-commit-message"
@@ -192,6 +194,7 @@ export function evaluateFileMutationPreflight(
     if (found) {
       return "hardcoded-secret-in-file-write";
     }
+    if (findTruncationPlaceholder(item.text, item.filePath)) return "truncation-placeholder-in-file-write";
   }
   return undefined;
 }
@@ -353,6 +356,7 @@ export class GuardianPreflightError extends Error {
       "opaque-shell-execution": "decoded content piped into a shell",
       "uninspectable-shell-input": "missing or uninspectable shell command",
       "hardcoded-secret-in-file-write": "potential hardcoded secret in file write",
+      "truncation-placeholder-in-file-write": "code placeholder would replace real source content",
       "uninspectable-file-input": "missing or uninspectable file mutation payload",
       "high-risk-environment-dump": "broad environment or container metadata dump that may expose credentials",
       "lazy-commit-message": "lazy or uninformative git commit message; write a descriptive conventional commit (feat:, fix:, etc.)",

@@ -69,6 +69,8 @@ export * from "./rules/no-unverified-claims.js";
 export * from "./rules/no-silent-failure.js";
 export * from "./rules/destructive-operations.js";
 export * from "./evidence.js";
+export * from "./verification-report.js";
+export * from "./edit-integrity.js";
 export * from "./state.js";
 export * from "./task-contract.js";
 export * from "./locale-intents.js";
@@ -825,6 +827,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         output.args && typeof output.args === "object" && !Array.isArray(output.args)
           ? output.args as Record<string, unknown>
           : {};
+      verificationStore.observeBefore(input.sessionID, input.callID, input.tool, args, directory);
       if (
         input.tool === "task" &&
         typeof input.sessionID === "string" &&
@@ -1352,13 +1355,17 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       typeof context.session.context === "function" &&
       typeof context.session.synthetic === "function" &&
       typeof context.session.wait === "function";
-    if (strictPreflight || canFinalizeSubagent) {
+    {
       try {
         const before = await context.tool.hook("execute.before", (event) => {
           if (controller.signal.aborted) return;
           const runtimeDirectory = sessionDirectories.get(event.sessionID) ?? directory;
           const runtime = runtimeForDirectory(runtimeDirectory);
           if (runtime.config.enabled === false) return;
+          if (event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
+            verificationStore.observeBefore(event.sessionID, event.id, event.tool,
+              event.input as Record<string, unknown>, runtimeDirectory);
+          }
 
           if (runtime.config.preflight?.enabled === true) {
             inspectPreflight(

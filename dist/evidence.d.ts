@@ -1,4 +1,5 @@
 import type { EvidenceKind, EvidenceRecord, MessagePart, SessionMessage, TurnEvidence } from "./types.js";
+import { type EditIntegrityEvidence } from "./edit-integrity.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 export declare function normalizeErrorFingerprint(errorText: string): string;
 export declare function isVerificationFailureMask(command: string): boolean;
@@ -18,10 +19,12 @@ export declare function calculateProductFingerprint(directory?: string, files?: 
 export interface VerificationSnapshot {
     fingerprint: string;
     files: string[];
+    editIntegrity?: EditIntegrityEvidence;
 }
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export declare class VerificationSnapshotStore {
     private readonly sessions;
+    observeBefore(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, directory: string): void;
     observe(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, output: unknown, metadata: Record<string, unknown>, directory: string, status?: string): void;
     beginTurn(sessionID: string): void;
     snapshots(sessionID: string): ReadonlyMap<string, VerificationSnapshot>;

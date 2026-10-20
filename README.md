@@ -21,9 +21,9 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic separates **v0.12.0 automated verification** from historical V1/V2 host acceptance. A new live-host and interactive TUI acceptance run has not been performed for v0.12.0.
+> The graphic separates **v0.12.1 automated verification** from historical V1/V2 host acceptance. A new live-host and interactive TUI acceptance run has not been performed for v0.12.1.
 
-Guardian **v0.12.0** was checked on **20 October 2026**, using Node **24.22.0**:
+Guardian **v0.12.1** was checked on **20 October 2026**, using Node **24.22.0**:
 
 - **Current Automated Verification:** **725 / 725** unit, security, toast notification, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
@@ -33,11 +33,11 @@ Guardian **v0.12.0** was checked on **20 October 2026**, using Node **24.22.0**:
 
 Read the comprehensive [V1 Acceptance Report](docs/acceptance-v1.md), [V2 Acceptance Report](docs/acceptance-v2.md), and [Verification and Acceptance Report](docs/verification-report.md) for reproduction steps, methodology, and full test matrices.
 
-Guardian **v0.12.0** adds scoped test summaries, observed edit-integrity advisories and contextual rule checks. See [discipline coverage, configuration and limitations](docs/discipline-coverage.md) for the fourteen-rule evaluation, supported formats and evidence boundaries.
+Guardian **v0.12.1** adds scoped test summaries, observed edit-integrity advisories and contextual rule checks. See [discipline coverage, configuration and limitations](docs/discipline-coverage.md) for the fourteen-rule evaluation, supported formats and evidence boundaries.
 
 ---
 
-See the [0.12.0 release notes](CHANGELOG.md) for engine evidence, edit-integrity and contextual discipline improvements.
+See the [0.12.1 release notes](CHANGELOG.md) for engine evidence, edit-integrity and contextual discipline improvements.
 
 ## ✨ Key Highlights
 
@@ -122,7 +122,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.12.0
+▶ Guardian                 v0.12.1
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -136,7 +136,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.12.0
+▼ Guardian                 v0.12.1
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0

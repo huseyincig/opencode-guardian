@@ -6,7 +6,7 @@ This document reports the **v0.12.0 automated verification suite**, evaluated on
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.12.0`
+- **Package Version:** OpenCode Guardian `v0.12.1`
 - **Previous Package Version:** `v0.11.2` (619 passing tests; historical v0.6.0 host acceptance evidence retained below)
 - **Current Automated Source Suite:** **725 / 725 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1 — 2026-10-20
+
+- Documentation alignment and verification reporting maintenance.
+- Maintain full 14-discipline rule coverage and bounded edit integrity heuristics.
+
+Validation on Node 24.22.0: 725 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.12.1.
+
 ## 0.12.0 — 2026-10-20
 
 - Normalize supported test counts and outcome reasons; reject zero-test, skipped-only and conflicting summaries as proof of required verification.

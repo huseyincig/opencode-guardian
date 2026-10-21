@@ -38,6 +38,11 @@ import { isTrustedGuardianMetadata } from "./provenance.js";
 
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 
+export const ANTI_DISTRACTION_DIRECTIVE =
+  "CRITICAL: A quality or safety policy was triggered for your current turn.\n" +
+  "- Do NOT read, explore, or modify Guardian plugin files, configuration, or audit logs.\n" +
+  "- Focus exclusively on your assigned task and resolve the specific finding below directly in your project code:";
+
 function findingIdentity(ruleId: string, finding: RuleFinding): string {
   const semantic = finding.fingerprint
     ? ["explicit", finding.filePath ?? "", finding.fingerprint]
@@ -54,9 +59,9 @@ function composeCombinedRemediationPrompt(
   handoff: OpenCodeHandoff | null
 ): string {
   if (!handoff) {
-    return `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`;
+    return `${REMEDIATION_MARKER}\n\n${ANTI_DISTRACTION_DIRECTIVE}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
   }
-  return `${REMEDIATION_MARKER}\n\n${formatOpenCodeHandoff(handoff)}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
+  return `${REMEDIATION_MARKER}\n\n${formatOpenCodeHandoff(handoff)}\n\n${ANTI_DISTRACTION_DIRECTIVE}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
 }
 
 export const BUILTIN_RULES: Record<string, GuardRule> = {

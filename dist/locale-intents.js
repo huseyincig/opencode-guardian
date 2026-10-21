@@ -284,19 +284,35 @@ export function detectInternationalHistoricalRefusal(userInstruction, assistantR
 // ADVISORY PARSING & COMPATIBILITY REGEXES (English, Turkish, etc.)
 // Centralized here so core engine and guard rules have ZERO language-specific phrases.
 // -----------------------------------------------------------------------------
+function normalizeReportText(text) {
+    return text
+        .normalize("NFKC")
+        .replace(/İ/g, "i")
+        .replace(/I/g, "ı")
+        .toLocaleLowerCase()
+        .replace(/\u0307/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
 const CLOSING_REGEX = /\b(?:completed?|finished|all\s+done|task\s+done|that's\s+it|no\s+(?:more|further)\s+(?:issues?|errors?|bugs?)|nothing\s+(?:else|left)\s+to\s+fix)\b|\b(?:tamamlandı|tamamladım|iş\s+bitti|denetim\s+bitti|inceleme\s+tamamlandı|hata\s+kalmadı|sorun\s+kalmadı|başka\s+hata\s+yok)\b/iu;
-const CLEAR_BLOCKER_REGEX = /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|\b(?:engellendi|ilerleyemiyorum|doğrulayamıyorum|çalıştıramıyorum|tamamlanmadı|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum)\b/iu;
+const CLEAR_BLOCKER_REGEX = /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|\b(?:engellendi|ilerleyemiyorum|doğrulayamıyorum|çalıştıramıyorum|tamamlanmadı|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum|bitmedi|bitmiş\s+sayılmıyor|bitmiş\s+sayılmaz|tamamlanmış\s+sayılmıyor)\b/iu;
+const IN_PROGRESS_REGEX = /(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report)|(?:işlem\w*\s+devam\s+ediyor|çalışma\w*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\w*\s+sürüyor|çalışıyorum|inceliyorum|hazırlıyorum|uyguluyorum|başlıyorum|deniyorum|devredildi|aktarıldı|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu)/iu;
 export function classifyAgentReport(input) {
+    const norm = normalizeReportText(input);
     const internationalReport = classifyInternationalAgentReport(input);
-    const hasClearBlocker = CLEAR_BLOCKER_REGEX.test(input) || internationalReport === "blocked";
-    const proseWithoutBlockers = hasClearBlocker ? input.replace(CLEAR_BLOCKER_REGEX, " ") : input;
-    const isClosing = CLOSING_REGEX.test(proseWithoutBlockers) || internationalReport === "completed";
+    const hasClearBlocker = CLEAR_BLOCKER_REGEX.test(norm) || internationalReport === "blocked";
+    const isInProgress = IN_PROGRESS_REGEX.test(norm);
+    const proseWithoutBlockers = hasClearBlocker ? norm.replace(CLEAR_BLOCKER_REGEX, " ") : norm;
+    const rawClosing = CLOSING_REGEX.test(proseWithoutBlockers) || internationalReport === "completed";
+    const isClosing = rawClosing && !isInProgress;
     const state = hasClearBlocker && !isClosing
         ? "blocked"
         : isClosing
             ? "completed"
-            : "unknown";
-    return { state, hasClearBlocker, isClosing };
+            : isInProgress
+                ? "in-progress"
+                : "unknown";
+    return { state, hasClearBlocker, isClosing, isInProgress };
 }
 // Task Contract extraction helpers
 const ITERATION = /(?:\b(?:repeat|restart|rerun|re-run|again|until|every\s+(?:time|round)|each\s+(?:time|round))\b|\b(?:tekrar|yeniden|baştan|her\s+(?:turda|tura|seferinde|hata|bir\s+hata)|hata\s+kalmayana|bulmayana|sıfır\s+hata)\b)/iu;

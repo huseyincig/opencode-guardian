@@ -32,13 +32,14 @@ export interface InternationalNegations {
 }
 export declare function extractInternationalNegations(input: string): InternationalNegations;
 export declare const SUPPORTED_SIGNAL_LOCALES: readonly string[];
-export type AgentReportState = "completed" | "blocked" | "unknown";
+export type AgentReportState = "completed" | "blocked" | "in-progress" | "unknown";
 export declare function classifyInternationalAgentReport(input: string): AgentReportState;
 export declare function detectInternationalHistoricalRefusal(userInstruction: string, assistantResponse: string): string | undefined;
 export declare function classifyAgentReport(input: string): {
     state: AgentReportState;
     hasClearBlocker: boolean;
     isClosing: boolean;
+    isInProgress: boolean;
 };
 export declare function isExploratoryPrompt(text: string): boolean;
 export declare function deniedVerification(text: string, kind: VerificationKind): boolean;

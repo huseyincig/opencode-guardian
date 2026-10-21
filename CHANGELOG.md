@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.2 — 2026-10-21
+
+- Protect subagents and in-progress execution turns from false-positive completion gate blocking. Subagents reporting progress, step outcomes or communicating with their parent orchestrator without claiming task completion (`!report.isClosing`) pass through cleanly.
+- Add `IN_PROGRESS_REGEX` and Unicode/Turkish-aware (`normalizeReportText`) classification in `locale-intents.ts` supporting Turkish and English ongoing work statements (*"işlem devam ediyor"*, *"çalışmaya devam ediyorum"*, *"ara rapor"*, *"durum güncellemesi"*, *"devredildi"*, *"work in progress"*, *"ongoing"*, *"investigating"*, etc.).
+- Prevent false-positive completion-gate triggers when an orchestrator delegates work to a subagent or pauses for child execution.
+- Retain strict verification enforcement when an agent explicitly claims completion (`report.isClosing === true`): required test checks and unresolved tool failures continue to be strictly gated.
+- Add `ANTI_DISTRACTION_DIRECTIVE` in the remediation engine preventing agents from inspecting Guardian's plugin source code or audit logs.
+- Standardize actionable remediation prompts across all 14 rules with numbered `ACTION REQUIRED:` directives.
+- Add regression tests covering subagent progress reporting, orchestrator delegation, and completion validation.
+
+Validation on Node 24.22.0: 730 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.12.2.
+
 ## 0.12.1 — 2026-10-20
 
 - Documentation alignment and verification reporting maintenance.

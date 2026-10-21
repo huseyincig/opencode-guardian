@@ -22,6 +22,9 @@ import { extractTaskContract, latestMutationSequence, } from "./task-contract.js
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
 import { isTrustedGuardianMetadata } from "./provenance.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
+export const ANTI_DISTRACTION_DIRECTIVE = "CRITICAL: A quality or safety policy was triggered for your current turn.\n" +
+    "- Do NOT read, explore, or modify Guardian plugin files, configuration, or audit logs.\n" +
+    "- Focus exclusively on your assigned task and resolve the specific finding below directly in your project code:";
 function findingIdentity(ruleId, finding) {
     const semantic = finding.fingerprint
         ? ["explicit", finding.filePath ?? "", finding.fingerprint]
@@ -34,9 +37,9 @@ function findingIdentity(ruleId, finding) {
 }
 function composeCombinedRemediationPrompt(blockingPrompts, handoff) {
     if (!handoff) {
-        return `${REMEDIATION_MARKER}\n${blockingPrompts.join("\n\n---\n\n")}`;
+        return `${REMEDIATION_MARKER}\n\n${ANTI_DISTRACTION_DIRECTIVE}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
     }
-    return `${REMEDIATION_MARKER}\n\n${formatOpenCodeHandoff(handoff)}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
+    return `${REMEDIATION_MARKER}\n\n${formatOpenCodeHandoff(handoff)}\n\n${ANTI_DISTRACTION_DIRECTIVE}\n\n${blockingPrompts.join("\n\n---\n\n")}`;
 }
 export const BUILTIN_RULES = {
     "discipline/no-evasion": noEvasionRule,

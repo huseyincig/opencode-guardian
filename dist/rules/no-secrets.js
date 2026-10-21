@@ -136,8 +136,10 @@ export const noSecretsRule = {
         }
         const list = findings.map((f) => `  - [${f.pattern}] → ${f.messageSnippet}`).join("\n");
         const remediationPrompt = `Hardcoded secret or credential detected in this turn:\n${list}\n\n` +
-            `Never hardcode raw API keys, private tokens, or database credentials directly in source files. ` +
-            `Please remove the credentials from code and use environment variables (e.g. process.env, .env) instead.`;
+            `ACTION REQUIRED:\n` +
+            `1. Remove the raw API key, token, or secret from the source code immediately.\n` +
+            `2. Read the credential from an environment variable (e.g. process.env.KEY or configuration file) instead.\n` +
+            `3. Verify the file no longer contains sensitive credentials before continuing.`;
         return { ruleId: "security/no-secrets", decision: "block", findings, remediationPrompt };
     },
 };

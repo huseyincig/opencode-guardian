@@ -183,12 +183,10 @@ export const noEvasionRule = {
         }
         const list = findings.map((f) => `  - "${f.pattern}" → ${f.messageSnippet}`).join("\n");
         const remediationPrompt = `Evasion language detected in this turn:\n${list}\n\n` +
-            `Before moving on, explicitly report to the user each issue you dismissed. ` +
-            `For each: (1) the exact symptom (error message, failing test, unexpected behavior), ` +
-            `(2) the evidence it is pre-existing or unrelated (commit hash, line on main, a repro on main), ` +
-            `(3) what you would investigate further if asked. Be specific — the user needs to make an informed judgement call.\n\n` +
-            `If you claim the issue is pre-existing or unrelated, verify that claim against a baseline/main revision when possible. ` +
-            `If it is genuinely outside the user-requested scope, state the concrete scope boundary without dismissing the symptom.`;
+            `ACTION REQUIRED:\n` +
+            `1. Do not dismiss errors or test failures as "unrelated" or "pre-existing" without concrete proof.\n` +
+            `2. Explicitly report to the user each issue encountered: (1) exact symptom, (2) evidence why it occurred, (3) what is needed to fix it.\n` +
+            `3. If genuinely outside scope, state the exact scope boundary clearly rather than ignoring the failure.`;
         return {
             ruleId: "discipline/no-evasion",
             decision: "block",

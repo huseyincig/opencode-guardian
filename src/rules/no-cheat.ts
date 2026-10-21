@@ -540,7 +540,10 @@ export const noCheatRule: GuardRule = {
       findings,
       remediationPrompt:
         `Test integrity violation detected in this turn:\n${list}\n\n` +
-        `Do not make tests pass by disabling coverage, deleting tests, weakening assertions, removing CI verification, or focusing/skipping failing cases. Fix the underlying implementation or explicitly justify a legitimate test change with matching behavior evidence.`,
+        `ACTION REQUIRED:\n` +
+        `1. Do not delete tests, remove assertions, skip test suites, or disable CI gates merely to make tests pass.\n` +
+        `2. Fix the underlying implementation code so that the test passes legitimately.\n` +
+        `3. If a test is genuinely obsolete due to changed requirements, update the test logic to match the new behavior and run verification.`,
     };
   },
 };

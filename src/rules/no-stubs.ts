@@ -169,8 +169,10 @@ export const noStubsRule: GuardRule = {
     const list = findings.map((f) => `  - [${f.pattern}] → ${f.messageSnippet}`).join("\n");
     const remediationPrompt =
       `Incomplete or stubbed implementation detected in this turn:\n${list}\n\n` +
-      `Do not leave placeholder methods, empty stubs, or NotImplementedError exceptions in production code. ` +
-      `Please provide the actual, complete implementation of the required functionality before stopping.`;
+      `ACTION REQUIRED:\n` +
+      `1. Open the file containing the stub/placeholder.\n` +
+      `2. Replace the placeholder (TODO, pass, empty stub, or NotImplementedError) with the actual, working implementation.\n` +
+      `3. Do NOT stop or claim completion until all flagged methods and logic are fully implemented.`;
 
     return {
       ruleId: "integrity/no-stubs",

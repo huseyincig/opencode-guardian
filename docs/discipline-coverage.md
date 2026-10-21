@@ -33,7 +33,7 @@ The output parser supports selected observed formats, not all runner versions. N
 | `manifest/no-ghost-deps` | Runtime dev-only imports are advisory; strict production mode is available. | File roles use conventions, not complete bundler/reachability analysis. Type-only imports and test/build tooling retain exceptions. |
 | `runtime/circuit-breaker` | Explicit user cancellations do not count as repeated execution faults. | Timeouts and collection failures remain failures; this does not automatically retry or repair side effects. |
 | `task/instruction-fidelity` | Narrow English/Turkish research-only constraints are checked against observed mutations, installs and pushes. | Post-turn detection cannot undo a completed write. Other phrasings/languages are not claimed as universally understood. |
-| `task/completion-gate` | Required zero-test/skipped-only/conflicting runs do not count as passing. | No automatic assertion that source inspection covered an entire repository. |
+| `task/completion-gate` | Required zero-test/skipped-only/conflicting runs do not count as passing. Subagents reporting in-progress turns or intermediate updates without claiming completion are protected from false-positive completion gate blocking. | No automatic assertion that source inspection covered an entire repository. |
 
 ## Edit observations and safety
 

@@ -198,7 +198,10 @@ export const circuitBreakerRule: GuardRule = {
       findings,
       remediationPrompt:
         `Circuit breaker tripped! Repetitive error loop detected:\n${list}\n\n` +
-        `Stop repeating the same failing approach. Reconsider the hypothesis, inspect the root cause, change strategy, or ask the user for genuinely missing information.`,
+        `ACTION REQUIRED:\n` +
+        `1. Stop repeating the exact same failing command or edit.\n` +
+        `2. Analyze why the previous attempts failed, reconsider the hypothesis, and change technical strategy.\n` +
+        `3. If genuinely blocked on missing requirements or external credentials, ask the user directly.`,
       ...(needsUserClarification
         ? {
             handoff: {

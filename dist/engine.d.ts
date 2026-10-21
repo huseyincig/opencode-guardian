@@ -2,6 +2,7 @@ import type { GuardConfig, GuardRule, RuleResult, SessionMessage } from "./types
 import { type VerificationSnapshot } from "./evidence.js";
 import type { AgentMutationCapability } from "./agent-capability.js";
 export declare const REMEDIATION_MARKER = "[opencode-guardian remediation]";
+export declare const ANTI_DISTRACTION_DIRECTIVE: string;
 export declare const BUILTIN_RULES: Record<string, GuardRule>;
 export declare const DEFAULT_CONFIG: GuardConfig;
 export declare class GuardianConfigError extends Error {

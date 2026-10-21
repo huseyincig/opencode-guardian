@@ -103,9 +103,10 @@ export const noApologyRule: GuardRule = {
     const list = findings.map((f) => `  - [${f.pattern}] → ${f.messageSnippet}`).join("\n");
     const remediationPrompt =
       `Excessive apology / sycophancy language detected in this turn:\n${list}\n\n` +
-      `Do not apologize or use conversational filler. Focus strictly and directly on: ` +
-      `(1) the factual root cause of the issue, (2) the concrete evidence, and ` +
-      `(3) the exact corrective action taken or proposed. Be professional, direct, and outcome-focused.`;
+      `ACTION REQUIRED:\n` +
+      `1. Omit apologies, conversational filler, and defensiveness.\n` +
+      `2. State the technical root cause and concrete evidence directly.\n` +
+      `3. Execute the exact corrective action needed to resolve the task.`;
 
     return {
       ruleId: "discipline/no-apology",

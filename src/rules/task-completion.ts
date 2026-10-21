@@ -41,6 +41,18 @@ export const taskCompletionRule: GuardRule = {
     const report = classifyAgentReport(prose);
     const hasToolFailure = evidence.records.some((record) => record.status === "failure");
 
+    // Explicit in-progress report: work is actively underway, never block completion prematurely.
+    if (report.isInProgress && !report.isClosing) {
+      return { ruleId: this.id, decision: "pass", findings };
+    }
+
+    // Subagents reporting intermediate progress or turns without claiming completion
+    // communicate with their parent orchestrator and must not be trapped in an unprompted
+    // completion-gate remediation loop.
+    if (context.isSubagent && !report.isClosing) {
+      return { ruleId: this.id, decision: "pass", findings };
+    }
+
     // For non-modifying agents (read-only, approval-required, or unknown subagents):
     // reporting transparent incomplete work, a blocker, or a tool failure without
     // claiming completion passes to the parent/user rather than initiating an un-executable
@@ -190,8 +202,16 @@ export const taskCompletionRule: GuardRule = {
       findings,
       ...(blocking.length ? {
         remediationPrompt: contract?.requiresExplicitCompletion
-          ? "The current user explicitly requested continued work. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
-          : "A concrete execution failed and remains unresolved. Investigate the failure and correct it before stopping. If progress is genuinely blocked by missing permission, credentials, or required user input, report that concrete blocker instead of claiming completion or repeating the same failing action.",
+          ? "Unfinished task review detected:\n\n" +
+            "ACTION REQUIRED:\n" +
+            "1. The current user explicitly requested continued work.\n" +
+            "2. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion.\n" +
+            "3. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
+          : "Unresolved command failure detected:\n\n" +
+            "ACTION REQUIRED:\n" +
+            "1. A concrete execution failed and remains unresolved.\n" +
+            "2. Investigate the failure and correct it before stopping.\n" +
+            "3. If progress is genuinely blocked by missing permission, credentials, or required user input, report that concrete blocker instead of claiming completion or repeating the same failing action.",
       } : {}),
     };
   },

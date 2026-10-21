@@ -1453,7 +1453,10 @@ export const noGhostDepsRule: GuardRule = {
       findings,
       remediationPrompt:
         `Ghost/undeclared dependency detected in this turn:\n${list}\n\n` +
-        `Declare the dependency in the nearest owning manifest, or use the standard library / a local module / an already-declared dependency instead.`,
+        `ACTION REQUIRED:\n` +
+        `1. Add the package to dependencies in the project manifest (e.g. package.json, Cargo.toml, pyproject.toml, go.mod).\n` +
+        `2. Alternatively, rewrite the import to use the language's standard library or an already-installed dependency.\n` +
+        `3. Do not import third-party packages that are not formally declared in the manifest.`,
     };
   },
 };

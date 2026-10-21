@@ -233,7 +233,10 @@ export const noSilentFailureRule: GuardRule = {
       findings,
       remediationPrompt:
         `Silent failure masking detected:\n${list}\n\n` +
-        `Do not force verification commands to succeed after a real failure. Preserve the actual exit status and report or handle errors explicitly.`,
+        `ACTION REQUIRED:\n` +
+        `1. Do not append '|| true', ignore error exit codes, or swallow exceptions with empty catch blocks.\n` +
+        `2. Allow failing commands or errors to show their actual exit status and error message.\n` +
+        `3. Address the underlying root cause of the failure directly instead of masking it.`,
     };
   },
 };

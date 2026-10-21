@@ -116,9 +116,9 @@ export const noTruncationRule: GuardRule = {
     const list = blocking.map((f) => `  - "${f.pattern}" → ${f.messageSnippet}`).join("\n");
     const remediationPrompt =
       `Lazy code truncation placeholder detected in this turn:\n${list}\n\n` +
-      `Never use placeholders like '// ... existing code unchanged ...' or '// ...' when modifying files. ` +
-      `This accidentally deletes real source code. ` +
-      `Please provide the complete, untruncated file content or targeted replacement.`;
+      `ACTION REQUIRED:\n` +
+      `1. Never write truncation placeholders like '// ... existing code unchanged ...' or '// ...' inside file modifications.\n` +
+      `2. Provide the complete, untruncated file content or use a targeted search-and-replace edit that preserves all surrounding source code.`;
 
     return {
       ruleId: "safety/no-truncation",

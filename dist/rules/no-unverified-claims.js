@@ -193,7 +193,10 @@ export const noUnverifiedClaimsRule = {
             decision: "block",
             findings,
             remediationPrompt: `Unsupported or contradictory completion claim detected:\n${list}\n\n` +
-                `State only what the available tool evidence supports. If verification was not possible, say that explicitly instead of presenting it as completed or passing.`,
+                `ACTION REQUIRED:\n` +
+                `1. State only what actual command/test tool output proves. Do not claim tests passed or work succeeded without executing verification commands.\n` +
+                `2. Run the actual verification command (e.g. tests, typecheck, build) to produce concrete evidence before claiming success.\n` +
+                `3. If verification was not possible, say so explicitly and explain what was verified and what remains unverified.`,
         };
     },
 };

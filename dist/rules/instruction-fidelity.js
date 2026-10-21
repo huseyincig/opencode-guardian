@@ -22,7 +22,11 @@ export const instructionFidelityRule = {
                         description: "Observed mutation conflicts with the latest human research-only/no-edits instruction.",
                         confidence: record.status === "success" ? "high" : "medium",
                     })),
-                    remediationPrompt: "Respect the current research-only/no-edits constraint. Report the observed mutation and continue with read-only investigation; do not perform more changes or automatically undo user work.",
+                    remediationPrompt: "Instruction fidelity violation (research-only):\n\n" +
+                        "ACTION REQUIRED:\n" +
+                        "1. Respect the current research-only/no-edits constraint.\n" +
+                        "2. Report the observed mutation and continue with read-only investigation.\n" +
+                        "3. Do not perform more changes or automatically undo user work.",
                 };
             }
         }
@@ -59,7 +63,10 @@ export const instructionFidelityRule = {
                 ruleId: this.id,
                 decision: "block",
                 findings: [finding],
-                remediationPrompt: "The current user already authorized the requested action. Continue the work instead of asking for redundant confirmation. Ask only when a concrete missing permission, credential, required input, or genuinely unresolved technical choice prevents safe progress.",
+                remediationPrompt: "Instruction fidelity violation (redundant confirmation):\n\n" +
+                    "ACTION REQUIRED:\n" +
+                    "1. The current user already authorized the requested action. Continue the work instead of asking for redundant confirmation.\n" +
+                    "2. Ask only when a concrete missing permission, credential, required input, or genuinely unresolved technical choice prevents safe progress.",
             };
         }
         const finding = {
@@ -75,7 +82,11 @@ export const instructionFidelityRule = {
             ruleId: this.id,
             decision: "block",
             findings: [finding],
-            remediationPrompt: "Re-evaluate the current explicit user request. Do not treat an earlier pause or deferral as a permanent prohibition. Perform the requested work if otherwise permitted; if a genuine conflict prevents it, identify the conflicting instruction precisely and ask the user rather than silently declining.",
+            remediationPrompt: "Instruction fidelity violation (stale deferral):\n\n" +
+                "ACTION REQUIRED:\n" +
+                "1. Re-evaluate the current explicit user request. Do not treat an earlier pause or deferral as a permanent prohibition.\n" +
+                "2. Perform the requested work if otherwise permitted.\n" +
+                "3. If a genuine conflict prevents it, identify the conflicting instruction precisely and ask the user rather than silently declining.",
         };
     },
 };

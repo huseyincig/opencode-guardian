@@ -471,9 +471,10 @@ export const noShortcutsRule: GuardRule = {
       .join("\n");
     const remediationPrompt =
       `Shortcut/assumption language detected in this turn:\n${list}\n\n` +
-      `Before stopping, explicitly report to the user each material shortcut or deferred task. ` +
-      `For each: (1) what exactly remains, (2) why it remains, and (3) what a complete solution requires. ` +
-      `Do not rewrite technically accurate prose merely to avoid a flagged word.`;
+      `ACTION REQUIRED:\n` +
+      `1. Do not defer critical tasks or assume behavior without doing the work.\n` +
+      `2. Before stopping, explicitly report to the user each material shortcut or deferred task.\n` +
+      `3. For each: (1) what exactly remains, (2) why it remains, and (3) what a complete solution requires.`;
 
     return {
       ruleId: "quality/no-shortcuts",

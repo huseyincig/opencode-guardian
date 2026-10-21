@@ -231,20 +231,78 @@ export function extractInternationalNegations(input) {
 export const SUPPORTED_SIGNAL_LOCALES = LOCALES.map(({ locale }) => locale);
 /** Reporting markers provide context for evidence checks; they are never proof. */
 const REPORT_TERMS = [
-    { locale: "es", completed: ["tarea completada", "trabajo terminado", "he terminado"], blocked: ["no puedo continuar", "no está terminado", "falta acceso"] },
-    { locale: "pt", completed: ["tarefa concluída", "trabalho concluído", "terminei"], blocked: ["não consigo continuar", "tarefa não concluída", "preciso de acesso"] },
-    { locale: "fr", completed: ["tâche terminée", "travail terminé", "j'ai terminé"], blocked: ["je ne peux pas continuer", "tâche inachevée", "accès nécessaire"] },
-    { locale: "de", completed: ["aufgabe abgeschlossen", "arbeit abgeschlossen", "fertiggestellt"], blocked: ["kann nicht fortfahren", "nicht abgeschlossen", "zugriff erforderlich"] },
-    { locale: "ru", completed: ["задача завершена", "работа завершена", "всё готово"], blocked: ["не могу продолжать", "задача не завершена", "нет доступа"] },
-    { locale: "ar", completed: ["تم إنجاز المهمة", "المهمة مكتملة", "اكتمل العمل"], blocked: ["لا أستطيع المتابعة", "المهمة غير مكتملة", "أحتاج إلى إذن"] },
-    { locale: "hi", completed: ["काम पूरा हो गया", "कार्य पूरा हुआ", "काम समाप्त हुआ"], blocked: ["आगे नहीं बढ़ सकता", "काम पूरा नहीं हुआ", "अनुमति चाहिए"] },
-    { locale: "zh", completed: ["任务已完成", "工作已完成", "全部完成"], blocked: ["无法继续", "尚未完成", "需要权限"] },
-    { locale: "ja", completed: ["作業完了", "タスク完了", "作業が完了しました"], blocked: ["続行できません", "まだ完了していません", "権限が必要です"] },
-    { locale: "ko", completed: ["작업 완료", "작업이 완료되었습니다", "과제 완료"], blocked: ["계속할 수 없습니다", "아직 완료되지 않았습니다", "권한이 필요합니다"] },
-    { locale: "id", completed: ["tugas selesai", "pekerjaan selesai", "sudah selesai"], blocked: ["tidak bisa melanjutkan", "tugas belum selesai", "perlu izin"] },
+    {
+        locale: "es",
+        completed: ["tarea completada", "trabajo terminado", "he terminado"],
+        blocked: ["no puedo continuar", "no está terminado", "falta acceso"],
+        inProgress: ["en progreso", "en curso", "trabajando en ello", "procesando", "continuando", "informe de progreso"],
+    },
+    {
+        locale: "pt",
+        completed: ["tarefa concluída", "trabalho concluído", "terminei"],
+        blocked: ["não consigo continuar", "tarefa não concluída", "preciso de acesso"],
+        inProgress: ["em progresso", "em andamento", "trabalhando nisso", "processando", "continuando", "relatório de progresso"],
+    },
+    {
+        locale: "fr",
+        completed: ["tâche terminée", "travail terminé", "j'ai terminé"],
+        blocked: ["je ne peux pas continuer", "tâche inachevée", "accès nécessaire"],
+        inProgress: ["en cours", "en progression", "travail en cours", "traitement en cours", "je continue", "rapport d'étape"],
+    },
+    {
+        locale: "de",
+        completed: ["aufgabe abgeschlossen", "arbeit abgeschlossen", "fertiggestellt"],
+        blocked: ["kann nicht fortfahren", "nicht abgeschlossen", "zugriff erforderlich"],
+        inProgress: ["in bearbeitung", "in arbeit", "arbeite daran", "wird fortgesetzt", "statusbericht", "zwischenbericht"],
+    },
+    {
+        locale: "ru",
+        completed: ["задача завершена", "работа завершена", "всё готово"],
+        blocked: ["не могу продолжать", "задача не завершена", "нет доступа"],
+        inProgress: ["в процессе", "работа продолжается", "продолжаю работу", "выполняется", "обрабатывается", "промежуточный отчет"],
+    },
+    {
+        locale: "ar",
+        completed: ["تم إنجاز المهمة", "المهمة مكتملة", "اكتمل العمل"],
+        blocked: ["لا أستطيع المتابعة", "المهمة غير مكتملة", "أحتاج إلى إذن"],
+        inProgress: ["قيد التنفيذ", "العمل جار", "العمل جاري", "جاري العمل", "قيد المعالجة", "مستمر في العمل", "تقرير مرحلي"],
+    },
+    {
+        locale: "hi",
+        completed: ["काम पूरा हो गया", "कार्य पूरा हुआ", "काम समाप्त हुआ"],
+        blocked: ["आगे नहीं बढ़ सकता", "काम पूरा नहीं हुआ", "अनुमति चाहिए"],
+        inProgress: ["प्रगति पर है", "काम जारी है", "कार्य प्रगति पर", "प्रक्रियाधीन", "काम चल रहा है"],
+    },
+    {
+        locale: "zh",
+        completed: ["任务已完成", "工作已完成", "全部完成"],
+        blocked: ["无法继续", "尚未完成", "需要权限"],
+        inProgress: ["进行中", "处理中", "正在处理", "工作中", "正在进行", "阶段报告", "进度报告"],
+    },
+    {
+        locale: "ja",
+        completed: ["作業完了", "タスク完了", "作業が完了しました"],
+        blocked: ["続行できません", "まだ完了していません", "権限が必要です"],
+        inProgress: ["進行中", "処理中", "作業中", "対応中", "進捗報告", "作業を継続中"],
+    },
+    {
+        locale: "ko",
+        completed: ["작업 완료", "작업이 완료되었습니다", "과제 완료"],
+        blocked: ["계속할 수 없습니다", "아직 완료되지 않았습니다", "권한이 필요합니다"],
+        inProgress: ["진행 중", "처리 중", "작업 중", "진행중", "처리중", "작업 진행 중", "진척 보고"],
+    },
+    {
+        locale: "id",
+        completed: ["tugas selesai", "pekerjaan selesai", "sudah selesai"],
+        blocked: ["tidak bisa melanjutkan", "tugas belum selesai", "perlu izin"],
+        inProgress: ["sedang berlangsung", "dalam proses", "sedang diproses", "sedang dikerjakan", "laporan kemajuan"],
+    },
 ];
 export function classifyInternationalAgentReport(input) {
     const text = normalized(input);
+    const inProgress = REPORT_TERMS.some((locale) => has(text, locale.inProgress));
+    if (inProgress)
+        return "in-progress";
     const blocked = REPORT_TERMS.some((locale) => has(text, locale.blocked));
     if (blocked)
         return "blocked";
@@ -301,7 +359,7 @@ export function classifyAgentReport(input) {
     const norm = normalizeReportText(input);
     const internationalReport = classifyInternationalAgentReport(input);
     const hasClearBlocker = CLEAR_BLOCKER_REGEX.test(norm) || internationalReport === "blocked";
-    const isInProgress = IN_PROGRESS_REGEX.test(norm);
+    const isInProgress = IN_PROGRESS_REGEX.test(norm) || internationalReport === "in-progress";
     const proseWithoutBlockers = hasClearBlocker ? norm.replace(CLEAR_BLOCKER_REGEX, " ") : norm;
     const rawClosing = CLOSING_REGEX.test(proseWithoutBlockers) || internationalReport === "completed";
     const isClosing = rawClosing && !isInProgress;

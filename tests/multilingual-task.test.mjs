@@ -135,20 +135,20 @@ test("international extractor remains deterministic and does not modify user tex
 });
 
 const REPORTS = [
-  ["es", "Implementa la función.", "No ejecuta las pruebas.", "Tarea completada.", "No puedo continuar."],
-  ["pt", "Implemente a função.", "Não execute os testes.", "Tarefa concluída.", "Não consigo continuar."],
-  ["fr", "Implémente la fonctionnalité.", "N’exécute pas les tests.", "Tâche terminée.", "Je ne peux pas continuer."],
-  ["de", "Implementiere die Funktion.", "Führe die Tests nicht aus.", "Aufgabe abgeschlossen.", "Kann nicht fortfahren."],
-  ["ru", "Реализуй функцию.", "Не запускай тесты.", "Задача завершена.", "Не могу продолжать."],
-  ["ar", "نفذ الميزة.", "لا تشغل الاختبارات.", "تم إنجاز المهمة.", "لا أستطيع المتابعة."],
-  ["hi", "लागू करो।", "टेस्ट मत चलाओ।", "काम पूरा हो गया।", "आगे नहीं बढ़ सकता।"],
-  ["zh", "实现功能。", "不要运行测试。", "任务已完成。", "无法继续。"],
-  ["ja", "機能を実装してください。", "テストを実行しないでください。", "作業完了。", "続行できません。"],
-  ["ko", "기능을 구현해 주세요.", "테스트 실행하지 마.", "작업 완료.", "계속할 수 없습니다."],
-  ["id", "Implementasikan fitur.", "Jangan jalankan tes.", "Tugas selesai.", "Tidak bisa melanjutkan."],
+  ["es", "Implementa la función.", "No ejecuta las pruebas.", "Tarea completada.", "No puedo continuar.", "Trabajo en curso."],
+  ["pt", "Implemente a função.", "Não execute os testes.", "Tarefa concluída.", "Não consigo continuar.", "Trabalho em andamento."],
+  ["fr", "Implémente la fonctionnalité.", "N’exécute pas les tests.", "Tâche terminée.", "Je ne peux pas continuer.", "Travail en cours."],
+  ["de", "Implementiere die Funktion.", "Führe die Tests nicht aus.", "Aufgabe abgeschlossen.", "Kann nicht fortfahren.", "In Bearbeitung."],
+  ["ru", "Реализуй функцию.", "Не запускай тесты.", "Задача завершена.", "Не могу продолжать.", "В процессе."],
+  ["ar", "نفذ الميزة.", "لا تشغل الاختبارات.", "تم إنجاز المهمة.", "لا أستطيع المتابعة.", "قيد التنفيذ."],
+  ["hi", "लागू करो।", "टेस्ट मत चलाओ।", "काम पूरा हो गया।", "आगे नहीं बढ़ सकता।", "काम जारी है।"],
+  ["zh", "实现功能。", "不要运行测试。", "任务已完成。", "无法继续。", "处理中。"],
+  ["ja", "機能を実装してください。", "テストを実行しないでください。", "作業完了。", "続行できません。", "進行中。"],
+  ["ko", "기능을 구현해 주세요.", "테스트 실행하지 마.", "작업 완료.", "계속할 수 없습니다.", "진행 중."],
+  ["id", "Implementasikan fitur.", "Jangan jalankan tes.", "Tugas selesai.", "Tidak bisa melanjutkan.", "Sedang berlangsung."],
 ];
 
-for (const [locale, action, forbiddenTest, complete, blocked] of REPORTS) {
+for (const [locale, action, forbiddenTest, complete, blocked, inProgress] of REPORTS) {
   test(`${locale}: direct action keeps language-independent latest-instruction guidance`, () => {
     const task = contract(action);
     assert.equal(task.explicitAction, true, action);
@@ -161,9 +161,10 @@ for (const [locale, action, forbiddenTest, complete, blocked] of REPORTS) {
     assert.deepEqual(task.requiredVerifications, [], forbiddenTest);
   });
 
-  test(`${locale}: completion and blocker are distinct reporting states`, () => {
+  test(`${locale}: completion, blocker and in-progress are distinct reporting states`, () => {
     assert.equal(classifyInternationalAgentReport(complete), "completed", complete);
     assert.equal(classifyInternationalAgentReport(blocked), "blocked", blocked);
+    assert.equal(classifyInternationalAgentReport(inProgress), "in-progress", inProgress);
   });
 
   test(`${locale}: failed requested tests contradict a localized completion report`, () => {

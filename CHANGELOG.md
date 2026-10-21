@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.3 — 2026-10-21
+
+- Expand in-progress and ongoing work reporting detection across all 13 supported international locales (English, Turkish, Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, Indonesian).
+- Subagents reporting ongoing progress in any supported language (e.g., *"en progreso"*, *"trabajo en curso"*, *"en cours"*, *"in Bearbeitung"*, *"в процессе"*, *"قيد التنفيذ"*, *"काम जारी है"*, *"进行中"*, *"進行中"*, *"진행 중"*, *"sedang berlangsung"*) are recognized with `isInProgress === true` and never falsely blocked by `task/completion-gate`.
+- Wire `REPORT_TERMS` in `locale-intents.ts` with explicit `inProgress` phrases and connect `classifyAgentReport` to `classifyInternationalAgentReport`.
+- Add test coverage across all 11 international languages in `tests/multilingual-task.test.mjs` and `tests/subagent-progress-completion-gate.test.mjs`.
+
+Validation on Node 24.22.0: 731 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.12.3.
+
 ## 0.12.2 — 2026-10-21
 
 - Protect subagents and in-progress execution turns from false-positive completion gate blocking. Subagents reporting progress, step outcomes or communicating with their parent orchestrator without claiming task completion (`!report.isClosing`) pass through cleanly.

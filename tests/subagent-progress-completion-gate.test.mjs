@@ -32,6 +32,29 @@ test("classifyAgentReport accurately identifies Turkish and English in-progress 
   }
 });
 
+test("classifyAgentReport accurately identifies multilingual in-progress statements across all supported non-English/Turkish languages", () => {
+  const multilingualPhrases = [
+    { lang: "Spanish", text: "Trabajo en curso: revisando los archivos del proyecto." },
+    { lang: "Portuguese", text: "Trabalho em andamento: preparando os testes unitários." },
+    { lang: "French", text: "Travail en cours: exécution des étapes intermédiaires." },
+    { lang: "German", text: "In Bearbeitung: behebe den ersten Fehler." },
+    { lang: "Russian", text: "Работа продолжается: изучаю исходный код." },
+    { lang: "Arabic", text: "العمل جار: جاري التحقق من التغييرات." },
+    { lang: "Hindi", text: "काम जारी है: त्रुटियों का विश्लेषण किया जा रहा है।" },
+    { lang: "Chinese", text: "处理中：正在修复发现的问题。" },
+    { lang: "Japanese", text: "進行中：テストケースを分析しています。" },
+    { lang: "Korean", text: "작업 진행 중: 변경 사항을 적용하고 있습니다." },
+    { lang: "Indonesian", text: "Sedang dikerjakan: memeriksa berkas dan konfigurasi." },
+  ];
+
+  for (const { lang, text } of multilingualPhrases) {
+    const report = classifyAgentReport(text);
+    assert.equal(report.isInProgress, true, `Should detect in-progress for ${lang}: "${text}"`);
+    assert.equal(report.isClosing, false, `Should not be closing for ${lang}: "${text}"`);
+    assert.equal(report.state, "in-progress", `State should be in-progress for ${lang}: "${text}"`);
+  }
+});
+
 test("subagent reporting 'işlem devam ediyor' with intermediate tool failure does NOT block on completion gate", async () => {
   const turn = [
     {

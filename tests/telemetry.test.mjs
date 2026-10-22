@@ -163,7 +163,7 @@ test("V2 strict preflight records actual pre-execution decisions", async (t) => 
   try {
     assert.equal(readGuardianStatus().preflight, "active");
     await before({ tool: "bash", input: { command: "npm test" }, sessionID: "s" });
-    assert.throws(() => before({ tool: "bash", input: { command: "git clean -fd" }, sessionID: "s" }),
+    await assert.rejects(() => before({ tool: "bash", input: { command: "git clean -fd" }, sessionID: "s" }),
       (error) => error.reason === "destructive-command");
     assert.equal(readGuardianStatus().blocked, 1);
   } finally {

@@ -7,7 +7,7 @@ import type {
   RuleResult,
   TurnInspectionContext,
 } from "../types.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 
 const NODE_BUILTINS = new Set(
   builtinModules
@@ -1412,8 +1412,10 @@ export const noGhostDepsRule: GuardRule = {
           checkCode(edit.text, "structured file edit", edit.filePath);
         }
 
-        const patchText = extractAddedLines(input.patchText ?? input.patch);
-        if (patchText) checkCode(patchText, "patch added lines", targetFile);
+        for (const section of splitFilePatches(input.patchText ?? input.patch)) {
+          const patchText = extractAddedLines(section.patch);
+          if (patchText) checkCode(patchText, "patch added lines", section.filePath ?? targetFile);
+        }
 
         const shellMutation = extractLikelyShellMutation(input);
         if (shellMutation) {

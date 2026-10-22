@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { builtinModules } from "node:module";
-import { extractLikelyShellMutation, extractStructuredEditTexts } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 const NODE_BUILTINS = new Set(builtinModules
     .filter((name) => !name.startsWith("node:"))
     .map((name) => name.split("/")[0]));
@@ -1273,9 +1273,11 @@ export const noGhostDepsRule = {
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkCode(edit.text, "structured file edit", edit.filePath);
                 }
-                const patchText = extractAddedLines(input.patchText ?? input.patch);
-                if (patchText)
-                    checkCode(patchText, "patch added lines", targetFile);
+                for (const section of splitFilePatches(input.patchText ?? input.patch)) {
+                    const patchText = extractAddedLines(section.patch);
+                    if (patchText)
+                        checkCode(patchText, "patch added lines", section.filePath ?? targetFile);
+                }
                 const shellMutation = extractLikelyShellMutation(input);
                 if (shellMutation) {
                     // Shell content cannot be reliably assigned to a language without a

@@ -1201,6 +1201,8 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     return;
   }
 
+  let toolOutputProtectionReady = false;
+  let modelRequestProtectionReady = false;
   const runtimeByDirectory = new Map<string, {
     config: typeof mergedConfig;
     sanitizer: ReturnType<typeof resolveSanitizerOptions>;
@@ -1209,14 +1211,16 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const runtimeForDirectory = (runtimeDirectory: string) => {
     const key = runtimeDirectory || directory;
     const cached = runtimeByDirectory.get(key);
-    if (cached) return cached;
-
-    const config = resolveEffectiveConfig(loadConfig(key), context.options);
-    const runtime = {
+    const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
+    const runtime = cached ?? {
       config,
       sanitizer: resolveSanitizerOptions(config),
       engine: new GuardEngine(config),
     };
+    if (config.enabled !== false && runtime.sanitizer &&
+        (!toolOutputProtectionReady || !modelRequestProtectionReady)) {
+      throw new Error("[opencode-guardian secrets] Required V2 security hooks are unavailable for this project; secret protection cannot be enabled safely.");
+    }
     runtimeByDirectory.set(key, runtime);
     return runtime;
   };
@@ -1241,10 +1245,14 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     try {
       if (typeof context.session.get === "function") {
         const session = await context.session.get({ sessionID });
-        return rememberSessionDirectory(sessionID, session.location?.directory);
+        const sessionDirectory = session.location?.directory;
+        if (typeof sessionDirectory === "string" && sessionDirectory.trim()) {
+          return rememberSessionDirectory(sessionID, sessionDirectory);
+        }
       }
     } catch {}
-    return rememberSessionDirectory(sessionID, directory);
+    // Retry failed location lookups instead of caching the startup project.
+    return directory;
   };
   const forgetSessionRuntime = (sessionID: string): void => {
     for (const runtime of runtimeByDirectory.values()) {
@@ -1357,9 +1365,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       typeof context.session.wait === "function";
     {
       try {
-        const before = await context.tool.hook("execute.before", (event) => {
+        const before = await context.tool.hook("execute.before", async (event) => {
           if (controller.signal.aborted) return;
-          const runtimeDirectory = sessionDirectories.get(event.sessionID) ?? directory;
+          const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
+          if (controller.signal.aborted) return;
           const runtime = runtimeForDirectory(runtimeDirectory);
           if (runtime.config.enabled === false) return;
           if (event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
@@ -1564,6 +1573,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         throw new Error("V2 execute.after registration has no disposer");
       }
       toolRegistrations.push(after);
+      toolOutputProtectionReady = true;
     } catch {
       recordGuardianEvent({ kind: "verification-unavailable",
         rules: ["verification-snapshot-unavailable"] }, directory);
@@ -1591,6 +1601,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
   if (typeof context.session.hook === "function") {
     const taskRegistrations: Array<{ dispose(): Promise<void> | void }> = [];
+    let auxiliaryRegistrationStarted = false;
     try {
       const promptRegistration = await context.session.hook("prompt", async (event) => {
         if (
@@ -1669,19 +1680,22 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       }
       taskRegistrations.push(contextRegistration);
 
-      if (sanitizerOpts) {
-        for (const kind of ["compaction", "generate", "title"] as const) {
-          const registration = await context.session.hook(kind, async (event) => {
-            await sanitizeV2ModelRequest(event);
-          });
-          if (!registration || typeof registration.dispose !== "function") {
-            throw new Error("V2 auxiliary model hook did not return a valid registration.");
-          }
-          taskRegistrations.push(registration);
+      // The next request may belong to a different project, or follow a
+      // configuration update. Register every model boundary up front and
+      // consult the active request's settings inside the callback.
+      auxiliaryRegistrationStarted = true;
+      for (const kind of ["compaction", "generate", "title"] as const) {
+        const registration = await context.session.hook(kind, async (event) => {
+          await sanitizeV2ModelRequest(event);
+        });
+        if (!registration || typeof registration.dispose !== "function") {
+          throw new Error("V2 auxiliary model hook did not return a valid registration.");
         }
+        taskRegistrations.push(registration);
       }
 
       registrations.push(...taskRegistrations);
+      modelRequestProtectionReady = true;
     } catch {
       // Never leave a partial task/security hook group installed.
       await Promise.allSettled(taskRegistrations.map((registration) =>
@@ -1689,7 +1703,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       ));
       contracts.clear();
       recordGuardianEvent({ kind: "inspection-error" }, directory);
-      if (sanitizerOpts) {
+      if (sanitizerOpts || auxiliaryRegistrationStarted) {
         controller.abort();
         for (const registration of registrations.splice(0).reverse()) {
           try { await registration.dispose(); } catch {}
@@ -1722,10 +1736,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           const createdSessionID =
             eventData.data?.sessionID ?? eventData.data?.info?.id;
           if (createdSessionID) {
-            rememberSessionDirectory(
-              createdSessionID,
-              eventData.data?.location?.directory
-            );
+            const createdDirectory = eventData.data?.location?.directory;
+            if (typeof createdDirectory === "string" && createdDirectory.trim()) {
+              rememberSessionDirectory(createdSessionID, createdDirectory);
+            }
           }
         }
 
@@ -1772,10 +1786,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           if (movedSessionID) {
             idleQueue.forget(movedSessionID);
             forgetSessionRuntime(movedSessionID);
-            rememberSessionDirectory(
-              movedSessionID,
-              eventData.data?.location?.directory
-            );
+            const movedDirectory = eventData.data?.location?.directory;
+            if (typeof movedDirectory === "string" && movedDirectory.trim()) {
+              rememberSessionDirectory(movedSessionID, movedDirectory);
+            }
             verificationStore.forget(movedSessionID);
             contracts.delete(movedSessionID);
             foregroundHandoffs.delete(movedSessionID);

@@ -3920,7 +3920,7 @@ test("OpenCode V2 prompt/context hooks and idle subscription use real domain sig
   assert.equal(currentDirectory, process.cwd());
   await cleanup();
   assert.equal(eventController.aborted, true);
-  assert.deepEqual(disposed.sort(), ["context", "prompt"]);
+  assert.deepEqual(disposed.sort(), ["compaction", "context", "generate", "prompt", "title"]);
 });
 
 test("V2 context normalizer retains synthetic Guardian marker and real user-turn boundaries", () => {

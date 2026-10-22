@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
 import { captureBeforeEdit, finishEditObservation } from "./edit-integrity.js";
-import { extractLikelyShellMutation, extractToolCommand, splitFilePatches } from "./tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
@@ -327,6 +327,8 @@ function hasFileMutation(part) {
     const command = commandFromPart(part);
     if (isLikelyShellFileDeletion(command))
         return true;
+    if (extractStructuredEditTexts(input).length > 0)
+        return true;
     if (["content", "new_string", "newString", "patch", "patchText"].some((key) => typeof input[key] === "string" &&
         (["content", "new_string", "newString"].includes(key) || input[key].length > 0))) {
         return true;
@@ -454,6 +456,10 @@ export function extractMutatedFilePaths(part) {
     add(input.targetFile);
     add(input.filePath);
     add(input.file);
+    const defaultPath = [input.path, input.targetFile, input.filePath, input.file]
+        .find((value) => typeof value === "string" && value.trim().length > 0);
+    for (const edit of extractStructuredEditTexts(input, defaultPath))
+        add(edit.filePath);
     if (Array.isArray(input.paths)) {
         for (const item of input.paths)
             add(item);

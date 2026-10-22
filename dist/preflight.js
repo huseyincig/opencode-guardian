@@ -16,7 +16,7 @@ const SHELL_TOOLS = new Set([
  * Tools that write or mutate files on disk.
  */
 const FILE_MUTATION_TOOLS = new Set([
-    "write_to_file", "write_file", "create_file", "save_file",
+    "write", "write_to_file", "write_file", "create_file", "save_file",
     "replace_file_content", "edit_file", "edit", "patch", "apply_patch",
     "str_replace_editor", "multiedit", "file_editor",
     "file_mutate", "file_write", "file_edit",
@@ -115,7 +115,7 @@ export function evaluateFileMutationPreflight(tool, input) {
         (typeof patchRaw === "string" ? extractFilePathFromPatch(patchRaw) : undefined);
     const textsToCheck = [];
     for (const key of ["content", "new_string", "newString", "CodeContent", "ReplacementContent", "text"]) {
-        if (typeof args[key] === "string" && args[key].length > 0) {
+        if (typeof args[key] === "string") {
             textsToCheck.push({
                 text: args[key],
                 ...(typeof targetFile === "string" ? { filePath: targetFile } : {}),

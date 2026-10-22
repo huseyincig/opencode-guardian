@@ -21,23 +21,23 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic separates **v0.12.3 automated verification** from historical V1/V2 host acceptance. A new live-host and interactive TUI acceptance run has not been performed for v0.12.3.
+> The graphic separates **v0.12.4 automated verification** from historical V1/V2 host acceptance. A new live-host and interactive TUI acceptance run has not been performed for v0.12.4.
 
-Guardian **v0.12.3** was checked on **21 October 2026**, using Node **24.22.0**:
+Guardian **v0.12.4** was checked on **22 October 2026**, using Node **24.22.0**:
 
-- **Current Automated Verification:** **731 / 731** unit, security, toast notification, and regression tests passing.
+- **Current Automated Verification:** **741 / 741** unit, security, toast notification, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
 - **Static Analysis:** standard and strict TypeScript gates pass; Oxlint reports **0 warnings / 0 errors**.
-- **Dependency Audits:** Not rerun for v0.12.3; no dependency versions changed.
-- **Historical Host Acceptance (V1 & V2):** Earlier host results, original versions and test environments remain in the acceptance reports; they are not a new acceptance run for v0.12.3.
+- **Dependency Audits:** Not rerun for v0.12.4; no dependency versions changed.
+- **Historical Host Acceptance (V1 & V2):** Earlier host results, original versions and test environments remain in the acceptance reports; they are not a new acceptance run for v0.12.4.
 
 Read the comprehensive [V1 Acceptance Report](docs/acceptance-v1.md), [V2 Acceptance Report](docs/acceptance-v2.md), and [Verification and Acceptance Report](docs/verification-report.md) for reproduction steps, methodology, and full test matrices.
 
-Guardian **v0.12.3** protects subagents and in-progress execution turns from false-positive completion gate blocking, recognizes multilingual ongoing-work statements across all 13 supported languages, standardizes actionable remediation prompts with numbered instructions, and enforces an anti-distraction directive. See [discipline coverage, configuration and limitations](docs/discipline-coverage.md) for the fourteen-rule evaluation, supported formats and evidence boundaries.
+Guardian **v0.12.4** recognizes native `write` tool payloads, reliably resolves V2 active session directories, isolates auxiliary model guards per request, redacts empty-username connection URLs, tracks replacement edits and deletions in evidence, and inspects each patch file independently for undeclared dependencies. See [discipline coverage, configuration and limitations](docs/discipline-coverage.md) for the fourteen-rule evaluation, supported formats and evidence boundaries.
 
 ---
 
-See the [0.12.3 release notes](CHANGELOG.md) for engine evidence, subagent completion-gate fixes, and actionable discipline improvements.
+See the [0.12.4 release notes](CHANGELOG.md) for engine evidence, subagent completion-gate fixes, and actionable discipline improvements.
 
 ## ✨ Key Highlights
 
@@ -122,7 +122,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.12.3
+▶ Guardian                 v0.12.4
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -136,7 +136,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.12.3
+▼ Guardian                 v0.12.4
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0

@@ -158,7 +158,8 @@ export function extractStructuredEditTexts(
       "newString",
     ]) {
       const value = edit[key];
-      if (typeof value !== "string" || value.length === 0) continue;
+      // Empty replacements delete content and still represent real edits.
+      if (typeof value !== "string") continue;
       output.push({
         text: value,
         ...(filePath ? { filePath } : {}),

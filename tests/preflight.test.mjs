@@ -193,7 +193,7 @@ test("V2 setup can run without a tool hook when preflight and secret protection 
   }), undefined);
   const cleanup = await Guardian.setup(host.context);
   assert.equal(typeof cleanup, "function");
-  assert.equal(host.sessionHooks.size, 2);
+  assert.equal(host.sessionHooks.size, 5);
   await cleanup();
   assert.equal(host.signal.aborted, true);
 });
@@ -281,7 +281,7 @@ test("V2 configured custom tool alias is blocked and disposed on unload", async 
   });
   const cleanup = await Guardian.setup(host.context);
   try {
-    assert.throws(
+    await assert.rejects(
       () => before({ tool: "mcp.remote.exec_task", sessionID: "custom-v2",
         input: { command: "rm fixture" } }),
       (error) => error.reason === "destructive-command"

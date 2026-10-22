@@ -11,7 +11,7 @@ import type {
 } from "./types.js";
 import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
 import { captureBeforeEdit, finishEditObservation, type BeforeEditState, type EditIntegrityEvidence } from "./edit-integrity.js";
-import { extractLikelyShellMutation, extractToolCommand, splitFilePatches } from "./tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import {
   activeBacktickSubstitutions,
   activeCommandSubstitutions,
@@ -402,6 +402,7 @@ function hasFileMutation(part: MessagePart): boolean {
 
   const command = commandFromPart(part);
   if (isLikelyShellFileDeletion(command)) return true;
+  if (extractStructuredEditTexts(input).length > 0) return true;
 
   if (
     ["content", "new_string", "newString", "patch", "patchText"].some(
@@ -553,6 +554,10 @@ export function extractMutatedFilePaths(part: MessagePart): string[] {
   add(input.targetFile);
   add(input.filePath);
   add(input.file);
+
+  const defaultPath = [input.path, input.targetFile, input.filePath, input.file]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  for (const edit of extractStructuredEditTexts(input, defaultPath)) add(edit.filePath);
 
   if (Array.isArray(input.paths)) {
     for (const item of input.paths) add(item);

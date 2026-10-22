@@ -473,8 +473,8 @@ test("V2 server integration: strict preflight block triggers error toast via in-
   assert.notEqual(toolHookHandler, null);
 
   // Trigger preflight block
-  assert.throws(() => {
-    toolHookHandler({
+  await assert.rejects(async () => {
+    await toolHookHandler({
       tool: "bash",
       input: { command: "rm -rf /critical-data" },
       sessionID: "sess-v2",

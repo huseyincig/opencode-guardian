@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.4 — 2026-10-22
+
+- Recognize native `write` tool payloads in preflight and telemetry categories; reject hardcoded credentials and source truncation placeholders while allowing safe file writes.
+- Resolve the active session directory before V2 tool preflight and before-edit observation, ensuring multi-project environments evaluate strict per-project configuration without guessing directories from incomplete creation events.
+- Install V2 auxiliary model guards independently of the initial project's secret setting and evaluate effective settings per request; support dynamic config updates and clean disposer teardown.
+- Redact connection-string passwords with empty usernames or absent paths (including Redis, MySQL, Postgres URLs) while preserving URI structure and surrounding punctuation.
+- Record structured replacement edits (including empty replacement and deletion operations) and individual affected paths as mutations in evidence tracking, ensuring stale test executions cannot satisfy post-change verification requirements.
+- Inspect each patch file independently for undeclared dependencies (`no-ghost-deps`), retaining each file's language and nearest manifest boundaries across mixed-language and documentation edits.
+- Add regression coverage in `tests/source-audit-fixes.test.mjs` (10 new tests).
+
+Validation on Node 24.22.0: 741 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.12.4.
+
 ## 0.12.3 — 2026-10-21
 
 - Expand in-progress and ongoing work reporting detection across all 13 supported international locales (English, Turkish, Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, Indonesian).

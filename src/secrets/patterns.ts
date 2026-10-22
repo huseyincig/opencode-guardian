@@ -113,7 +113,7 @@ export const PEM_PRIVATE_KEY_REGEX =
  * Connection string with embedded password (Postgres, MySQL, Mongo, Redis, AMQP, MSSQL).
  */
 export const CONNECTION_STRING_PASSWORD_REGEX =
-  /\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp|mssql):\/\/[^:\s'"\\]+:)([^@\s'"\\]+)(@[a-zA-Z0-9.-]+(?::[0-9]+)?\/[^\s'"\\]*)\b/gi;
+  /\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp|mssql):\/\/[^:@\s'"\\/]*:)([^@\s'"\\]+)(@(?:\[[0-9a-f:.%]+\]|[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)(?::[0-9]+)?)/gi;
 
 /**
  * Password hash patterns (bcrypt, argon2, sha512crypt, scrypt).

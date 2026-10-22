@@ -25,7 +25,7 @@ const SAFE_TOOLS = new Set([
     "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
     "execute_command", "command", "run_command", "run_shell_command",
     "powershell", "pwsh", "cmd", "privileged_shell_exec", "process_start",
-    "write_to_file", "write_file", "create_file", "save_file",
+    "write", "write_to_file", "write_file", "create_file", "save_file",
     "replace_file_content", "edit_file", "edit", "patch", "apply_patch",
     "str_replace_editor", "multiedit", "file_editor",
     "file_mutate", "file_write", "file_edit",

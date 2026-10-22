@@ -14,8 +14,10 @@ import { createGuardianToastNotifier, formatGuardianToast, } from "./toast.js";
 import { formatGuardianTranscriptMessage, GUARDIAN_VISIBLE_INTERVENTION_KEY, } from "./intervention.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
+import { detectDegenerativeLoop } from "./degeneration.js";
 export * from "./types.js";
 export * from "./engine.js";
+export * from "./degeneration.js";
 export * from "./rules/no-evasion.js";
 export * from "./rules/no-shortcuts.js";
 export * from "./rules/no-stubs.js";
@@ -519,6 +521,7 @@ const server = async ({ client, directory }, pluginOptions) => {
     const engine = new GuardEngine(mergedConfig);
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
+    const inFlightStreamTracker = new Map();
     let promptSequence = 0;
     let updateChecked = false;
     const updateNoticeController = new AbortController();
@@ -887,6 +890,66 @@ const server = async ({ client, directory }, pluginOptions) => {
         },
         event: async ({ event }) => {
             const eventData = event;
+            if (eventData.type === "message.part.updated" &&
+                mergedConfig.enabled !== false &&
+                mergedConfig.rules?.["runtime/circuit-breaker"] !== "off") {
+                const rawPart = eventData.properties?.part ?? eventData.data?.part;
+                if (rawPart &&
+                    (rawPart.type === "text" || rawPart.type === "reasoning") &&
+                    typeof rawPart.text === "string" &&
+                    typeof rawPart.id === "string" &&
+                    typeof rawPart.sessionID === "string") {
+                    const tracked = inFlightStreamTracker.get(rawPart.id);
+                    if (!tracked?.aborted) {
+                        const currentLen = rawPart.text.length;
+                        const lastLen = tracked?.lastCheckedLength ?? 0;
+                        if (currentLen >= 30 && (!tracked || currentLen - lastLen >= 40)) {
+                            inFlightStreamTracker.set(rawPart.id, {
+                                sessionID: rawPart.sessionID,
+                                lastCheckedLength: currentLen,
+                                aborted: false,
+                            });
+                            while (inFlightStreamTracker.size > 512) {
+                                const oldest = inFlightStreamTracker.keys().next().value;
+                                if (typeof oldest === "string")
+                                    inFlightStreamTracker.delete(oldest);
+                                else
+                                    break;
+                            }
+                            const loop = detectDegenerativeLoop(rawPart.text);
+                            if (loop.detected) {
+                                inFlightStreamTracker.set(rawPart.id, {
+                                    sessionID: rawPart.sessionID,
+                                    lastCheckedLength: currentLen,
+                                    aborted: true,
+                                });
+                                const sid = rawPart.sessionID;
+                                toastNotifier.notify({
+                                    kind: "remediation",
+                                    ruleId: "runtime/circuit-breaker",
+                                    sessionID: sid,
+                                });
+                                recordGuardianEvent({
+                                    kind: "preflight-blocked",
+                                    rules: ["runtime/circuit-breaker"],
+                                    reasons: [{ rule: "runtime/circuit-breaker", code: "repeated-failure-without-progress" }],
+                                }, directory);
+                                try {
+                                    const clientWithAbort = client;
+                                    if (typeof clientWithAbort.session?.abort === "function") {
+                                        await clientWithAbort.session.abort({ path: { id: sid }, query: { directory } });
+                                    }
+                                    else if (typeof clientWithAbort.session?.interrupt === "function") {
+                                        await clientWithAbort.session.interrupt({ sessionID: sid });
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if (eventData.type === "session.created" && !updateChecked && mergedConfig.updateNotice?.enabled !== false) {
                 updateChecked = true;
                 const tui = client.tui;
@@ -903,6 +966,11 @@ const server = async ({ client, directory }, pluginOptions) => {
                     eventData.data?.sessionID ??
                     eventData.data?.info?.id;
                 if (deletedSessionID) {
+                    for (const [partId, state] of inFlightStreamTracker) {
+                        if (state.sessionID === deletedSessionID) {
+                            inFlightStreamTracker.delete(partId);
+                        }
+                    }
                     cancelSessionInspection(deletedSessionID);
                     watcher?.stop(deletedSessionID);
                     engine.forgetSession(deletedSessionID);
@@ -1075,6 +1143,7 @@ const setup = async (context) => {
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
     const foregroundHandoffs = new Map();
+    const inFlightStreamTracker = new Map();
     const registrations = [];
     const interventionSnapshots = new Map();
     const toastNotifiersByDirectory = new Map();
@@ -1492,6 +1561,69 @@ const setup = async (context) => {
             try {
                 for await (const event of activeEvents) {
                     const eventData = event;
+                    if (eventData.type === "message.part.updated") {
+                        const rawPart = eventData.data?.part ?? eventData.properties?.part;
+                        if (rawPart &&
+                            (rawPart.type === "text" || rawPart.type === "reasoning") &&
+                            typeof rawPart.text === "string" &&
+                            typeof rawPart.id === "string" &&
+                            typeof rawPart.sessionID === "string") {
+                            const sid = rawPart.sessionID;
+                            const targetDir = sessionDirectories.get(sid) ?? directory;
+                            const runtime = runtimeForDirectory(targetDir);
+                            if (runtime.config.enabled !== false &&
+                                runtime.config.rules?.["runtime/circuit-breaker"] !== "off") {
+                                const tracked = inFlightStreamTracker.get(rawPart.id);
+                                if (!tracked?.aborted) {
+                                    const currentLen = rawPart.text.length;
+                                    const lastLen = tracked?.lastCheckedLength ?? 0;
+                                    if (currentLen >= 30 && (!tracked || currentLen - lastLen >= 40)) {
+                                        inFlightStreamTracker.set(rawPart.id, {
+                                            sessionID: sid,
+                                            lastCheckedLength: currentLen,
+                                            aborted: false,
+                                        });
+                                        while (inFlightStreamTracker.size > 512) {
+                                            const oldest = inFlightStreamTracker.keys().next().value;
+                                            if (typeof oldest === "string")
+                                                inFlightStreamTracker.delete(oldest);
+                                            else
+                                                break;
+                                        }
+                                        const loop = detectDegenerativeLoop(rawPart.text);
+                                        if (loop.detected) {
+                                            inFlightStreamTracker.set(rawPart.id, {
+                                                sessionID: sid,
+                                                lastCheckedLength: currentLen,
+                                                aborted: true,
+                                            });
+                                            toastNotifier.notify({
+                                                kind: "remediation",
+                                                ruleId: "runtime/circuit-breaker",
+                                                sessionID: sid,
+                                            });
+                                            recordGuardianEvent({
+                                                kind: "preflight-blocked",
+                                                rules: ["runtime/circuit-breaker"],
+                                                reasons: [{ rule: "runtime/circuit-breaker", code: "repeated-failure-without-progress" }],
+                                            }, targetDir);
+                                            try {
+                                                const sessionDomain = context.session;
+                                                if (typeof sessionDomain?.interrupt === "function") {
+                                                    await sessionDomain.interrupt({ sessionID: sid });
+                                                }
+                                                else if (typeof sessionDomain?.abort === "function") {
+                                                    await sessionDomain.abort({ sessionID: sid });
+                                                }
+                                            }
+                                            catch { }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if (eventData.type === "session.created") {
                         const createdSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
                         if (createdSessionID) {
@@ -1504,6 +1636,11 @@ const setup = async (context) => {
                     if (eventData.type === "session.deleted") {
                         const deletedSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
                         if (deletedSessionID) {
+                            for (const [partId, state] of inFlightStreamTracker) {
+                                if (state.sessionID === deletedSessionID) {
+                                    inFlightStreamTracker.delete(partId);
+                                }
+                            }
                             idleQueue.forget(deletedSessionID);
                             forgetSessionRuntime(deletedSessionID);
                             verificationStore.forget(deletedSessionID);

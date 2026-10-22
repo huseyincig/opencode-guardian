@@ -53,9 +53,11 @@ import {
   inactiveGuardianIntervention,
   readGuardianInterventionSessionID,
 } from "./intervention-rpc.js";
+import { detectDegenerativeLoop } from "./degeneration.js";
 
 export * from "./types.js";
 export * from "./engine.js";
+export * from "./degeneration.js";
 export * from "./rules/no-evasion.js";
 export * from "./rules/no-shortcuts.js";
 export * from "./rules/no-stubs.js";
@@ -633,6 +635,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   const engine = new GuardEngine(mergedConfig);
   const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
+  const inFlightStreamTracker = new Map<string, { sessionID: string; lastCheckedLength: number; aborted: boolean }>();
   let promptSequence = 0;
   let updateChecked = false;
   const updateNoticeController = new AbortController();
@@ -1046,9 +1049,83 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
     event: async ({ event }) => {
       const eventData = event as {
         type?: string;
-        properties?: { sessionID?: string; info?: { id?: string } };
-        data?: { sessionID?: string; info?: { id?: string } };
+        properties?: {
+          sessionID?: string;
+          info?: { id?: string };
+          part?: { id?: string; sessionID?: string; type?: string; text?: string };
+        };
+        data?: {
+          sessionID?: string;
+          info?: { id?: string };
+          part?: { id?: string; sessionID?: string; type?: string; text?: string };
+        };
       };
+
+      if (
+        eventData.type === "message.part.updated" &&
+        mergedConfig.enabled !== false &&
+        mergedConfig.rules?.["runtime/circuit-breaker"] !== "off"
+      ) {
+        const rawPart = eventData.properties?.part ?? eventData.data?.part;
+        if (
+          rawPart &&
+          (rawPart.type === "text" || rawPart.type === "reasoning") &&
+          typeof rawPart.text === "string" &&
+          typeof rawPart.id === "string" &&
+          typeof rawPart.sessionID === "string"
+        ) {
+          const tracked = inFlightStreamTracker.get(rawPart.id);
+          if (!tracked?.aborted) {
+            const currentLen = rawPart.text.length;
+            const lastLen = tracked?.lastCheckedLength ?? 0;
+            if (currentLen >= 30 && (!tracked || currentLen - lastLen >= 40)) {
+              inFlightStreamTracker.set(rawPart.id, {
+                sessionID: rawPart.sessionID,
+                lastCheckedLength: currentLen,
+                aborted: false,
+              });
+              while (inFlightStreamTracker.size > 512) {
+                const oldest = inFlightStreamTracker.keys().next().value;
+                if (typeof oldest === "string") inFlightStreamTracker.delete(oldest);
+                else break;
+              }
+              const loop = detectDegenerativeLoop(rawPart.text);
+              if (loop.detected) {
+                inFlightStreamTracker.set(rawPart.id, {
+                  sessionID: rawPart.sessionID,
+                  lastCheckedLength: currentLen,
+                  aborted: true,
+                });
+                const sid = rawPart.sessionID;
+                toastNotifier.notify({
+                  kind: "remediation",
+                  ruleId: "runtime/circuit-breaker",
+                  sessionID: sid,
+                });
+                recordGuardianEvent({
+                  kind: "preflight-blocked",
+                  rules: ["runtime/circuit-breaker"],
+                  reasons: [{ rule: "runtime/circuit-breaker", code: "repeated-failure-without-progress" }],
+                }, directory);
+                try {
+                  const clientWithAbort = client as unknown as {
+                    session?: {
+                      abort?: (options: { path: { id: string }; query?: { directory?: string } }) => Promise<unknown>;
+                      interrupt?: (options: { sessionID: string }) => Promise<unknown>;
+                    };
+                  };
+                  if (typeof clientWithAbort.session?.abort === "function") {
+                    await clientWithAbort.session.abort({ path: { id: sid }, query: { directory } });
+                  } else if (typeof clientWithAbort.session?.interrupt === "function") {
+                    await clientWithAbort.session.interrupt({ sessionID: sid });
+                  }
+                } catch {}
+              }
+            }
+          }
+        }
+        return;
+      }
 
       if (eventData.type === "session.created" && !updateChecked && mergedConfig.updateNotice?.enabled !== false) {
         updateChecked = true;
@@ -1068,6 +1145,11 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
           eventData.data?.sessionID ??
           eventData.data?.info?.id;
         if (deletedSessionID) {
+          for (const [partId, state] of inFlightStreamTracker) {
+            if (state.sessionID === deletedSessionID) {
+              inFlightStreamTracker.delete(partId);
+            }
+          }
           cancelSessionInspection(deletedSessionID);
           watcher?.stop(deletedSessionID);
           engine.forgetSession(deletedSessionID);
@@ -1264,6 +1346,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
   const foregroundHandoffs = new Map<string, Set<string>>();
+  const inFlightStreamTracker = new Map<string, { sessionID: string; lastCheckedLength: number; aborted: boolean }>();
   const registrations: Array<{ dispose(): Promise<void> | void }> = [];
   const interventionSnapshots = new Map<string, GuardianToastPayload>();
   const toastNotifiersByDirectory = new Map<string, GuardianToastNotifier>();
@@ -1723,14 +1806,86 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         for await (const event of activeEvents) {
         const eventData = event as {
           type?: string;
+          properties?: {
+            part?: { id?: string; sessionID?: string; type?: string; text?: string };
+          };
           data?: {
             sessionID?: string;
             info?: { id?: string };
             status?: { type?: string };
             location?: { directory?: string };
             permissions?: V2PermissionRule[];
+            part?: { id?: string; sessionID?: string; type?: string; text?: string };
           };
         };
+
+        if (eventData.type === "message.part.updated") {
+          const rawPart =
+            eventData.data?.part ?? eventData.properties?.part;
+          if (
+            rawPart &&
+            (rawPart.type === "text" || rawPart.type === "reasoning") &&
+            typeof rawPart.text === "string" &&
+            typeof rawPart.id === "string" &&
+            typeof rawPart.sessionID === "string"
+          ) {
+            const sid = rawPart.sessionID;
+            const targetDir = sessionDirectories.get(sid) ?? directory;
+            const runtime = runtimeForDirectory(targetDir);
+            if (
+              runtime.config.enabled !== false &&
+              runtime.config.rules?.["runtime/circuit-breaker"] !== "off"
+            ) {
+              const tracked = inFlightStreamTracker.get(rawPart.id);
+              if (!tracked?.aborted) {
+                const currentLen = rawPart.text.length;
+                const lastLen = tracked?.lastCheckedLength ?? 0;
+                if (currentLen >= 30 && (!tracked || currentLen - lastLen >= 40)) {
+                  inFlightStreamTracker.set(rawPart.id, {
+                    sessionID: sid,
+                    lastCheckedLength: currentLen,
+                    aborted: false,
+                  });
+                  while (inFlightStreamTracker.size > 512) {
+                    const oldest = inFlightStreamTracker.keys().next().value;
+                    if (typeof oldest === "string") inFlightStreamTracker.delete(oldest);
+                    else break;
+                  }
+                  const loop = detectDegenerativeLoop(rawPart.text);
+                  if (loop.detected) {
+                    inFlightStreamTracker.set(rawPart.id, {
+                      sessionID: sid,
+                      lastCheckedLength: currentLen,
+                      aborted: true,
+                    });
+                    toastNotifier.notify({
+                      kind: "remediation",
+                      ruleId: "runtime/circuit-breaker",
+                      sessionID: sid,
+                    });
+                    recordGuardianEvent({
+                      kind: "preflight-blocked",
+                      rules: ["runtime/circuit-breaker"],
+                      reasons: [{ rule: "runtime/circuit-breaker", code: "repeated-failure-without-progress" }],
+                    }, targetDir);
+                    try {
+                      const sessionDomain = context.session as unknown as {
+                        interrupt?: (options: { sessionID: string }) => Promise<unknown>;
+                        abort?: (options: { sessionID: string } | { path: { id: string } }) => Promise<unknown>;
+                      };
+                      if (typeof sessionDomain?.interrupt === "function") {
+                        await sessionDomain.interrupt({ sessionID: sid });
+                      } else if (typeof sessionDomain?.abort === "function") {
+                        await sessionDomain.abort({ sessionID: sid });
+                      }
+                    } catch {}
+                  }
+                }
+              }
+            }
+          }
+          continue;
+        }
 
         if (eventData.type === "session.created") {
           const createdSessionID =
@@ -1747,6 +1902,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           const deletedSessionID =
             eventData.data?.sessionID ?? eventData.data?.info?.id;
           if (deletedSessionID) {
+            for (const [partId, state] of inFlightStreamTracker) {
+              if (state.sessionID === deletedSessionID) {
+                inFlightStreamTracker.delete(partId);
+              }
+            }
             idleQueue.forget(deletedSessionID);
             forgetSessionRuntime(deletedSessionID);
             verificationStore.forget(deletedSessionID);

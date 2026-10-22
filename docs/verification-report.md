@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.12.4 automated verification suite**, evaluated on **22 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.12.5 automated verification suite**, evaluated on **22 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.12.4`
-- **Previous Package Version:** `v0.12.3` (731 passing tests; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **741 / 741 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
+- **Package Version:** OpenCode Guardian `v0.12.5`
+- **Previous Package Version:** `v0.12.4` (741 passing tests; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **765 / 765 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Dependency Audits:** Not rerun for v0.12.4; dependency versions unchanged
+- **Dependency Audits:** Not rerun for v0.12.5; dependency versions unchanged
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.12.4 recognizes native `write` tool payloads, resolves V2 active session directories reliably before preflight and edit observation, isolates auxiliary model guards per request, redacts connection-string passwords with empty usernames or absent paths, records structured replacement edits and deletions in evidence, and inspects each patch file independently for undeclared dependencies. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.12.4.
+> v0.12.5 introduces language-agnostic degenerative reasoning and text loop detection (`detectDegenerativeLoop` in `src/degeneration.ts`) and live in-flight streaming abort (`client.session.abort` / `context.session.interrupt`) in both V1 and V2 host adapters, protecting users against runaway token cycles and multi-thousand-token generation waste. It also retains native `write` payload verification, V2 active session directory resolution, per-request auxiliary model guard isolation, and undeclared dependency patch inspection. The dual-host matrix below remains historical v0.6.0 evidence; no live-host or interactive TUI acceptance was rerun for v0.12.5.
 
 ---
 
@@ -121,6 +121,21 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.12.5 Degenerative Reasoning & Text Loop Breaker
+
+- **Language-Agnostic Degenerative Cycle Detection:** Implemented `detectDegenerativeLoop` in `src/degeneration.ts` to detect repetitive token cascades and collapse states in assistant text and reasoning (including DeepSeek V4.1 Flash *"Hmm..."*, Kimi 2.7 Chinese/Japanese ideogram cascades, runaway punctuation, and code token repeats like *"None, None, None..."*).
+- **Post-Turn Circuit Breaker Integration:** Enhanced `runtime/circuit-breaker` to inspect assistant text and reasoning parts in `currentTurn`, producing structured findings and targeted remediation prompts instructing the model to clear stalled thoughts and proceed without repetition.
+- **Live In-Flight Streaming Abort:** Added live streaming inspection in both V1 and V2 host adapters on `message.part.updated` events. Evaluates strided growth ($\ge 40$ chars) in $< 0.02$ ms and immediately invokes `client.session.abort` (V1) or `context.session.interrupt` (V2) to stop token-burning loops before consuming thousands of context tokens.
+- **Negative False-Positive Protections:** Excluded Markdown table rows, comment banners, horizontal rules, small fixture arrays, and standard code loops.
+- **Regression Suite:** Added 24 dedicated tests in `tests/degenerative-loops.test.mjs` verifying multi-language positive cases, negative cases, rule tripping, and V1/V2 streaming aborts.
+
+## v0.12.4 Native Write Payloads & Multi-Directory Isolation
+
+- **Native Write Preflight & Telemetry:** Recognized native `write` tool payloads; blocked hardcoded secrets and truncation placeholders while allowing valid code writes.
+- **V2 Session Directory Resolution:** Resolved active project directories before preflight and edit observation in multi-directory environments.
+- **Auxiliary Model Guards Isolation:** Installed model hooks dynamically per request, supporting live config updates.
+- **Evidence Mutation Tracking:** Tracked replacement edits, deletions, and affected files to invalidate stale verifications.
 
 ## v0.12.3 International Multilingual In-Progress Protection
 
@@ -273,20 +288,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.12.4
+## Automated Source Verification Results — v0.12.5
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 741 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol, multilingual subagent progress, preflight, and source audit fixes | **741 / 741 PASS** |
+| **Unit & Regression Suite** | 765 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol, multilingual subagent progress, degenerative loops, preflight, and source audit fixes | **765 / 765 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | V1 plugin initialization, idle inspection and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
 | **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
-| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.12.4 |
-| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.12.4 |
-| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.12.4 metadata and file manifest; no archive created) | **PASS** |
-| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.12.4 on pinned hosts | **NOT RUN** |
+| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.12.5 |
+| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.12.5 |
+| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.12.5 metadata and file manifest; no archive created) | **PASS** |
+| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.12.5 on pinned hosts | **NOT RUN** |
 
 ---
 

@@ -3,6 +3,7 @@ import type { Plugin as OpenCodeV2 } from "@opencode/plugin";
 import type { SessionMessage } from "./types.js";
 export * from "./types.js";
 export * from "./engine.js";
+export * from "./degeneration.js";
 export * from "./rules/no-evasion.js";
 export * from "./rules/no-shortcuts.js";
 export * from "./rules/no-stubs.js";

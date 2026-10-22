@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.5 — 2026-10-22
+
+- Introduce language-agnostic **degenerative reasoning and text loop breaker** (`detectDegenerativeLoop` in `src/degeneration.ts`) stopping runaway token loops (such as DeepSeek V4.1 Flash *"Hmm..."*, Kimi 2.7 Chinese/Japanese repeating token cascades, runaway punctuation, or code repeats like *"None, None, None..."*).
+- Integrate post-turn degenerative loop detection into `runtime/circuit-breaker` rule (`src/rules/circuit-breaker.ts`), checking assistant reasoning and text parts in the current turn and generating targeted remediation prompts.
+- Implement **live in-flight streaming abort** in both V1 and V2 host adapters (`src/index.ts`) on `message.part.updated` events with a strided tail check ($\ge 40$ chars growth) running in $< 0.02$ ms, immediately invoking `client.session.abort` or `context.session.interrupt` to preserve the user's token budget and prevent wasted generation.
+- Add negative false-positive exemptions for Markdown table rows (`|---|---|`), banner comment dividers (`// ===`), hash dividers, small test array fixtures, and normal code loops.
+- Add regression coverage in `tests/degenerative-loops.test.mjs` (24 new tests covering English, Chinese, Japanese, Turkish, code tokens, low-entropy collapse, circuit breaker integration, and V1/V2 in-flight stream aborts).
+
+Validation on Node 24.22.0: 765 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.12.5.
+
 ## 0.12.4 — 2026-10-22
 
 - Recognize native `write` tool payloads in preflight and telemetry categories; reject hardcoded credentials and source truncation placeholders while allowing safe file writes.

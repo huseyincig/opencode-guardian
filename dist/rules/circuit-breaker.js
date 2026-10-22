@@ -1,4 +1,5 @@
 import { collectTurnEvidence } from "../evidence.js";
+import { detectDegenerativeLoop } from "../degeneration.js";
 function isUserCancellation(record) {
     const reason = "outcomeReason" in record ? record.outcomeReason : undefined;
     if (reason === "cancelled")
@@ -138,6 +139,37 @@ export const circuitBreakerRule = {
                 confidence: "high",
             });
         }
+        // Inspect assistant messages for degenerative reasoning or text loops
+        if (Array.isArray(context.currentTurn)) {
+            for (const message of context.currentTurn) {
+                if (message.info?.role !== "assistant")
+                    continue;
+                if (!Array.isArray(message.parts))
+                    continue;
+                for (const part of message.parts) {
+                    if (part.type !== "text" && part.type !== "reasoning")
+                        continue;
+                    if (typeof part.text !== "string")
+                        continue;
+                    const loop = detectDegenerativeLoop(part.text);
+                    if (loop.detected) {
+                        findings.push({
+                            ruleId: "runtime/circuit-breaker",
+                            pattern: "Degenerative loop",
+                            messageSnippet: loop.sample ?? loop.pattern ?? "Repetitive output loop",
+                            description: `Degenerative ${loop.kind ?? "token"} loop detected in assistant ${part.type}: ${loop.repetitions ?? 0} repetitions of "${(loop.pattern ?? "").slice(0, 40)}" (span: ${loop.span ?? 0} chars)`,
+                            evidence: [
+                                `loop kind: ${loop.kind ?? "periodic-cycle"}`,
+                                `pattern length: ${loop.pattern?.length ?? 0}`,
+                                `repetitions: ${loop.repetitions ?? 0}`,
+                                `span: ${loop.span ?? 0}`,
+                            ],
+                            confidence: "high",
+                        });
+                    }
+                }
+            }
+        }
         if (findings.length === 0) {
             return {
                 ruleId: "runtime/circuit-breaker",
@@ -151,15 +183,38 @@ export const circuitBreakerRule = {
         const MISSING_INFO_PATTERN = /\b(?:auth|unauthorized|forbidden|401|403|credential|token|api[_-]?key|secret|password|missing\s+(?:env|environment\s+variable|input|file|config|permission))\b/i;
         const needsUserClarification = findings.some((f) => MISSING_INFO_PATTERN.test(f.messageSnippet) ||
             MISSING_INFO_PATTERN.test(f.description));
+        const hasDegenerativeLoop = findings.some((f) => f.pattern === "Degenerative loop");
+        const hasErrorLoop = findings.some((f) => f.pattern !== "Degenerative loop");
+        let remediationPrompt;
+        if (hasDegenerativeLoop && !hasErrorLoop) {
+            remediationPrompt =
+                `Circuit breaker tripped! Degenerative reasoning/text loop detected:\n${list}\n\n` +
+                    `ACTION REQUIRED:\n` +
+                    `1. Stop the repetitive token or phrase generation cycle immediately.\n` +
+                    `2. Clear the stalled thought process, summarize intent concisely without repeating tokens, and take the next concrete action.\n` +
+                    `3. If genuinely blocked or unable to decide, ask the user directly.`;
+        }
+        else if (hasDegenerativeLoop && hasErrorLoop) {
+            remediationPrompt =
+                `Circuit breaker tripped! Repetitive error and degenerative generation loops detected:\n${list}\n\n` +
+                    `ACTION REQUIRED:\n` +
+                    `1. Stop repeating failing commands/edits and break out of the token repetition loop immediately.\n` +
+                    `2. Analyze why previous attempts failed, reconsider the hypothesis, and change technical strategy.\n` +
+                    `3. If genuinely blocked on missing requirements or external credentials, ask the user directly.`;
+        }
+        else {
+            remediationPrompt =
+                `Circuit breaker tripped! Repetitive error loop detected:\n${list}\n\n` +
+                    `ACTION REQUIRED:\n` +
+                    `1. Stop repeating the exact same failing command or edit.\n` +
+                    `2. Analyze why the previous attempts failed, reconsider the hypothesis, and change technical strategy.\n` +
+                    `3. If genuinely blocked on missing requirements or external credentials, ask the user directly.`;
+        }
         return {
             ruleId: "runtime/circuit-breaker",
             decision: "block",
             findings,
-            remediationPrompt: `Circuit breaker tripped! Repetitive error loop detected:\n${list}\n\n` +
-                `ACTION REQUIRED:\n` +
-                `1. Stop repeating the exact same failing command or edit.\n` +
-                `2. Analyze why the previous attempts failed, reconsider the hypothesis, and change technical strategy.\n` +
-                `3. If genuinely blocked on missing requirements or external credentials, ask the user directly.`,
+            remediationPrompt,
             ...(needsUserClarification
                 ? {
                     handoff: {

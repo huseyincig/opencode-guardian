@@ -7,6 +7,7 @@ import { SAFE_REASON_CODES, SAFE_RULE_IDS } from "./audit.js";
 export const GUARDIAN_MAX_LOG_BYTES = 2 * 1024 * 1024;
 const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ACTIONS = {
+    "stream-interrupt-requested": ["interrupt-requested", "unverified"],
     "runtime-started": ["started", "started"],
     "preflight-allowed": ["allowed", "allowed"],
     "preflight-blocked": ["blocked-before-execution", "prevented"],

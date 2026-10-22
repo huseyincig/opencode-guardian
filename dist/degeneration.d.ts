@@ -6,7 +6,7 @@
  * repeating code tokens like "None, None, None...") in assistant text and reasoning.
  *
  * Language-agnostic, zero external dependencies, strictly bounded O(1) tail
- * inspection (< 0.02 ms per check).
+ * inspection. Actual latency depends on the host and inspected patterns.
  */
 export interface DegenerativeLoopDetection {
     detected: boolean;
@@ -17,7 +17,7 @@ export interface DegenerativeLoopDetection {
     sample?: string;
 }
 export interface DegenerationOptions {
-    /** Maximum tail characters to inspect (default: 500). */
+    /** Maximum tail characters to inspect (default: 2048). */
     maxTailLength?: number;
     /** Minimum text length to trigger inspection (default: 30). */
     minLength?: number;

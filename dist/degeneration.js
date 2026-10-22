@@ -6,7 +6,7 @@
  * repeating code tokens like "None, None, None...") in assistant text and reasoning.
  *
  * Language-agnostic, zero external dependencies, strictly bounded O(1) tail
- * inspection (< 0.02 ms per check).
+ * inspection. Actual latency depends on the host and inspected patterns.
  */
 const SEPARATOR_CHARS = new Set([
     "-", "=", "*", "_", "#", "/", "|", "~", "`", " ", "\t", "\n", "\r", ":", "+",
@@ -31,19 +31,21 @@ export function detectDegenerativeLoop(text, options) {
     if (typeof text !== "string") {
         return { detected: false };
     }
-    const minLength = options?.minLength ?? 30;
+    const minLength = Math.max(30, Math.min(2048, Math.trunc(options?.minLength ?? 30) || 30));
     if (text.length < minLength) {
         return { detected: false };
     }
-    const maxTailLength = options?.maxTailLength ?? 500;
-    const tail = text.slice(-maxTailLength);
+    const maxTailLength = Math.max(30, Math.min(2048, Math.trunc(options?.maxTailLength ?? 2048) || 2048));
+    // Ignore bounded numeric/hex literals, including incomplete streamed literals.
+    // Longer runs remain eligible: a growing output cannot hide forever in a quote.
+    const tail = text.slice(-maxTailLength).replace(/(["'])[0-9a-fA-F]{15,128}(?:\1|$)/g, match => " ".repeat(match.length));
     // 1. Suffix offset tolerance (0 to 3 chars for trailing partial tokens / punctuation)
     for (let offset = 0; offset <= 3; offset++) {
         const candidate = offset === 0 ? tail : tail.slice(0, tail.length - offset);
         if (candidate.length < minLength)
             continue;
-        // Check pattern lengths L from 1 to 40
-        for (let L = 1; L <= 40; L++) {
+        // Bound work while supporting whole sentences and multi-code-unit Unicode.
+        for (let L = 1; L <= Math.min(512, Math.floor(candidate.length / 4)); L++) {
             if (candidate.length < L * 3)
                 continue;
             const pattern = candidate.slice(-L);
@@ -117,7 +119,7 @@ export function detectDegenerativeLoop(text, options) {
                     };
                 }
             }
-            else if (L >= 21 && L <= 40) {
+            else if (L >= 21) {
                 if (hasWordChar && k >= 4 && span >= 85) {
                     return {
                         detected: true,

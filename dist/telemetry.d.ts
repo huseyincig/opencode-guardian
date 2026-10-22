@@ -1,7 +1,7 @@
 import { type AuditReason } from "./audit.js";
-export type GuardianEventKind = "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected" | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
+export type GuardianEventKind = "stream-interrupt-requested" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected" | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
-export type GuardianAction = "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned" | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
+export type GuardianAction = "interrupt-requested" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned" | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
 export type GuardianOutcome = "started" | "allowed" | "prevented" | "reported" | "unverified" | "verified" | "error";
 export interface GuardianEvent {
     at: string;

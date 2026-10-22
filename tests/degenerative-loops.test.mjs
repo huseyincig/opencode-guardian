@@ -288,6 +288,10 @@ test("V1 in-flight message.part.updated aborts streaming session on degenerative
     client: mockClient,
   });
 
+  t.after(() => hooks.dispose());
+  await hooks.event({ event: { type: "message.updated", properties: {
+    info: { id: "assistant-stream", sessionID: "stream-session", role: "assistant", time: { created: 1 } },
+  } } });
   // 1. Send normal initial text stream (no abort)
   await hooks.event({
     event: {
@@ -295,6 +299,7 @@ test("V1 in-flight message.part.updated aborts streaming session on degenerative
       properties: {
         part: {
           id: "part-1",
+          messageID: "assistant-stream",
           sessionID: "stream-session",
           type: "reasoning",
           text: "Analyzing the repository structure and test suite...",
@@ -311,6 +316,7 @@ test("V1 in-flight message.part.updated aborts streaming session on degenerative
       properties: {
         part: {
           id: "part-1",
+          messageID: "assistant-stream",
           sessionID: "stream-session",
           type: "reasoning",
           text:
@@ -331,6 +337,7 @@ test("V1 in-flight message.part.updated aborts streaming session on degenerative
       properties: {
         part: {
           id: "part-1",
+          messageID: "assistant-stream",
           sessionID: "stream-session",
           type: "reasoning",
           text:
@@ -345,7 +352,7 @@ test("V1 in-flight message.part.updated aborts streaming session on degenerative
   await hooks.dispose();
 });
 
-test("V2 in-flight message.part.updated interrupts streaming session on degenerative loop", async (t) => {
+test("V2 native reasoning deltas interrupt streaming session on degenerative loop", async (t) => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "guardian-abort-v2-")
   );
@@ -363,31 +370,14 @@ test("V2 in-flight message.part.updated interrupts streaming session on degenera
     event: {
       subscribe({ signal }) {
         return (async function* () {
-          // 1. Normal streaming
-          yield {
-            type: "message.part.updated",
-            data: {
-              part: {
-                id: "part-v2-1",
-                sessionID: "v2-session-1",
-                type: "reasoning",
-                text: "Refactoring components cleanly...",
-              },
-            },
-          };
-
-          // 2. Degenerative Chinese loop
-          yield {
-            type: "message.part.updated",
-            data: {
-              part: {
-                id: "part-v2-1",
-                sessionID: "v2-session-1",
-                type: "reasoning",
-                text: "Refactoring components cleanly...\n" + "我想想".repeat(15),
-              },
-            },
-          };
+          yield { type: "session.reasoning.delta", data: {
+            sessionID: "v2-session-1", assistantMessageID: "assistant-v2", ordinal: 0,
+            delta: "Refactoring components cleanly...\n",
+          } };
+          yield { type: "session.reasoning.delta", data: {
+            sessionID: "v2-session-1", assistantMessageID: "assistant-v2", ordinal: 0,
+            delta: "我想想".repeat(15),
+          } };
 
           await new Promise((resolve) => {
             if (signal.aborted) resolve();

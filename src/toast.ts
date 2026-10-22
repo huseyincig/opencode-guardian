@@ -15,6 +15,7 @@
 export type GuardianToastVariant = "error" | "warning" | "info";
 
 export type GuardianInterventionKind =
+  | "stream-interrupt-requested"
   | "preflight-blocked"
   | "remediation"
   | "warning";
@@ -92,6 +93,12 @@ export function sanitizeToastRuleId(raw: unknown): string {
 
 export function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload {
   switch (input.kind) {
+    case "stream-interrupt-requested": return {
+      title: "Guardian — Repetition detected",
+      message: "Repetitive generation detected. A stream interruption was requested.",
+      variant: "warning",
+      duration: 5000,
+    };
     case "preflight-blocked": {
       const safeRule = sanitizeToastRuleId(input.ruleId ?? input.ruleIds?.[0] ?? "preflight");
       const safeTool =

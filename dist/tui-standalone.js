@@ -259,6 +259,8 @@ function GuardianSidebar(props) {
   const statusLabel = () => {
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
+      case "stream-interrupt-requested":
+        return "▲ stream stop requested";
       case "inspection-error":
         return "▲ inspection error";
       case "preflight-blocked":
@@ -293,6 +295,7 @@ function GuardianSidebar(props) {
       case "preflight-blocked":
       case "remediation-failed":
         return errorColor();
+      case "stream-interrupt-requested":
       case "post-warning":
       case "remediation-unverified":
       case "verification-unavailable":

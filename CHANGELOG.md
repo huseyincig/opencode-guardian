@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0 — 2026-10-23
+
+- Introduce hardened, bounded streaming loop watcher (`StreamLoopWatcher` in `src/stream-loop.ts`) shared across both OpenCode V1 and V2 host adapters.
+- V1 stream tracking: inspects `message.part.updated` strictly for active assistant messages; automatically disables inspection upon user turn start, assistant completion, or session idle/interruption.
+- V2 stream tracking: natively consumes `session.text.started|delta|ended` and `session.reasoning.started|delta|ended` events with incremental delta concatenation (2,048-char bounded tail).
+- Support full rule configuration semantics (`error`, `warn`, `off`) in both string and object formats (`{ severity: "warn" }`); `warn` mode logs warnings and dispatches advisory toast notifications without interrupting output.
+- Concurrency & project isolation: per-response mutex locks prevent duplicate interrupt calls on simultaneous parts; V2 event ingestion continues non-blocking during asynchronous project resolution.
+- Timeout & retry gating: adds 3-second interrupt timeout (`AbortSignal.timeout(3000)`); bounded retry allows at most three attempts per response on continued stream growth, suppressing overlapping retries on ambiguous timeouts.
+- Quoted literal fixture protection: excludes short quoted numeric and hex literals (15–128 characters) from low-entropy and cycle false positives, preventing legitimate test hashes from triggering blocks.
+- Extended period support: detects longer periodic sentence structures up to 512 UTF-16 code units within the 2,048-character inspection window.
+- Telemetry & TUI status: introduces `stream-interrupt-requested` audit event, toast notifications, and TUI status indicator (`▲ stream stop requested`).
+- Add regression coverage in `tests/stream-loop-hardening.test.mjs` (16 new tests, bringing total suite to 781 tests).
+
+Validation on Node 24.22.0: 781 tests, standard/strict TypeScript checks, lint, smoke test and 18 simulated scenarios passed. Package metadata and documentation identify v0.13.0.
+
 ## 0.12.5 — 2026-10-22
 
 - Introduce language-agnostic **degenerative reasoning and text loop breaker** (`detectDegenerativeLoop` in `src/degeneration.ts`) stopping runaway token loops (such as DeepSeek V4.1 Flash *"Hmm..."*, Kimi 2.7 Chinese/Japanese repeating token cascades, runaway punctuation, or code repeats like *"None, None, None..."*).

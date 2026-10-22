@@ -6,11 +6,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { SAFE_REASON_CODES, SAFE_RULE_IDS, type AuditReason } from "./audit.js";
 
 export type GuardianEventKind =
-  | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected"
+  | "stream-interrupt-requested" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected"
   | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
 export type GuardianAction =
-  | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned"
+  | "interrupt-requested" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned"
   | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
 export type GuardianOutcome =
   | "started" | "allowed" | "prevented" | "reported"
@@ -51,6 +51,7 @@ export const GUARDIAN_MAX_LOG_BYTES = 2 * 1024 * 1024;
 const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const ACTIONS: Record<GuardianEventKind, [GuardianAction, GuardianOutcome]> = {
+  "stream-interrupt-requested": ["interrupt-requested", "unverified"],
   "runtime-started": ["started", "started"],
   "preflight-allowed": ["allowed", "allowed"],
   "preflight-blocked": ["blocked-before-execution", "prevented"],

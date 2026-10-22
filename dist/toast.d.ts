@@ -12,7 +12,7 @@
  * Only safe rule IDs, severity, and action taken are included.
  */
 export type GuardianToastVariant = "error" | "warning" | "info";
-export type GuardianInterventionKind = "preflight-blocked" | "remediation" | "warning";
+export type GuardianInterventionKind = "stream-interrupt-requested" | "preflight-blocked" | "remediation" | "warning";
 export interface GuardianToastPayload {
     title: string;
     message: string;

@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.12.2 automated verification suite**, evaluated on **21 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.12.3 automated verification suite**, evaluated on **21 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.12.2`
-- **Previous Package Version:** `v0.12.1` (725 passing tests; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **730 / 730 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
+- **Package Version:** OpenCode Guardian `v0.12.3`
+- **Previous Package Version:** `v0.12.2` (730 passing tests; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **731 / 731 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Dependency Audits:** Not rerun for v0.12.2; dependency versions unchanged
+- **Dependency Audits:** Not rerun for v0.12.3; dependency versions unchanged
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.12.2 resolves completion gate false-positives for subagents and ongoing in-progress turns, standardizes actionable numbered remediation prompts, and introduces an anti-distraction directive. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.12.2.
+> v0.12.3 expands in-progress progress-reporting detection across all 13 supported international locales (Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, Indonesian, English, and Turkish), preventing false-positive completion gate blocking for subagents and ongoing turns in any supported language. The dual-host matrix below remains historical v0.6.0 evidence; the separate acceptance-v1/v2 reports also retain their recorded versions. No live-host or interactive TUI acceptance was rerun for v0.12.3.
 
 ---
 
@@ -121,6 +121,12 @@ Independent live-host acceptance tests were conducted on real host environments 
    - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
 
 ---
+
+## v0.12.3 International Multilingual In-Progress Protection
+
+- **Full 13-locale in-progress classification:** Expands `REPORT_TERMS` in `locale-intents.ts` to include explicit `inProgress` terms across all 11 non-English/Turkish languages (Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, Indonesian) in addition to English and Turkish.
+- **Subagent language-neutral flow:** Subagents reporting ongoing progress in any supported language (*"en progreso"*, *"trabajo en curso"*, *"en cours"*, *"in Bearbeitung"*, *"в процессе"*, *"قيد التنفيذ"*, *"काम जारी है"*, *"进行中"*, *"進行中"*, *"진행 중"*, *"sedang berlangsung"*) are classified with `isInProgress === true` and `isClosing === false`, preventing false-positive completion gate blocking.
+- **Multilingual regression tests:** Added test suites in `tests/multilingual-task.test.mjs` and `tests/subagent-progress-completion-gate.test.mjs` verifying all 13 supported languages.
 
 ## v0.12.2 Subagent In-Progress Protection and Actionable Remediation
 
@@ -267,20 +273,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.12.2
+## Automated Source Verification Results — v0.12.3
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 730 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol, subagent progress, and preflight | **730 / 730 PASS** |
+| **Unit & Regression Suite** | 731 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol, multilingual subagent progress, and preflight | **731 / 731 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | V1 plugin initialization, idle inspection and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
 | **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
-| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.12.2 |
-| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.12.2 |
-| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.12.2 metadata and file manifest; no archive created) | **PASS** |
-| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.12.2 on pinned hosts | **NOT RUN** |
+| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.12.3 |
+| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.12.3 |
+| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.12.3 metadata and file manifest; no archive created) | **PASS** |
+| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.12.3 on pinned hosts | **NOT RUN** |
 
 ---
 

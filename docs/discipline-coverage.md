@@ -1,10 +1,10 @@
 # Engine discipline coverage and evidence boundaries
 
-Guardian v0.12.0 strengthens the shared engine. It keeps the existing fourteen rule IDs, host adapters and remediation budgets, and adds no runtime dependencies or installed skills.
+Guardian v0.14.0 strengthens the shared engine. It keeps the existing fourteen rule IDs, host adapters and remediation budgets, and adds no runtime dependencies or installed skills.
 
 ## Evidence
 
-`EvidenceRecord` now optionally carries `testSummary`, `outcomeReason` and observed `editIntegrity`. The original host exit code is preserved. Only assistant tool parts produce evidence; prose, user examples and system text do not.
+`EvidenceRecord` now carries `testSummary`, `outcomeReason` and observed `editIntegrity`. The original host exit code is preserved, with normalization for standardized `"Exit code: N"` outputs and explicit signal kill/timeout errors (`SIGTERM`, `SIGKILL`, `SIGINT`). Only assistant tool parts produce evidence; prose, user examples and system text do not.
 
 Supported complete aggregate summaries: Node TAP/spec, pytest, Jest and Vitest. Counts are bounded and must reconcile. Known pytest warning/deselection fields are ignored rather than counted as executed tests. Unknown formats retain the host outcome without inventing counts. Missing exit codes, masked pipelines and ambiguous compound commands retain the existing conservative handling.
 

@@ -39,7 +39,7 @@ See the [0.14.0 release notes](CHANGELOG.md) for telemetry optimization, standar
 - **Compact TUI Sidebar:** A compact two-column status widget that expands to show Guardian diagnostics with a single click.
 - **In-App Update Indicator:** Shows a green `(↑)` header icon and places `Update available` first in the sidebar when npm reports a newer release.
 - **Guardian Commands:** Ctrl+P and slash commands display detailed status, activity, diagnostics, rules, configuration and version; confirmed statistics reset preserves audit history.
-- **Project-Scoped Audit Log:** Stores safe event codes, reasons and intervention outcomes in `<project>/.opencode/guardian-events.jsonl` with `0600` POSIX permissions, a 2 MiB limit and one rotated archive. Never stores prompt or command text.
+- **Project-Scoped Audit Log:** Stores safe event codes, reasons and intervention outcomes in `<project>/.opencode/guardian-events.jsonl` with `0600` POSIX permissions, a default 512 KiB limit (configurable via `telemetry.maxBytes`) and one rotated archive. Never stores prompt or command text.
 - **V1 Session Cancellation:** Native session-deletion events and new human prompts, including attachment-only messages, cancel stale idle work and prevent deleted capability caches from returning.
 - **Error Redaction:** Nested Error metadata, non-enumerable causes and aggregate errors are sanitized; executable serialization callbacks are removed and reserved JSON fields remain safe own properties.
 - **Evidence-Based Task Contracts:** Analyzes human requests across 13 languages to extract required verifications (tests, builds, source reviews) and detects premature completion claims. When the host provides a tool-after observation, SHA-256 evidence is tied to the observed file contents.
@@ -116,7 +116,7 @@ To mount the Guardian sidebar in your OpenCode terminal:
 ### 🔽 Collapsed View (Default)
 
 ```text
-▶ Guardian                 v0.13.0
+▶ Guardian                 v0.14.0
 Status                       ● Active
 Interventions                 0w · 0r
 ```
@@ -130,7 +130,7 @@ Interventions                 0w · 0r
 Clicking the `▶ Guardian` header expands the widget:
 
 ```text
-▼ Guardian                 v0.13.0
+▼ Guardian                 v0.14.0
 Preflight                  ○ disabled
 Inspected                           0
 Blocked                             0
@@ -177,7 +177,7 @@ Guardian stores a structured JSONL audit in `<project>/.opencode/guardian-events
 - `unverified` means an instruction was sent, **not** that the agent completed it.
 - A warning uses `reported`; a preflight denial uses `prevented` only when the command was actually rejected before execution.
 - No prompts, assistant responses, raw commands, file contents, finding snippets, original session IDs, credentials or secrets are written.
-- The active log is limited to 2 MiB, with one rotated archive (`guardian-events.jsonl.1`); TUI counters cover the latest 2 MiB of available records.
+- The active log is bounded to 512 KiB by default (configurable up to 2 MiB via `telemetry.maxBytes` or `OPENCODE_GUARDIAN_MAX_LOG_BYTES`), with one rotated archive (`guardian-events.jsonl.1`). In default `violations` mode, high-frequency benign events bypass disk writes completely.
 - To inspect recent events, run `tail -n 20 .opencode/guardian-events.jsonl`.
 
 ---
@@ -402,7 +402,7 @@ flowchart TD
     Outcome -->|Evidence insufficient| Unverified[remediation-unverified]
 ```
 
-The diagram illustrates the v0.12.0 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. Supported whole-file writes also use before/after observations for advisory content-loss detection; missing before hooks cannot reconstruct old file content. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
+The diagram illustrates the v0.14.0 dual-mode runtime. Strict preflight is **opt-in** and evaluates recognized or configured tools; an out-of-scope tool is still governed by host permissions. Tool-after observations and SHA-256 file snapshots are captured **when the host supplies supported evidence**. Supported whole-file writes also use before/after observations for advisory content-loss detection; missing before hooks cannot reconstruct old file content. After a remediation, only supported, observable follow-up evidence can establish `remediation-verified`.
 
 For delegated subagent work (`task` on V1, `subagent` on V2), Guardian preserves capability-aware remediation isolation: write-capable agents retain bounded remediation, read-only subagents avoid synthetic remediation loops, and per-rule fingerprints distinguish substantive errors. Teardown remains idempotent. Both adapters share evidence normalization, per-file patch attribution, credential redaction, idle coalescing, Windows command parsing, preflight/verification hook isolation and toast notifications.
 

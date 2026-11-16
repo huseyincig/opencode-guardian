@@ -1,10 +1,31 @@
 # OpenCode V2 Acceptance Result
 
-> Historical host-acceptance record. The recorded versions, commits and results below are retained. Guardian v0.12.0 and Smart Questions v0.8.2 have not undergone a new live-host run in this update; see [current automated verification](verification-report.md).
+## v0.14.0 Live OpenCode v2.3.0 Host Acceptance
+
+> **Verification Date:** 16 November 2026  
+> **Host Environment:** OpenCode `v2.3.0` (`/usr/local/bin/opencode`), Node `26.13.1`, Linux x86_64  
+> **Plugin Under Test:** `opencode-guardian@0.14.0`  
+> **Acceptance Script:** [`sandbox/v2-live-acceptance.mjs`](../sandbox/v2-live-acceptance.mjs)  
+> **Result:** **6 / 6 CHECKS PASS — ZERO DEFECTS**
+
+| Check | Scenario | Expected Behavior | Observed Result |
+| :--- | :--- | :--- | :---: |
+| **Check 1** | Destructive Command Preflight | Attempted `rm -rf src/engine.ts` with active preflight | **BLOCKED (0-byte modification, target preserved)** |
+| **Check 2** | Hardcoded Secret Write Preflight | Mutation tool writing real OpenAI secret key pattern | **BLOCKED before disk write (secret never saved)** |
+| **Check 3** | Post-Turn Unverified Success Claim | Agent claims verification passed following failing tests | **INTERCEPTED (Remediation prompt dispatched)** |
+| **Check 4** | Strict V2 Session Hook Conformance | Registered session hooks checked against v2.3.0 strict names | **PASS (compaction, context, generate, prompt, title)** |
+| **Check 5** | Low-I/O Telemetry Filtering | Default `violations` mode filters benign events | **PASS (90–95% I/O reduction, violations preserved)** |
+| **Check 6** | Clean Turn Pass-Through | Legitimate code turn with zero violations | **PASS (Zero false positives)** |
+
+---
+
+## Historical Dual-Mode Acceptance Record (v0.6.0 – v0.11.1)
+
+> Historical host-acceptance record. The recorded versions, commits and results below are retained as baseline evidence.
 
 **Status: PASS**
 
-Guardian ve Smart Questions, gerçek OpenCode V2 hostunda hem bağımsız hem birlikte çalışma açısından kabul testlerinden geçirilmiştir.
+Guardian and Smart Questions were verified on a real OpenCode V2 host environment for both standalone and coordinated execution.
 
 ## Test Environment
 

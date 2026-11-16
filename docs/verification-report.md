@@ -289,20 +289,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.13.0
+## Automated Source Verification Results — v0.14.0
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 781 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, telemetry, handoff protocol, multilingual subagent progress, degenerative loops, stream loop hardening, preflight, and source audit fixes | **781 / 781 PASS** |
+| **Unit & Regression Suite** | 797 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, low-I/O telemetry, handoff protocol, multilingual subagent progress, degenerative loops, stream loop hardening, preflight, standardized shell exit codes, and OpenCode v2.3.0 compatibility | **797 / 797 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | V1 plugin initialization, idle inspection and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
-| **Lint** | Oxlint (`src` + `tests`, warnings denied) | **PASS** |
+| **Lint** | Oxlint (`src` + `tests`, warnings denied; 108 files) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
-| **Production Audit** | `npm audit --omit=dev` | Not rerun for v0.13.0 |
-| **Development Audit** | Full lockfile dependency audit | Not rerun for v0.13.0 |
-| **Packaging Dry Run** | `npm pack --dry-run --ignore-scripts` (v0.13.0 metadata and file manifest; no archive created) | **PASS** |
-| **Fresh V1/V2 Host & Interactive TUI Acceptance** | Packaged v0.13.0 on pinned hosts | **NOT RUN** |
+| **Production Audit** | `npm audit --omit=dev` | **PASS** (0 vulnerabilities) |
+| **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** (0 critical, tracked upstream chains) |
+| **Packaging Dry Run** | `npm pack --dry-run` (v0.14.0 metadata and 121 files; 208.6 kB compressed tarball) | **PASS** |
+| **Live OpenCode V2 Acceptance** | Real OpenCode v2.3.0 binary (`sandbox/v2-live-acceptance.mjs`) executing all 6 security and lifecycle checks | **6 / 6 PASS** |
 
 ---
 
@@ -310,7 +310,7 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 
 1. **Opt-In Preflight:** Strict preflight is an opt-in safety net (`preflight.enabled: true`) designed to catch common accidental destructive commands and obvious secrets before execution. It is pattern-based and does not replace operating system user permissions, containers, or sandboxing.
 2. **Post-Turn Scope:** Post-turn rule violations guide agent behavior and trigger automated remediation, but cannot retroactively reverse an operation that already completed.
-3. **Log Rotation:** The event log (`.opencode/guardian-events.jsonl`) is bounded to 2 MiB with one rotated archive (`.opencode/guardian-events.jsonl.1`). Historical events older than the rotation window are aged out normally.
+3. **Log Rotation & Low-I/O Telemetry:** The event log (`.opencode/guardian-events.jsonl`) is bounded by default to 512 KiB (configurable via `telemetry.maxBytes` or `OPENCODE_GUARDIAN_MAX_LOG_BYTES`), with one rotated archive (`.opencode/guardian-events.jsonl.1`). In default `violations` mode, benign preflight-allowed and clean-turn events bypass disk I/O entirely, eliminating excessive disk churn.
 
 ---
 

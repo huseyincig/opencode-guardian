@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V1/V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.12.0**.
+Documentation for OpenCode Guardian **v0.14.0**.
 
 Guardian implements a robust dual-mode architecture that connects to both **OpenCode v1** (`@opencode-ai/plugin`) and **OpenCode v2** (`@opencode/plugin`) runtime environments using standard, non-invasive plugin hooks.
 
@@ -54,9 +54,11 @@ In v0.11.2, a new V1 human prompt cancels prior idle inspection and clears previ
 
 ---
 
-## v0.12.0 Evidence and Constraint Boundaries
+## v0.14.0 Evidence, Standardized Shell Output, and Telemetry Boundaries
 
-Supported whole-file writes can carry before/after hashes, sizes and declaration-name loss into idle inspection. Suspicious content loss remains advisory, and a missing before hook cannot establish old file content. Source truncation placeholders can be rejected by strict preflight. See [edit observation limits](discipline-coverage.md#edit-observations-and-safety) for project confinement and memory bounds.
+In v0.14.0, evidence normalization in `src/evidence.ts` recognizes standardized `"Exit code: N"` outputs and tracks explicit signal kill or timeout errors (`SIGTERM`, `SIGKILL`, `SIGINT`). Read-only Git inspection tools (`diff`, `git_diff`, `log`, `git_log`, `show`, `git_show`) are recognized without triggering destructive warnings.
+
+The Low-I/O Telemetry architecture (`src/telemetry.ts`) introduces `telemetry.level` (`"violations" | "all" | "off"`, default: `"violations"`), filtering out high-frequency benign events (`preflight-allowed`, `post-inspected`) to eliminate 90–95% of disk I/O and prevent test and benchmark freezes. Verified state directory permissions are cached in-memory, and event logs are strictly bounded to 512 KiB by default (configurable via `telemetry.maxBytes`). Supported whole-file writes carry before/after hashes, sizes and declaration-name loss into idle inspection. See [edit observation limits](discipline-coverage.md#edit-observations-and-safety) for project confinement and memory bounds.
 
 Research-only enforcement recognizes narrow English/Turkish phrases and checks observed writes, installs and pushes after the turn. It does not cover every language supported by task-contract extraction and cannot undo a completed mutation. File-specific baseline claims need matching comparison targets; quoted examples cannot grant destructive-operation permission.
 

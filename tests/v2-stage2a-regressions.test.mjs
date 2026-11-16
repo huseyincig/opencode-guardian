@@ -160,6 +160,26 @@ test("V2 prompt hook cancels in-flight idle inspection and clears stale TaskCont
   ]);
   await new Promise((r) => setTimeout(r, 40));
   assert.deepEqual(synthetics, [], "cancelled idle job must not emit synthetic remediation");
+
+  // Pending idleQueue timer must keep the Node event loop alive (no unsettled top-level await exit 13)
+  const loopCheck = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      [
+        'import { createIdleQueue } from "./dist/idle-queue.js";',
+        "const q = createIdleQueue(new AbortController().signal, (e) => { throw e; });",
+        "let ran = false;",
+        "await new Promise((resolve) => { q.enqueue('s-loop', async () => { ran = true; resolve(); }); });",
+        'if (!ran) process.exit(2);',
+        'console.log("IDLE_QUEUE_OK");',
+      ].join(" "),
+    ],
+    { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8" }
+  );
+  assert.equal(loopCheck.status, 0, `idleQueue event-loop check failed (status ${loopCheck.status}): ${loopCheck.stderr}`);
+  assert.equal(loopCheck.stdout.trim(), "IDLE_QUEUE_OK");
 });
 
 // 4. OpenCode v2.3.0 session.fork / session.forked + top-level location.directory + background: true subagents

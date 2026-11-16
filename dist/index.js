@@ -1389,7 +1389,6 @@ const setup = async (context) => {
                     controller.signal.removeEventListener("abort", onAbort);
                     resolve();
                 }, 200 * (attempt + 1));
-                timer.unref?.();
                 if (controller.signal.aborted)
                     onAbort();
                 else

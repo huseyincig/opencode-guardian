@@ -1633,7 +1633,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           controller.signal.removeEventListener("abort", onAbort);
           resolve();
         }, 200 * (attempt + 1));
-        (timer as { unref?: () => void }).unref?.();
         if (controller.signal.aborted) onAbort();
         else controller.signal.addEventListener("abort", onAbort, { once: true });
       });

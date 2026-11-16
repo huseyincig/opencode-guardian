@@ -1,4 +1,4 @@
-/** Bounded assistant-only stream inspection shared by both host adapters. */
+/** Bounded assistant-only stream inspection for OpenCode V2. */
 import { detectDegenerativeLoop } from "./degeneration.js";
 import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 const TAIL = 2048;
@@ -20,10 +20,10 @@ export class StreamLoopWatcher {
         this.options = options;
     }
     clear() { this.sessions.clear(); }
-    dispatch(raw, version) {
+    dispatch(raw) {
         // event() consumes ownership/lifecycle synchronously before its first await.
         // Never let slow host I/O stop ingestion of a completion or deletion event.
-        const task = this.event(raw, version).catch(() => { });
+        const task = this.event(raw).catch(() => { });
         this.tasks.add(task);
         void task.finally(() => this.tasks.delete(task));
     }
@@ -43,11 +43,11 @@ export class StreamLoopWatcher {
         }
         return state;
     }
-    async event(raw, version) {
+    async event(raw) {
         if (this.options.signal.aborted || !raw || typeof raw !== "object")
             return;
         const event = raw;
-        const data = version === "v1" ? event.properties ?? event.data : event.data;
+        const data = event.data;
         if (!data)
             return;
         const info = data.info;
@@ -63,37 +63,8 @@ export class StreamLoopWatcher {
                 state.active = false;
             return;
         }
-        if (version === "v1" && event.type === "message.updated") {
-            if (sid && info?.role === "user") {
-                const state = this.sessions.get(sid);
-                if (state)
-                    state.active = false;
-            }
-            if (sid && info?.id && info.role === "assistant") {
-                const state = this.response(sid, info.id);
-                if (info.time?.completed !== undefined)
-                    state.active = false;
-            }
-            return;
-        }
         let sessionID, state, key, text, delta = false;
-        if (version === "v1" && event.type === "message.part.updated") {
-            const part = data.part;
-            if (!part?.sessionID || !part.id || !part.messageID || (part.type !== "text" && part.type !== "reasoning") || typeof part.text !== "string")
-                return;
-            const current = this.sessions.get(part.sessionID);
-            if (!current || current.messageID !== part.messageID || !current.active)
-                return;
-            sessionID = part.sessionID;
-            state = current;
-            key = part.id;
-            text = part.text;
-            if (part.time?.end !== undefined) {
-                state.parts.delete(key);
-                return;
-            }
-        }
-        else if (version === "v2" && /^session\.(text|reasoning)\.(started|delta|ended)$/.test(event.type ?? "")) {
+        if (/^session\.(text|reasoning)\.(started|delta|ended)$/.test(event.type ?? "")) {
             if (!sid || typeof data.assistantMessageID !== "string" || !Number.isSafeInteger(data.ordinal))
                 return;
             sessionID = sid;
@@ -160,7 +131,7 @@ export class StreamLoopWatcher {
             const signal = AbortSignal.any([this.options.signal, AbortSignal.timeout(3000)]);
             try {
                 const result = await cancellable(this.options.interrupt(sessionID, directory, signal), signal);
-                if (result === false || (result && typeof result === "object" && (result.error !== undefined || result.data === false)))
+                if (result === false || (result && typeof result === "object" && (result.error !== undefined || result.data === false || result.interrupted === false)))
                     throw new Error("Stream interrupt rejected");
                 if (!current())
                     return;

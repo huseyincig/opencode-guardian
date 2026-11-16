@@ -556,7 +556,7 @@ test("A live test snapshot detects same-size edits with preserved timestamps", (
     currentTurn: messages, evidence: replay, ruleConfig: { blockUnverified: true },
   }).decision, "block");
 });
-test("V1 and V2 host adapters register and dispose live evidence hooks", async (t) => {
+test("V2 host adapter registers and disposes live evidence hooks", async (t) => {
   const project = isolated(t);
   fs.writeFileSync(path.join(project, "opencode-guardian.json"),
     JSON.stringify({
@@ -564,13 +564,6 @@ test("V1 and V2 host adapters register and dispose live evidence hooks", async (
       preflight: { enabled: false },
       secrets: { enabled: false },
     }));
-  const v1 = await Guardian.server({ client: { session: {} }, directory: project });
-  assert.equal(typeof v1["tool.execute.after"], "function");
-  await v1["tool.execute.after"]({
-    tool: "write_to_file", sessionID: "s", callID: "m1",
-    args: { path: "file.ts", content: "export const value = true;" },
-  }, { title: "saved", output: "saved", metadata: {} });
-  await v1.dispose();
 
   let afterHook;
   const disposed = [];

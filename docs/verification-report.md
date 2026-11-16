@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.14.0 automated verification suite and live OpenCode v2.3.0 host acceptance**, evaluated on **16 November 2026** with **Node 26.13.1** and **OpenCode v2.3.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.15.0 automated verification suite and live OpenCode v2.3.0 + Bun 1.4.4 host acceptance**, evaluated on **17 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.3.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** (OpenCode V1 support ended in `v0.14.0`).
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.14.0`
-- **Previous Package Version:** `v0.13.0` (781 passing tests; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **797 / 797 unit, security, telemetry, and regression tests passed**, zero failed, cancelled or skipped
+- **Package Version:** OpenCode Guardian `v0.15.0` (Pure OpenCode V2 `>=2.3.0`)
+- **Previous Package Version:** `v0.14.0` (final release supporting OpenCode V1; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **765 / 765 unit, security, telemetry, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Live V2 Host Acceptance:** **6 / 6 security gates passed** on installed OpenCode v2.3.0 (`/usr/local/bin/opencode`)
-- **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
+- **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode v2.3.0 (`/usr/local/bin/opencode`) + Bun `1.4.4` + packed `.tgz`
+- **Historical Live-Host Dual Acceptance (v0.6.0):** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`)
 
-> v0.14.0 introduces the **Low-I/O Telemetry Architecture** (`telemetry.level: "violations" | "all" | "off"` and `telemetry.maxBytes: 524288`), which reduces disk I/O operations by 90–95% by eliminating high-frequency benign events (`preflight-allowed` on every shell command and `post-inspected` on clean turns) while preserving a full audit trail for all security findings, blocks, warnings, and remediations. It also adds environment variable overrides (`OPENCODE_GUARDIAN_LOG_LEVEL`, `OPENCODE_GUARDIAN_TELEMETRY`), standardized shell output parsing for OpenCode v2.2.7+ (`Exit code: N`, signal terminations), expanded read-only git tools, and verified compatibility with OpenCode v2.3.0.
+> v0.15.0 completes the migration to a **pure OpenCode V2 (`@opencode/plugin >=2.3.0`) & OpenTUI (`>=0.8.4`)** architecture, adds the typed `./rpc` export (`dist/intervention-rpc.js`), registers `shell.hook("create.before")` preflight, isolates `session.fork` / `background` subagents, hardens `StreamLoopWatcher`, `Uint8Array`/`Message` sanitization, multi-stage `splitShellStages` preflight, TUI RPC polling race protection, and Bun `1.4.4` `dist/tui.js` fallback.
 
 ---
 
@@ -289,20 +289,20 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.14.0
+## Automated Source Verification Results — v0.15.0
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 797 tests across all 14 rules, evidence summaries, edit integrity, secret redaction, adapters, low-I/O telemetry, handoff protocol, multilingual subagent progress, degenerative loops, stream loop hardening, preflight, standardized shell exit codes, and OpenCode v2.3.0 compatibility | **797 / 797 PASS** |
+| **Unit & Regression Suite** | 765 tests across all 14 rules, V2 `setup(ctx)` hooks, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, `session.fork`/subagent isolation, evidence summaries, edit integrity, secret redaction, low-I/O telemetry, and handoff protocol | **765 / 765 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
-| **Smoke Test** | V1 plugin initialization, idle inspection and expected remediation | **PASS** |
+| **Smoke Test** | V2 `setup(ctx)` plugin initialization, idle inspection, and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
-| **Lint** | Oxlint (`src` + `tests`, warnings denied; 108 files) | **PASS** |
+| **Lint** | Oxlint (`src` + `tests`, warnings denied; 107 files) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
 | **Production Audit** | `npm audit --omit=dev` | **PASS** (0 vulnerabilities) |
 | **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** (0 critical, tracked upstream chains) |
-| **Packaging Dry Run** | `npm pack --dry-run` (v0.14.0 metadata and 121 files; 208.6 kB compressed tarball) | **PASS** |
-| **Live OpenCode V2 Acceptance** | Real OpenCode v2.3.0 binary (`sandbox/v2-live-acceptance.mjs`) executing all 6 security and lifecycle checks | **6 / 6 PASS** |
+| **Packaging Dry Run** | `npm pack --dry-run` (`v0.15.0` metadata, 116 files; 202.3 kB compressed tarball) | **PASS** |
+| **Live OpenCode V2 Acceptance** | Packed `.tgz` in Node `26.13.1` + Bun `1.4.4`, V2.3.0 server/RPC/TUI, and real `/usr/local/bin/opencode` (`v2.3.0`) (`sandbox/v2-live-acceptance.mjs`) | **10 / 10 PASS** |
 
 ---
 

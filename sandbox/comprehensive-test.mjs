@@ -1,6 +1,11 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import OpencodeGuardian from "../dist/index.js";
+
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-comprehensive-state-"));
+process.env.OPENCODE_GUARDIAN_STATE_DIR = stateDir;
 
 console.log("================================================================================");
 console.log("     OPENCODE-GUARDIAN — COMPREHENSIVE END-TO-END SCENARIO TEST SUITE");
@@ -421,38 +426,70 @@ const SCENARIOS = [
   },
 ];
 
+function toV2Context(messages) {
+  return messages.map((msg) => {
+    const id = msg.info?.id ?? "m";
+    const role = msg.info?.role ?? "user";
+    if (role === "user") {
+      const text = (msg.parts ?? []).filter((p) => p.type === "text").map((p) => p.text).join("\n");
+      return { id, type: "user", text };
+    }
+    return {
+      id,
+      type: "assistant",
+      content: (msg.parts ?? []).map((p) =>
+        p.type === "tool"
+          ? { type: "tool", name: p.tool ?? "bash", state: p.state ?? {} }
+          : { type: p.type ?? "text", text: p.text ?? "" }
+      ),
+    };
+  });
+}
+
 let totalPassed = 0;
 
 for (const sc of SCENARIOS) {
   let promptSent = null;
+  let inspected = false;
+  let emitEvent = null;
 
-  const mockClient = {
+  const mockHost = {
+    location: { directory: sandboxDir },
+    options: { secrets: { enabled: false }, updateNotice: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const next = await new Promise((resolve) => { emitEvent = resolve; });
+            if (next === null) break;
+            yield next;
+          }
+        })();
+      },
+    },
     session: {
-      get: async () => ({ data: { id: "sandbox-session-001" } }),
-      messages: async () => ({ data: sc.messages, error: undefined }),
-      promptAsync: async ({ body }) => {
-        // A display-only Guardian transcript must not overwrite the
-        // synthetic remediation prompt being asserted by this test.
-        const part = body.parts?.[0];
-        if (part?.synthetic === true && body.noReply !== true) {
-          promptSent = part.text;
-        }
-        return { data: {}, error: undefined };
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: undefined }),
+      context: async () => {
+        inspected = true;
+        return toV2Context(sc.messages);
+      },
+      synthetic: async ({ text, resume }) => {
+        if (resume !== false) promptSent = text;
       },
     },
   };
 
-  const hooks = await OpencodeGuardian.server({
-    client: mockClient,
-    directory: sandboxDir,
-  });
+  const cleanup = await OpencodeGuardian.setup(mockHost);
+  emitEvent({ type: "session.idle", data: { sessionID: `test-${sc.id}` } });
 
-  await hooks.event({
-    event: {
-      type: "session.idle",
-      properties: { sessionID: `test-${sc.id}` },
-    },
-  });
+  const deadline = Date.now() + 1500;
+  while ((!inspected || (sc.shouldBlock && !promptSent)) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  if (!sc.shouldBlock) await new Promise((r) => setTimeout(r, 30));
+
+  emitEvent(null);
+  await cleanup?.();
 
   const didBlock = Boolean(promptSent);
 
@@ -472,6 +509,8 @@ for (const sc of SCENARIOS) {
 
   totalPassed++;
 }
+
+fs.rmSync(stateDir, { recursive: true, force: true });
 
 console.log("\n================================================================================");
 console.log(`  ALL ${totalPassed}/${SCENARIOS.length} END-TO-END SCENARIOS VERIFIED SUCCESSFULLY!`);

@@ -5,6 +5,7 @@ export type GuardianMessageKind = "remediation" | "visible";
 const TOKEN_KEY = "opencode-guardian-provenance";
 const KIND_KEY = "opencode-guardian-kind";
 const MAX_SESSION_TOKENS = 64;
+const MAX_PROVENANCE_SESSIONS = 512;
 
 const sessionTokens = new Map<string, Map<string, GuardianMessageKind>>();
 
@@ -17,6 +18,14 @@ export function createGuardianMessageMetadata(
   let tokens = sessionTokens.get(sessionID);
   if (!tokens) {
     tokens = new Map();
+    sessionTokens.set(sessionID, tokens);
+    while (sessionTokens.size > MAX_PROVENANCE_SESSIONS) {
+      const oldestSession = sessionTokens.keys().next().value;
+      if (oldestSession === undefined) break;
+      sessionTokens.delete(oldestSession);
+    }
+  } else {
+    sessionTokens.delete(sessionID);
     sessionTokens.set(sessionID, tokens);
   }
   tokens.set(token, kind);

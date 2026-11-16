@@ -17,99 +17,189 @@ function directory(t) {
   return root;
 }
 
-const options = { notifications: { enabled: false }, updateNotice: { enabled: false } };
+const options = { notifications: { enabled: false }, updateNotice: { enabled: false }, secrets: { enabled: false } };
 
-test('V1 native session.deleted clears cached capability and task guidance', async (t) => {
+test('V2 native session.deleted clears cached capability and task guidance', async (t) => {
   const root = directory(t);
-  const hooks = await Guardian.server({ directory: root, client: { session: {} } }, options);
-  t.after(() => hooks.dispose());
-  await hooks['chat.message']({ sessionID: 'deleted', messageID: 'human' }, {
-    parts: [{ type: 'text', text: 'Implement the change, run all tests and review the source.' }],
+  let promptHook;
+  let contextHook;
+  let emitEvent;
+  const host = {
+    location: { directory: root },
+    options,
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const next = await new Promise((resolve) => { emitEvent = resolve; });
+            if (next === null) break;
+            yield next;
+          }
+        })();
+      },
+    },
+    session: {
+      async context() { return []; },
+      async synthetic() {},
+      async hook(name, handler) {
+        if (name === 'prompt') promptHook = handler;
+        if (name === 'context') contextHook = handler;
+        return { dispose() {} };
+      },
+    },
+  };
+  const cleanup = await Guardian.setup(host);
+  t.after(() => cleanup());
+  await promptHook({
+    sessionID: 'deleted',
+    prompt: { text: 'Implement the change, run all tests and review the source.' },
   });
   cacheAgentCapability('deleted', { capability: 'write-allowed', evidence: { reasons: [] } });
   const before = { system: [] };
-  await hooks['experimental.chat.system.transform']({ sessionID: 'deleted' }, before);
+  await contextHook({ sessionID: 'deleted', system: before.system });
   assert.ok(before.system.length > 0, 'fixture must first establish task guidance');
-  // @opencode-ai/sdk@1.18.34 EventSessionDeleted uses properties.info.
-  await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 'deleted' } } } });
+  emitEvent({ type: 'session.deleted', data: { sessionID: 'deleted' } });
+  await new Promise((r) => setTimeout(r, 30));
   assert.equal(getCachedAgentCapability('deleted'), undefined);
   const after = { system: [] };
-  await hooks['experimental.chat.system.transform']({ sessionID: 'deleted' }, after);
+  await contextHook({ sessionID: 'deleted', system: after.system });
   assert.deepEqual(after.system, []);
+  emitEvent(null);
 });
 
 for (const cancellation of ['session.deleted', 'new human prompt', 'attachment-only prompt']) {
-  test(`V1 ${cancellation} cancels an in-flight idle inspection`, async (t) => {
+  test(`V2 ${cancellation} cancels an in-flight idle inspection`, async (t) => {
     const root = directory(t);
     const entered = Promise.withResolvers();
     const release = Promise.withResolvers();
     const prompts = [];
-    const hooks = await Guardian.server({ directory: root, client: { session: {
-      async get() { return { data: { id: 'session' } }; },
-      async messages() { entered.resolve(); return release.promise; },
-      async promptAsync(input) { prompts.push(input); return {}; },
-    } } }, options);
-    t.after(() => hooks.dispose());
-    const handling = hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'session' } } });
+    let promptHook;
+    let emitEvent;
+    const host = {
+      location: { directory: root },
+      options,
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              const next = await new Promise((resolve) => { emitEvent = resolve; });
+              if (next === null) break;
+              yield next;
+            }
+          })();
+        },
+      },
+      session: {
+        async get() { return { id: 'session', parentID: undefined }; },
+        async context() { entered.resolve(); return release.promise; },
+        async synthetic(input) { prompts.push(input); },
+        async hook(name, handler) {
+          if (name === 'prompt') promptHook = handler;
+          return { dispose() {} };
+        },
+      },
+    };
+    const cleanup = await Guardian.setup(host);
+    t.after(() => cleanup());
+    emitEvent({ type: 'session.idle', data: { sessionID: 'session' } });
     await entered.promise;
     if (cancellation === 'session.deleted') {
-      await hooks.event({ event: { type: cancellation, properties: { info: { id: 'session' } } } });
+      emitEvent({ type: 'session.deleted', data: { sessionID: 'session' } });
+      await new Promise((r) => setTimeout(r, 20));
     } else {
-      await hooks['chat.message']({ sessionID: 'session', messageID: 'new-human' }, {
-        parts: cancellation === 'attachment-only prompt'
-          ? [{ type: 'file', mime: 'image/png', url: 'data:image/png;base64,' }]
-          : [{ type: 'text', text: 'Continue with the new task.' }],
+      await promptHook({
+        sessionID: 'session',
+        prompt: cancellation === 'attachment-only prompt'
+          ? { text: '' }
+          : { text: 'Continue with the new task.' },
       });
     }
-    release.resolve({ data: [
-      { info: { id: 'old-human', role: 'user' }, parts: [{ type: 'text', text: 'Complete this task.' }] },
-      { info: { id: 'old-assistant', role: 'assistant' }, parts: [{ type: 'text', text: 'I am sorry.' }] },
-    ] });
-    await handling;
+    release.resolve([
+      { id: 'old-human', type: 'user', text: 'Complete this task.' },
+      { id: 'old-assistant', type: 'assistant', content: [{ type: 'text', text: 'I am sorry.' }] },
+    ]);
+    await new Promise((r) => setTimeout(r, 40));
     assert.deepEqual(prompts, [], 'stale assistant output must not trigger a new model turn');
+    emitEvent(null);
   });
 }
 
-for (const parts of [
-  [{ type: 'text', text: 'Explain the architecture.' }],
-  [{ type: 'file', mime: 'image/png', url: 'data:image/png;base64,' }],
+for (const prompt of [
+  { label: 'text', text: 'Explain the architecture.' },
+  { label: 'empty', text: '' },
 ]) {
-  test(`V1 new ${parts[0].type} prompt clears guidance from the previous human task`, async (t) => {
+  test(`V2 new ${prompt.label} prompt clears guidance from the previous human task`, async (t) => {
     const root = directory(t);
-    const hooks = await Guardian.server({ directory: root, client: { session: {} } }, options);
-    t.after(() => hooks.dispose());
-    await hooks['chat.message']({ sessionID: 'session', messageID: 'human-1' }, {
-      parts: [{ type: 'text', text: 'Implement the change, run all tests and review the source.' }],
+    let promptHook;
+    let contextHook;
+    const host = {
+      location: { directory: root },
+      options,
+      event: { subscribe: () => (async function* () {})() },
+      session: {
+        async context() { return []; },
+        async synthetic() {},
+        async hook(name, handler) {
+          if (name === 'prompt') promptHook = handler;
+          if (name === 'context') contextHook = handler;
+          return { dispose() {} };
+        },
+      },
+    };
+    const cleanup = await Guardian.setup(host);
+    t.after(() => cleanup());
+    await promptHook({
+      sessionID: 'session',
+      prompt: { text: 'Implement the change, run all tests and review the source.' },
     });
-    await hooks['chat.message']({ sessionID: 'session', messageID: 'human-2' }, { parts });
+    await promptHook({ sessionID: 'session', prompt: { text: prompt.text } });
     const output = { system: [] };
-    await hooks['experimental.chat.system.transform']({ sessionID: 'session' }, output);
+    await contextHook({ sessionID: 'session', system: output.system });
     assert.deepEqual(output.system, []);
   });
 }
 
-test('V1 session deletion prevents a suspended capability query from reviving its cache', async (t) => {
+test('V2 session deletion prevents a suspended capability query from reviving its cache', async (t) => {
   const root = directory(t);
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
-  const hooks = await Guardian.server({ directory: root, client: {
-    app: { async agents() { entered.resolve(); return release.promise; } },
-    session: {
-      async get() { return { data: { id: 'child', parentID: 'parent' } }; },
-      async messages() { return { data: [
-        { info: { id: 'human', role: 'user' }, parts: [{ type: 'text', text: 'Complete the task.' }] },
-        { info: { id: 'assistant', role: 'assistant', agent: 'worker' }, parts: [{ type: 'text', text: 'I am sorry.' }] },
-      ] }; },
-      async promptAsync() { assert.fail('deleted child must not receive remediation'); },
+  let emitEvent;
+  const host = {
+    location: { directory: root },
+    options,
+    agent: { async list() { entered.resolve(); return release.promise; } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const next = await new Promise((resolve) => { emitEvent = resolve; });
+            if (next === null) break;
+            yield next;
+          }
+        })();
+      },
     },
-  } }, options);
-  t.after(() => hooks.dispose());
-  const handling = hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'child' } } });
+    session: {
+      async get() { return { id: 'child', parentID: 'parent' }; },
+      async context() {
+        return [
+          { id: 'human', type: 'user', text: 'Complete the task.' },
+          { id: 'assistant', type: 'assistant', agent: 'worker', content: [{ type: 'text', text: 'I am sorry.' }] },
+        ];
+      },
+      async synthetic() { assert.fail('deleted child must not receive remediation'); },
+    },
+  };
+  const cleanup = await Guardian.setup(host);
+  t.after(() => cleanup());
+  emitEvent({ type: 'session.idle', data: { sessionID: 'child' } });
   await entered.promise;
-  await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 'child' } } } });
-  release.resolve({ data: [{ name: 'worker', permission: { edit: 'allow' } }] });
-  await handling;
+  emitEvent({ type: 'session.deleted', data: { sessionID: 'child' } });
+  await new Promise((r) => setTimeout(r, 20));
+  release.resolve([{ name: 'worker', permission: [{ permission: 'edit', pattern: '*', action: 'allow' }] }]);
+  await new Promise((r) => setTimeout(r, 40));
   assert.equal(getCachedAgentCapability('child'), undefined);
+  emitEvent(null);
 });
 
 for (const field of ['password', 'metadata', 'cause', 'errors']) {

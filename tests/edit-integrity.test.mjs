@@ -91,29 +91,14 @@ test('strict file preflight rejects executable truncation placeholders but permi
   assert.equal(evaluatePreflight('write_file', { path: 'README.md', content: 'Example:\n```ts\n// ... existing code unchanged ...\n```' }), undefined);
 });
 
-for (const version of ['v1', 'v2']) test(`${version} adapter delivers observed edit integrity to idle engine inspection`, async t => {
+test('v2 adapter delivers observed edit integrity to idle engine inspection', async t => {
   for (const capture of [true, false]) {
     const dir = project(t);
     fs.writeFileSync(path.join(dir, 'opencode-guardian.json'), JSON.stringify({ secrets: { enabled: false }, updateNotice: { enabled: false } }));
     const input = { path: 'src/a.ts', content: 'export function alpha() { return 1; }' };
     fs.writeFileSync(path.join(dir, input.path), before);
-    const messages = [{ info: { id: 'u', role: 'user' }, parts: [{ type: 'text', text: 'Fix alpha.' }] },
-      { info: { id: 'a', role: 'assistant' }, parts: [{ type: 'tool', tool: 'write_file', callID: 'w', state: { status: 'completed', input } }] }];
     let cleanup;
-    if (version === 'v1') {
-      const hooks = await Guardian.server({ directory: dir, client: { session: {
-        async get() { return { data: { id: 's' } }; },
-        async messages() { return { data: messages }; },
-        async promptAsync() { assert.fail('advisory content loss must not start remediation'); },
-      } } });
-      cleanup = hooks.dispose;
-      try {
-        if (capture) await hooks['tool.execute.before']({ tool: 'write_file', sessionID: 's', callID: 'w' }, { args: input });
-        fs.writeFileSync(path.join(dir, input.path), input.content);
-        await hooks['tool.execute.after']({ tool: 'write_file', sessionID: 's', callID: 'w', args: input }, { output: 'written', metadata: {} });
-        await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 's' } } });
-      } finally { await cleanup(); }
-    } else {
+    {
       const callbacks = new Map();
       let release;
       const idle = new Promise(resolve => { release = resolve; });

@@ -222,8 +222,8 @@ function normalizeCommitMessage(value: string): string {
   return message.trim();
 }
 
-export function extractGitCommitMessage(command: string): string | undefined {
-  const match = /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+commit\b([^\n;&|]*)/i.exec(command);
+function extractGitCommitMessageFromStage(stage: string): string | undefined {
+  const match = /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+commit\b([^\n]*)/i.exec(stage);
   if (!match) return undefined;
   const words = shellWords(match[1] ?? "");
 
@@ -249,11 +249,25 @@ export function extractGitCommitMessage(command: string): string | undefined {
   return undefined;
 }
 
-export function isLazyCommitMessage(command: string): boolean {
-  const msg = extractGitCommitMessage(command);
-  if (msg === undefined) return false;
+export function extractGitCommitMessage(command: string): string | undefined {
+  for (const stage of splitShellStages(command).flat()) {
+    const msg = extractGitCommitMessageFromStage(stage);
+    if (msg !== undefined) return msg;
+  }
+  return undefined;
+}
+
+function isCommitMessageLazy(msg: string): boolean {
   if (msg.length < 4) return true;
   return /^(?:fix|update|wip|done|test|temp|changes|commit|asdf|minor|stuff|work|misc|foo|bar|checkpoint|save|tmp|quick\s*fix|bug\s*fix|hotfix)$/i.test(msg);
+}
+
+export function isLazyCommitMessage(command: string): boolean {
+  for (const stage of splitShellStages(command).flat()) {
+    const msg = extractGitCommitMessageFromStage(stage);
+    if (msg !== undefined && isCommitMessageLazy(msg)) return true;
+  }
+  return false;
 }
 
 function npmPackageNameFromSpec(spec: string): string | undefined {
@@ -288,14 +302,16 @@ function suspiciousNpmPackageName(name: string): boolean {
 }
 
 export function isHallucinatedOrMalformedPackageInstall(command: string): boolean {
-  const trimmed = command.trim();
-  const npmMatch = /(?:^|[;&|]\s*)(?:sudo\s+)?(?:npm\s+(?:i|install|add)|pnpm\s+add|yarn\s+add)\s+([^\n;&|]+)/i.exec(trimmed);
-  if (!npmMatch?.[1]) return false;
+  for (const stage of splitShellStages(command).flat()) {
+    const trimmed = stage.trim();
+    const npmMatch = /^(?:sudo\s+)?(?:npm\s+(?:i|install|add)|pnpm\s+(?:i|install|add)|yarn\s+add|bun\s+(?:i|install|add))\s+([^\n]+)/i.exec(trimmed);
+    if (!npmMatch?.[1]) continue;
 
-  for (const arg of shellWords(npmMatch[1])) {
-    if (!arg || arg.startsWith("-")) continue;
-    const packageName = npmPackageNameFromSpec(arg);
-    if (packageName && suspiciousNpmPackageName(packageName)) return true;
+    for (const arg of shellWords(npmMatch[1])) {
+      if (!arg || arg.startsWith("-")) continue;
+      const packageName = npmPackageNameFromSpec(arg);
+      if (packageName && suspiciousNpmPackageName(packageName)) return true;
+    }
   }
   return false;
 }

@@ -191,7 +191,7 @@ test("guardian-sq handoff: historical refusal does NOT invent a user choice hand
   assert.equal(engine.sessionState.getActiveHandoff(sessionID), undefined);
 });
 
-test("guardian-sq handoff: V1 remediation transport stamps synthetic Guardian provenance", async (t) => {
+test("guardian-sq handoff: V2 remediation transport stamps synthetic Guardian provenance", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-handoff-provenance-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(
@@ -205,58 +205,47 @@ test("guardian-sq handoff: V1 remediation transport stamps synthetic Guardian pr
 
   const sent = [];
   const messages = [
+    { id: "u-1", type: "user", text: "Implement the requested feature now." },
     {
-      info: { id: "u-1", role: "user" },
-      parts: [{ type: "text", text: "Implement the requested feature now." }],
-    },
-    {
-      info: { id: "a-1", role: "assistant" },
-      parts: [{ type: "text", text: "Would you like me to proceed with implementing this?" }],
+      id: "a-1",
+      type: "assistant",
+      content: [{ type: "text", text: "Would you like me to proceed with implementing this?" }],
     },
   ];
 
-  const hooks = await OpencodeGuardian.server({
-    directory,
-    client: {
-      session: {
-        async get({ path: requestPath }) {
-          return { data: { id: requestPath.id, parentID: undefined } };
-        },
-        async messages() {
-          return { data: messages };
-        },
-        async promptAsync(input) {
-          sent.push(input);
-          return { data: {}, error: undefined };
-        },
+  let releaseEvent;
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory },
+    options: { secrets: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await new Promise((resolve) => { releaseEvent = resolve; });
+          yield { type: "session.idle", data: { sessionID: "sess-provenance-v2" } };
+          await new Promise((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
       },
     },
-  });
-  t.after(async () => hooks.dispose?.());
-
-  await hooks.event?.({
-    event: {
-      type: "session.idle",
-      properties: { sessionID: "sess-provenance-v1" },
+    session: {
+      async get() { return { id: "sess-provenance-v2", parentID: undefined }; },
+      async context() { return messages; },
+      async synthetic(input) { sent.push(input); },
     },
   });
+  t.after(async () => cleanup?.());
 
-  const remediation = sent.find(
-    (request) => request.body?.parts?.[0]?.synthetic === true
-  );
-  const visible = sent.find(
-    (request) =>
-      request.body?.noReply === true &&
-      request.body?.parts?.[0]?.ignored === true &&
-      request.body?.parts?.[0]?.metadata?.["opencode-guardian-visible"] === true
-  );
+  releaseEvent();
+  for (let i = 0; i < 60 && sent.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 15));
+  }
+
+  const remediation = sent.find((request) => request.resume === true);
   assert.ok(remediation);
-  const part = remediation.body.parts[0];
-  assert.equal(part?.type, "text");
-  assert.equal(part?.synthetic, true);
-  assert.equal(part?.metadata?.["opencode-guardian"], true);
-  assert.ok(visible);
-  assert.equal(visible.body.parts[0].metadata?.["opencode-guardian"], true);
+  assert.equal(remediation.metadata?.["opencode-guardian"], true);
+  assert.equal(remediation.metadata?.["opencode-guardian-kind"], "remediation");
 });
 
 test("guardian-sq handoff: non-question tools like terraform_plan do NOT satisfy handoff", async () => {

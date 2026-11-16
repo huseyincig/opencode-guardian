@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import TuiPlugin, { registerGuardianV1Commands,
-  registerGuardianV2Commands } from "../dist/tui.js";
+import TuiPlugin, { registerGuardianV2Commands } from "../dist/tui.js";
 import RootTui, { default as LocalPathTui } from "../tui.js";
+import OpencodeGuardian from "../dist/index.js";
+import * as RpcPlugin from "../dist/intervention-rpc.js";
 
 test("V2 TUI registers additive sidebar and main-conversation intervention slots", () => {
   const claims = [];
@@ -33,70 +34,19 @@ test("V2 TUI registers additive sidebar and main-conversation intervention slots
   assert.equal(disposed, 2);
 });
 
-test("adaptive TUI exports every function advertised by its type declarations", () => {
-  assert.equal(typeof registerGuardianV1Commands, "function");
+test("V2 TUI exports pure V2 entrypoint and intervention RPC export exists", () => {
   assert.equal(typeof registerGuardianV2Commands, "function");
-  assert.equal(typeof TuiPlugin.tui, "function");
+  assert.equal(TuiPlugin.tui, undefined);
+  assert.equal(TuiPlugin.server, undefined);
+  assert.equal(OpencodeGuardian.server, undefined);
+  assert.notEqual(typeof RpcPlugin, "undefined");
   assert.equal(typeof TuiPlugin.setup, "function");
 });
 
-test("root tui.js resolves the same dual-mode sidebar plugin for local path loading", () => {
+test("root tui.js resolves the same V2 sidebar plugin for local path loading", () => {
   assert.equal(RootTui, TuiPlugin);
   assert.equal(LocalPathTui, TuiPlugin);
   assert.equal(RootTui.id, "opencode-guardian.tui");
-});
-
-
-test("V1 TUI registers sidebar_content as an additive slot and renders the Guardian sidebar", async () => {
-  let claim;
-  let calls = 0;
-  const registration = await TuiPlugin.tui({
-    state: { path: { directory: process.cwd() } },
-    slots: {
-      register(input) { calls++; claim = input; return "guardian-v1-slot"; },
-    },
-  });
-  assert.equal(registration, undefined);
-  assert.equal(calls, 1);
-  assert.equal(claim.order, 600);
-  assert.equal(typeof claim.slots.sidebar_content, "function");
-  assert.equal(claim.id, undefined, "V1 host assigns slot IDs");
-  // Full rendering belongs to the actual TUI host; mock tests verify registration.
-  assert.equal(TuiPlugin.server, undefined);
-});
-
-test("V1 and V2 sidebar registration APIs coexist in the same package entrypoint", async () => {
-  let v1 = false;
-  let v2 = false;
-  await TuiPlugin.tui({ state: { path: { directory: process.cwd() } }, slots: { register(input) {
-    v1 = typeof input.slots.sidebar_content === "function";
-    return "guardian-v1-slot";
-  } } });
-  let v2Conversation = false;
-  const dispose = TuiPlugin.setup({ ui: { slot(input) {
-    v2 ||= input.append === "sidebar.content";
-    v2Conversation ||= input.append === "session.composer.top";
-    return () => {};
-  } } });
-  assert.equal(v1, true);
-  assert.equal(v2, true);
-  assert.equal(v2Conversation, true);
-  assert.equal(typeof dispose, "function");
-});
-
-test("V1 TUI honors the same disabled Guardian configuration", async (t) => {
-  const fs = await import("node:fs");
-  const os = await import("node:os");
-  const path = await import("node:path");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v1-tui-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(dir, "opencode-guardian.json"), '{"enabled":false}');
-  let called = false;
-  await TuiPlugin.tui({
-    state: { path: { directory: dir } },
-    slots: { register() { called = true; } },
-  });
-  assert.equal(called, false);
 });
 
 test("V2 TUI honors disabled Guardian configuration", async (t) => {
@@ -131,7 +81,7 @@ test("TUI build uses Solid Universal and shares the OpenCode host runtime", asyn
   assert.match(standalone, /@opentui\/solid/);
   assert.match(loader, /tui-runtime\.js/);
   assert.match(loader, /tui-standalone\.js/);
-  assert.equal(typeof TuiPlugin.tui, "function");
+  assert.equal(TuiPlugin.tui, undefined);
   assert.equal(typeof TuiPlugin.setup, "function");
 });
 
@@ -161,16 +111,21 @@ test("Guardian sidebar is compact by default and contains expandable details", a
   assert.doesNotMatch(runtime, /@opentui\/solid\/jsx-runtime/);
 });
 
-test("dual-mode SDK entrypoints and Node package contract", async () => {
+test("V2 SDK entrypoints and Node package contract", async () => {
   const { readFileSync } = await import("node:fs");
   const { readFile } = await import("node:fs/promises");
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.engines.node, ">=22.0.0");
-  const v1 = readFileSync(new URL(import.meta.resolve("@opencode-ai/plugin/tui")), "utf8");
+  assert.equal(pkg.peerDependencies["@opencode/plugin"], ">=2.3.0");
+  assert.equal(pkg.peerDependencies["@opentui/core"], ">=0.8.4");
+  assert.equal(pkg.peerDependencies["@opentui/solid"], ">=0.8.4");
+  assert.equal(pkg.exports["."].import, "./dist/index.js");
+  assert.equal(pkg.exports["./tui"].import, "./dist/tui.js");
+  assert.equal(pkg.exports["./rpc"].import, "./dist/intervention-rpc.js");
+  assert.equal(pkg.exports["./server"], undefined);
   const v2 = readFileSync(new URL(import.meta.resolve("@opencode/plugin/tui")), "utf8");
-  assert.equal(typeof v1, "string");
   assert.equal(typeof v2, "string");
-  assert.equal(typeof TuiPlugin.tui, "function");
+  assert.equal(TuiPlugin.tui, undefined);
   assert.equal(typeof TuiPlugin.setup, "function");
 });
 
@@ -178,8 +133,8 @@ test("dual-mode SDK entrypoints and Node package contract", async () => {
 test("V2 accent never relies on the possibly transparent action background", async () => {
   const { readFileSync } = await import("node:fs");
   const source = readFileSync(new URL("../src/tui.tsx", import.meta.url), "utf8");
-  assert.match(source, /accent: context\.theme\.status\?\.success\?\.base \?\? context\.theme\.text\.base/);
-  assert.doesNotMatch(source, /accent: context\.theme\.background\.action\.primary\.base/);
+  assert.match(source, /accent: context\.theme\?\.status\?\.success\?\.base \?\? context\.theme\?\.text\?\.base/);
+  assert.doesNotMatch(source, /accent: context\.theme\?\.background\?\.action\?\.primary\?\.base/);
 });
 
 test("available update is the first sidebar row in both collapsed and expanded views", async () => {

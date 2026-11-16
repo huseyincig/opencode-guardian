@@ -24,7 +24,7 @@ export interface GuardianEvent {
   kind: GuardianEventKind;
   action?: GuardianAction;
   outcome?: GuardianOutcome;
-  runtime?: "v1" | "v2";
+  runtime?: "v2";
   preflight?: PreflightState;
   /** Only a 16-character SHA-256 fingerprint, never the raw session ID. */
   session?: string;
@@ -108,7 +108,7 @@ function safeEvent(event: Omit<GuardianEvent, "at">): GuardianEvent {
     at: new Date().toISOString(), id: randomUUID(),
     kind: event.kind, action, outcome,
   };
-  if (event.runtime === "v1" || event.runtime === "v2") safe.runtime = event.runtime;
+  if (event.runtime === "v2") safe.runtime = event.runtime;
   if (event.preflight === "active" || event.preflight === "disabled" || event.preflight === "unavailable") {
     safe.preflight = event.preflight;
   }
@@ -221,13 +221,21 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
   try {
     const dir = guardianStateDirectory(directoryArg);
     const isProjectDirectory = Boolean(directoryArg && !process.env.OPENCODE_GUARDIAN_STATE_DIR);
-    if (!verifiedStateDirs.has(dir) || !fs.existsSync(dir)) {
+    let stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!stat) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const stat = fs.lstatSync(dir);
-      if (!stat.isDirectory() || (process.platform !== "win32" &&
-          ((!isProjectDirectory && (stat.mode & 0o077) !== 0) ||
-          (typeof process.getuid === "function" && stat.uid !== process.getuid())))) {
-        throw new Error("Guardian state directory is not private to the current user");
+      stat = fs.lstatSync(dir);
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== "win32" &&
+        ((!isProjectDirectory && (stat.mode & 0o077) !== 0) ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())))) {
+      verifiedStateDirs.delete(dir);
+      throw new Error("Guardian state directory is not private to the current user");
+    }
+    if (!verifiedStateDirs.has(dir)) {
+      if (verifiedStateDirs.size >= 128) {
+        const oldest = verifiedStateDirs.values().next().value;
+        if (oldest !== undefined) verifiedStateDirs.delete(oldest);
       }
       verifiedStateDirs.add(dir);
     }

@@ -52,11 +52,6 @@ export interface NormalizedAgentInput {
   tools?: Record<string, boolean> | undefined;
   permission?: unknown;
   permissions?: unknown;
-  v1Permission?: {
-    edit?: string | undefined;
-    bash?: string | Record<string, string> | undefined;
-    [key: string]: unknown;
-  } | undefined;
   v2Permissions?: V2PermissionRule[] | undefined;
 }
 
@@ -108,41 +103,6 @@ function resolveV2ChannelEffect(
   return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
 }
 
-function resolveV1BashEffect(
-  bash: string | Record<string, string> | undefined
-): "allow" | "deny" | "ask" | "restricted" | "unset" {
-  if (typeof bash === "string") {
-    const norm = bash.toLowerCase().trim();
-    return norm === "allow" || norm === "deny" || norm === "ask" ? norm : "unset";
-  }
-
-  if (bash && typeof bash === "object" && !Array.isArray(bash)) {
-    let generalEffect: "allow" | "deny" | "ask" | undefined;
-    let hasScopedRule = false;
-    let scopedOverride = false;
-    for (const [pattern, value] of Object.entries(bash)) {
-      if (typeof value !== "string") continue;
-      const effect = value.toLowerCase().trim();
-      if (effect !== "allow" && effect !== "deny" && effect !== "ask") continue;
-      // As in V2, only a final broad rule proves a uniform channel effect.
-      // A later scoped exception must not authorize autonomous remediation.
-      if (pattern === "*") {
-        generalEffect = effect;
-        scopedOverride = false;
-      } else {
-        hasScopedRule = true;
-        if (generalEffect !== undefined && effect !== generalEffect) {
-          scopedOverride = true;
-        }
-      }
-    }
-    if (scopedOverride) return "restricted";
-    return generalEffect ?? (hasScopedRule ? "restricted" : "unset");
-  }
-
-  return "unset";
-}
-
 /**
  * Pure policy evaluation to classify mutation capability.
  */
@@ -152,7 +112,7 @@ export function evaluateAgentMutationProfile(
   const reasons: string[] = [];
   const tools = input.tools ?? {};
 
-  // Normalize v1 and v2 permissions from aliases if provided
+  // Normalize V2 permissions from aliases if provided
   const v2Permissions: Array<{
     permission?: string | undefined;
     action?: string | undefined;
@@ -179,26 +139,6 @@ export function evaluateAgentMutationProfile(
         }>)
       : undefined);
 
-  const v1Permission: {
-    edit?: string | undefined;
-    bash?: string | Record<string, string> | undefined;
-    [key: string]: unknown;
-  } | undefined =
-    input.v1Permission ??
-    (!Array.isArray(input.permission) && input.permission && typeof input.permission === "object"
-      ? (input.permission as {
-          edit?: string | undefined;
-          bash?: string | Record<string, string> | undefined;
-          [key: string]: unknown;
-        })
-      : !Array.isArray(input.permissions) && input.permissions && typeof input.permissions === "object"
-      ? (input.permissions as {
-          edit?: string | undefined;
-          bash?: string | Record<string, string> | undefined;
-          [key: string]: unknown;
-        })
-      : undefined);
-
   // 1. Resolve Edit channel
   let editEffect: "allow" | "deny" | "ask" | "restricted" | "disabled" | "unset" = "unset";
   if (tools.edit === false) {
@@ -207,12 +147,6 @@ export function evaluateAgentMutationProfile(
   } else if (v2Permissions) {
     editEffect = resolveV2ChannelEffect(v2Permissions, "edit");
     reasons.push(`v2 edit permission: ${editEffect}`);
-  } else if (v1Permission?.edit) {
-    const norm = String(v1Permission.edit).toLowerCase().trim();
-    if (norm === "allow" || norm === "deny" || norm === "ask") {
-      editEffect = norm;
-    }
-    reasons.push(`v1 edit permission: ${editEffect}`);
   }
 
   // 2. Resolve Shell/Bash channel
@@ -226,9 +160,6 @@ export function evaluateAgentMutationProfile(
   } else if (v2Permissions) {
     bashEffect = resolveV2ChannelEffect(v2Permissions, "shell");
     reasons.push(`v2 shell permission: ${bashEffect}`);
-  } else if (v1Permission?.bash !== undefined) {
-    bashEffect = resolveV1BashEffect(v1Permission.bash);
-    reasons.push(`v1 bash permission: ${bashEffect}`);
   }
 
   // 3. Inspect other active tools
@@ -262,19 +193,8 @@ export function evaluateAgentMutationProfile(
         mutatingToolRequiresApproval = true;
       }
     } else {
-      // An enabled tool is availability, not authorization. Respect its
-      // explicit V1 rule and the shared edit/bash permission where applicable.
-      const setting = v1Permission?.[mTool] ??
-        (isFileMutationTool(mTool) ? v1Permission?.edit : v1Permission?.bash) ??
-        v1Permission?.['*'];
-      const effect = resolveV1BashEffect(
-        typeof setting === 'string' ||
-          (setting && typeof setting === 'object' && !Array.isArray(setting))
-          ? setting as string | Record<string, string>
-          : undefined
-      );
-      if (effect === 'allow' || effect === 'unset') mutatingToolAllowed = true;
-      else if (effect === 'ask') mutatingToolRequiresApproval = true;
+      // An enabled tool is availability, not authorization.
+      mutatingToolRequiresApproval = true;
     }
   }
 
@@ -381,6 +301,7 @@ export function isWriteCapableAgent(context: {
 }
 
 // Session-scoped capability and live permission-rule caches.
+const MAX_CAPABILITY_CACHE_SESSIONS = 512;
 const sessionCapabilityCache = new Map<string, AgentMutationProfile>();
 const sessionV2PermissionCache = new Map<string, V2PermissionRule[]>();
 
@@ -390,17 +311,29 @@ export function getCachedAgentCapability(sessionID: string): AgentMutationProfil
 }
 
 export function cacheAgentCapability(sessionID: string, profile: AgentMutationProfile): void {
+  sessionCapabilityCache.delete(sessionID);
   sessionCapabilityCache.set(sessionID, structuredClone(profile));
+  while (sessionCapabilityCache.size > MAX_CAPABILITY_CACHE_SESSIONS) {
+    const oldest = sessionCapabilityCache.keys().next().value;
+    if (oldest === undefined) break;
+    sessionCapabilityCache.delete(oldest);
+  }
 }
 
 export function cacheV2SessionPermissions(
   sessionID: string,
   permissions: readonly V2PermissionRule[]
 ): void {
+  sessionV2PermissionCache.delete(sessionID);
   sessionV2PermissionCache.set(
     sessionID,
     permissions.map((rule) => ({ ...rule }))
   );
+  while (sessionV2PermissionCache.size > MAX_CAPABILITY_CACHE_SESSIONS) {
+    const oldest = sessionV2PermissionCache.keys().next().value;
+    if (oldest === undefined) break;
+    sessionV2PermissionCache.delete(oldest);
+  }
   sessionCapabilityCache.delete(sessionID);
 }
 
@@ -418,63 +351,6 @@ export function clearAgentCapability(sessionID: string): void {
 export function clearAllAgentCapabilities(): void {
   sessionCapabilityCache.clear();
   sessionV2PermissionCache.clear();
-}
-
-/**
- * Resolves capability for a V1 agent via the V1 client.
- */
-export async function resolveV1AgentCapability(
-  client: {
-    app?: {
-      agents?: (...args: any[]) => Promise<any>;
-    } | undefined;
-  },
-  directory: string,
-  agentName?: string | undefined,
-  messageTools?: Record<string, boolean> | undefined
-): Promise<AgentMutationProfile> {
-  if (!agentName) {
-    return {
-      capability: "unknown",
-      evidence: { reasons: ["no agent name provided"] },
-    };
-  }
-
-  try {
-    if (typeof client.app?.agents === "function") {
-      const response = await client.app.agents({ query: { directory } });
-      if (Array.isArray(response.data)) {
-        const found = response.data.find((a: any) => a.name === agentName);
-        if (found) {
-          const mergedTools = {
-            ...found.tools,
-            ...messageTools,
-          };
-          return evaluateAgentMutationProfile({
-            name: found.name,
-            v1Permission: found.permission,
-            tools: mergedTools,
-          });
-        }
-      }
-    }
-  } catch {
-    return {
-      capability: "unknown",
-      evidence: {
-        agentName,
-        reasons: ["client.app.agents query failed"],
-      },
-    };
-  }
-
-  return {
-    capability: "unknown",
-    evidence: {
-      agentName,
-      reasons: ["agent not found in V1 agent list"],
-    },
-  };
 }
 
 /**
@@ -535,8 +411,13 @@ export async function resolveV2AgentCapability(
       const agentList = await context.agent.list(
         resolvedDirectory ? { location: { directory: resolvedDirectory } } : undefined
       );
-      if (Array.isArray(agentList.data)) {
-        const found = agentList.data.find(
+      const agents = Array.isArray(agentList)
+        ? agentList
+        : Array.isArray(agentList?.data)
+        ? agentList.data
+        : undefined;
+      if (agents) {
+        const found = agents.find(
           (a: any) => a?.name === resolvedAgentName || a?.id === resolvedAgentName
         );
         if (found) {

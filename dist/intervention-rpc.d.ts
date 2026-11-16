@@ -12,6 +12,7 @@ export declare const GUARDIAN_INTERVENTION_RPC_DEFINITION: {
                     readonly sessionID: {
                         readonly type: "string";
                         readonly minLength: 1;
+                        readonly maxLength: 256;
                     };
                 };
                 readonly required: readonly ["sessionID"];
@@ -48,6 +49,7 @@ export declare const GUARDIAN_INTERVENTION_RPC_DEFINITION: {
                     readonly sessionID: {
                         readonly type: "string";
                         readonly minLength: 1;
+                        readonly maxLength: 256;
                     };
                 };
                 readonly additionalProperties: false;

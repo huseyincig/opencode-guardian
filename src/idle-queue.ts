@@ -29,6 +29,7 @@ export function createIdleQueue(signal: AbortSignal, onError: () => void) {
         else entries.delete(sessionID);
       });
     }, 10);
+    (entry.timer as { unref?: () => void }).unref?.();
   };
   return {
     enqueue(sessionID: string, job: Job): void {

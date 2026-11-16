@@ -41,28 +41,6 @@ test("strict preflight blocks elevated shell and dangerous process starts", () =
   assert.equal(evaluatePreflight("mcp__Node_Command__process_start",
     { executable: "/bin/sh", args: [] }), "uninspectable-shell-input");
 });
-test("V1 native idle transfers real after-hook snapshots", async (t) => {
-  const root = fixture(t);
-  fs.writeFileSync(path.join(root, "src.js"), "export const value=1;");
-  let snapshots;
-  const original = GuardEngine.prototype.inspect;
-  GuardEngine.prototype.inspect = async (_id, _dir, _msgs, data) => {
-    snapshots = data; return { decision: "pass", results: [] };
-  };
-  t.after(() => { GuardEngine.prototype.inspect = original; });
-  const hooks = await Guardian.server({
-    directory: root,
-    client: { session: { messages: async () => ({ data: [] }) } },
-  });
-  t.after(async () => { await hooks.dispose?.(); });
-  await hooks["tool.execute.after"]({ sessionID: "v1", callID: "edit", tool: "write_to_file",
-    args: { path: "src.js", content: "export const value=1;" } },
-    { output: "ok", metadata: {} });
-  await hooks["tool.execute.after"]({ sessionID: "v1", callID: "test", tool: "bash",
-    args: { command: "npm test" } }, { output: "ok", metadata: { exitCode: 0 } });
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "v1" } } });
-  assert.equal(snapshots?.has("test"), true);
-});
 test("V2 after-hook hashes the session root, not the plugin root", async (t) => {
   const root = fixture(t), plugin = path.join(root, "plugin"), session = path.join(root, "session");
   fs.mkdirSync(plugin); fs.mkdirSync(session);
@@ -133,20 +111,25 @@ test("TUI distinguishes remediation success, failure and uncertainty", () => {
     assert.match(source, new RegExp('case "' + kind + '":'));
   }
 });
-test("V1 strict hook blocks process_start and logs only its safe action name", async (t) => {
+test("V2 strict hook blocks process_start and logs only its safe action name", async (t) => {
   const root = fixture(t);
   fs.writeFileSync(path.join(root, "opencode-guardian.json"),
     JSON.stringify({ enabled: true, preflight: { enabled: true } }));
-  const hooks = await Guardian.server({
-    directory: root,
-    client: { session: { messages: async () => ({ data: [] }) } },
+  const hooks = new Map();
+  const cleanup = await Guardian.setup({
+    location: { directory: root },
+    event: { subscribe: () => (async function* () {})() },
+    session: { context: async () => [], synthetic: async () => {}, hook: async () => ({ dispose() {} }) },
+    tool: { hook: async (name, handler) => { hooks.set(name, handler); return { dispose() {} }; } },
   });
-  t.after(async () => { await hooks.dispose?.(); });
+  t.after(async () => { await cleanup?.(); });
   await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "mcp__Node_Command__process_start", sessionID: "v1", callID: "danger" },
-      { args: { executable: "/bin/rm", args: ["fixtures"] } },
-    ), (error) => error.reason === "destructive-command");
+    hooks.get("execute.before")({
+      tool: "mcp__Node_Command__process_start",
+      sessionID: "v2",
+      callID: "danger",
+      input: { executable: "/bin/rm", args: ["fixtures"] },
+    }), (error) => error.reason === "destructive-command");
   const entries = fs.readFileSync(path.join(root, "events", "guardian-events.jsonl"), "utf8")
     .trim().split("\n").map(JSON.parse);
   assert.ok(entries.some((event) => event.kind === "preflight-blocked" &&

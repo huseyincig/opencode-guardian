@@ -23,6 +23,7 @@ interface SessionState {
 
 export class SessionStateStore {
   private readonly sessions = new Map<string, SessionState>();
+  private static readonly MAX_SESSIONS = 512;
 
   beginTurn(sessionID: string, turnKey: string): SessionState {
     const existing = this.sessions.get(sessionID);
@@ -37,7 +38,13 @@ export class SessionStateStore {
         continuationKeys: new Set<string>(),
         handoffSequence: 0,
       };
+      this.sessions.delete(sessionID);
       this.sessions.set(sessionID, next);
+      while (this.sessions.size > SessionStateStore.MAX_SESSIONS) {
+        const oldest = this.sessions.keys().next().value;
+        if (oldest === undefined) break;
+        this.sessions.delete(oldest);
+      }
       return next;
     }
     return existing;

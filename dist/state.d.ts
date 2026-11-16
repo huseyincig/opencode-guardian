@@ -21,6 +21,7 @@ interface SessionState {
 }
 export declare class SessionStateStore {
     private readonly sessions;
+    private static readonly MAX_SESSIONS;
     beginTurn(sessionID: string, turnKey: string): SessionState;
     getTurnRemediationCount(sessionID: string, turnKey: string): number;
     getRuleRemediationCount(sessionID: string, turnKey: string, ruleId: string): number;

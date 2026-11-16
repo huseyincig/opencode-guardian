@@ -8,13 +8,13 @@ import {
   parseOpenCodeHandoff,
 } from "../dist/index.js";
 
-for (const [name, bash] of [
-  ["ask exception", { "*": "allow", "git *": "ask" }],
-  ["deny exception", { "*": "allow", "rm *": "deny" }],
-  ["allow exception", { "*": "deny", "npm test": "allow" }],
+for (const [name, permissions] of [
+  ["ask exception", [{ permission: "edit", pattern: "*", action: "deny" }, { permission: "bash", pattern: "*", action: "allow" }, { permission: "bash", pattern: "git *", action: "ask" }]],
+  ["deny exception", [{ permission: "edit", pattern: "*", action: "deny" }, { permission: "bash", pattern: "*", action: "allow" }, { permission: "bash", pattern: "rm *", action: "deny" }]],
+  ["allow exception", [{ permission: "edit", pattern: "*", action: "deny" }, { permission: "bash", pattern: "*", action: "deny" }, { permission: "bash", pattern: "npm test", action: "allow" }]],
 ]) {
-  test(`V1 scoped bash ${name} does not permit autonomous subagent remediation`, async () => {
-    const profile = evaluateAgentMutationProfile({ permission: { edit: "deny", bash } });
+  test(`V2 scoped bash ${name} does not permit autonomous subagent remediation`, async () => {
+    const profile = evaluateAgentMutationProfile({ permissions });
     assert.equal(profile.evidence.bash, "restricted");
     assert.equal(profile.capability, "unknown");
     assert.equal(canSubagentRemediate(profile), false);
@@ -30,91 +30,49 @@ for (const [name, bash] of [
 }
 
 for (const effect of ["allow", "deny", "ask"]) {
-  test(`V1 uniform and final wildcard ${effect} retain the channel effect`, () => {
-    for (const bash of [
-      { "*": effect },
-      { "*": effect, "npm test": effect },
-      { "npm test": effect === "allow" ? "deny" : "allow", "*": effect },
+  test(`V2 uniform and final wildcard ${effect} retain the channel effect`, () => {
+    for (const bashPerms of [
+      [{ permission: "bash", pattern: "*", action: effect }],
+      [{ permission: "bash", pattern: "*", action: effect }, { permission: "bash", pattern: "npm test", action: effect }],
+      [{ permission: "bash", pattern: "npm test", action: effect === "allow" ? "deny" : "allow" }, { permission: "bash", pattern: "*", action: effect }],
     ]) {
-      const profile = evaluateAgentMutationProfile({ permission: { edit: "deny", bash } });
+      const profile = evaluateAgentMutationProfile({
+        permissions: [{ permission: "edit", pattern: "*", action: "deny" }, ...bashPerms],
+      });
       assert.equal(profile.evidence.bash, effect);
     }
   });
 }
 
-for (const [host, input] of [
-  ["V1", { tools: { bash: true, shell: false }, permission: { edit: "deny", bash: "allow" } }],
-  ["V2", { tools: { bash: false, shell: true }, permissions: [
-    { action: "edit", effect: "deny" }, { action: "shell", effect: "allow" },
-  ] }],
-]) {
-  test(`${host} enabled execution tool survives a disabled alternate alias`, () => {
-    const profile = evaluateAgentMutationProfile(input);
-    assert.equal(profile.evidence.bash, "allow");
-    assert.equal(profile.capability, "write-allowed");
-    assert.equal(canSubagentRemediate(profile), true);
+test("V2 enabled execution tool survives a disabled alternate alias", () => {
+  const profile = evaluateAgentMutationProfile({
+    tools: { bash: false, shell: true },
+    permissions: [
+      { action: "edit", effect: "deny" },
+      { action: "shell", effect: "allow" },
+    ],
   });
-}
+  assert.equal(profile.evidence.bash, "allow");
+  assert.equal(profile.capability, "write-allowed");
+  assert.equal(canSubagentRemediate(profile), true);
+});
 
 test("disabled shell channels retain conservative capability classification", () => {
   for (const tools of [{ bash: false }, { shell: false }, { bash: false, shell: false }]) {
-    const profile = evaluateAgentMutationProfile({ tools, permission: { edit: "deny", bash: "allow" } });
+    const profile = evaluateAgentMutationProfile({
+      tools,
+      permissions: [
+        { action: "edit", effect: "deny" },
+        { action: "bash", effect: "allow" },
+      ],
+    });
     assert.equal(profile.evidence.bash, "disabled");
     assert.equal(profile.capability, "read-only");
   }
 });
 
 // Scenario 1: Read-only child completion result
-test("Scenario 1: Read-only child subagent completion result receives zero remediation (V1 and V2)", async () => {
-  // --- V1 Test ---
-  let v1PromptCalls = 0;
-  const v1Messages = [
-    {
-      info: { id: "m-user-1", role: "user" },
-      parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
-    },
-    {
-      info: { id: "m-asst-1", role: "assistant", agent: "code-reviewer" },
-      parts: [{ type: "text", text: "Review completed. Test execution skipped due to read-only role. All looks good." }],
-    },
-  ];
-
-  const v1Client = {
-    session: {
-      get: async () => ({ data: { id: "v1-child-1", parentID: "v1-parent-1" } }),
-      messages: async () => ({ data: v1Messages }),
-      prompt: async () => { v1PromptCalls++; return { data: {} }; },
-      promptAsync: async () => { v1PromptCalls++; return { data: {} }; },
-    },
-    app: {
-      agents: async () => ({
-        data: [{
-          name: "code-reviewer",
-          permission: { edit: "deny", bash: "deny" },
-          tools: { read_file: true, grep: true },
-        }],
-      }),
-    },
-  };
-
-  const v1Plugin = await OpencodeGuardian.server({ client: v1Client, directory: process.cwd() });
-  await v1Plugin["tool.execute.before"](
-    { tool: "task", sessionID: "v1-parent-1", callID: "call-1" },
-    { args: { agent: "code-reviewer", prompt: "review" } }
-  );
-  const v1Output = {
-    output: "Initial review output",
-    metadata: { sessionId: "v1-child-1", background: false },
-  };
-  await v1Plugin["tool.execute.after"](
-    { tool: "task", sessionID: "v1-parent-1", callID: "call-1", args: { agent: "code-reviewer" } },
-    v1Output
-  );
-  await v1Plugin.dispose();
-  assert.equal(v1PromptCalls, 0, "V1 read-only child must receive 0 synthetic prompts");
-  assert.match(v1Output.output, /Review completed\. Test execution skipped/, "V1 child output flows through safely");
-
-  // --- V2 Test ---
+test("Scenario 1: Read-only child subagent completion result receives zero remediation (V2)", async () => {
   const v2Hooks = new Map();
   let v2SyntheticCalls = 0;
   const v2Context = {
@@ -203,54 +161,63 @@ test("Scenario 2: Real-world reviewer subagent Turkish output finishes cleanly w
 Öneri: Fixer agent tarafından düzeltilmesi uygundur.`;
 
   let promptCalls = 0;
-  const client = {
-    session: {
-      get: async () => ({ data: { id: "child-reviewer-real", parentID: "parent-root" } }),
-      messages: async () => ({
-        data: [
-          {
-            info: { id: "u-real", role: "user" },
-            parts: [{ type: "text", text: "Lütfen tüm dosyaları inceleyin ve testleri çalıştırın." }],
-          },
-          {
-            info: { id: "a-real", role: "assistant", agent: "oracle" },
-            parts: [{ type: "text", text: realReviewerText }],
-          },
+  const hooks = new Map();
+  const addHook = (name, cb) => {
+    const list = hooks.get(name) ?? [];
+    list.push(cb);
+    hooks.set(name, list);
+    return { dispose() {} };
+  };
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: { hook: async (name, cb) => addHook(name, cb) },
+    agent: {
+      list: async () => [{
+        name: "oracle",
+        permissions: [
+          { action: "edit", effect: "deny" },
+          { action: "bash", effect: "deny" },
         ],
-      }),
-      prompt: async () => { promptCalls++; return { data: {} }; },
-      promptAsync: async () => { promptCalls++; return { data: {} }; },
+        tools: { read_file: true, file_search: true },
+      }],
     },
-    app: {
-      agents: async () => ({
-        data: [{
-          name: "oracle",
-          permission: { edit: "deny", bash: "deny" },
-          tools: { read_file: true, file_search: true },
-        }],
-      }),
+    session: {
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "parent-root" }),
+      context: async () => [
+        { id: "u-real", type: "user", text: "Lütfen tüm dosyaları inceleyin ve testleri çalıştırın." },
+        { id: "a-real", type: "assistant", agent: "oracle", content: [{ type: "text", text: realReviewerText }] },
+      ],
+      synthetic: async () => { promptCalls++; },
+      wait: async () => {},
+    },
+  });
+
+  for (const cb of hooks.get("execute.before") ?? []) {
+    await cb({
+      tool: "subagent", sessionID: "parent-root", id: "c-real",
+      input: { agent: "oracle", prompt: "inceleme yap" },
+    });
+  }
+
+  const event = {
+    tool: "subagent", sessionID: "parent-root", id: "c-real",
+    input: { agent: "oracle" }, status: "completed",
+    result: {
+      output: "Initial output",
+      metadata: { sessionId: "child-reviewer-real", background: false },
     },
   };
-
-  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-  await plugin["tool.execute.before"](
-    { tool: "task", sessionID: "parent-root", callID: "c-real" },
-    { args: { agent: "oracle", prompt: "inceleme yap" } }
-  );
-
-  const output = {
-    output: "Initial output",
-    metadata: { sessionId: "child-reviewer-real", background: false },
-  };
-  await plugin["tool.execute.after"](
-    { tool: "task", sessionID: "parent-root", callID: "c-real", args: { agent: "oracle" } },
-    output
-  );
-  await plugin.dispose();
+  for (const cb of hooks.get("execute.after") ?? []) {
+    await cb(event);
+  }
+  await cleanup?.();
 
   assert.equal(promptCalls, 0, "Guardian must NOT inject remediation prompt to the read-only oracle");
-  assert.match(output.output, /İnceleme tamamlandı/, "Reviewer output preserved");
-  assert.match(output.output, /Öneri: Fixer agent tarafından düzeltilmesi uygundur/);
+  const outText = typeof event.result.output === "string" ? event.result.output : event.result.output?.output;
+  assert.match(outText, /İnceleme tamamlandı/, "Reviewer output preserved");
+  assert.match(outText, /Öneri: Fixer agent tarafından düzeltilmesi uygundur/);
 });
 
 // Scenario 3: Write-allowed child subagent
@@ -260,172 +227,191 @@ test("Scenario 3: Write-allowed subagent receives remediation when completion ga
   let phase = 0;
 
   const initialMessages = [
-    {
-      info: { id: "u-fix", role: "user" },
-      parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
-    },
-    {
-      info: { id: "a-fix-1", role: "assistant", agent: "fixer" },
-      parts: [{ type: "text", text: "I fixed the code. The remaining test failure is unrelated to this change." }],
-    },
+    { id: "u-fix", type: "user", text: "Run all tests and verify everything before claiming completion." },
+    { id: "a-fix-1", type: "assistant", agent: "fixer", content: [{ type: "text", text: "I fixed the code. The remaining test failure is unrelated to this change." }] },
   ];
   const remediatedMessages = () => [
     ...initialMessages,
-    {
-      info: { id: "g-rem", role: "user" },
-      parts: [{ type: "text", text: remediationTexts[0] }],
-    },
-    {
-      info: { id: "a-fix-2", role: "assistant", agent: "fixer" },
-      parts: [{ type: "text", text: "Ran tests completely and all tests pass now." }],
-    },
+    { id: "g-rem", type: "user", text: remediationTexts[0] },
+    { id: "a-fix-2", type: "assistant", agent: "fixer", content: [{ type: "text", text: "Ran tests completely and all tests pass now." }] },
   ];
 
-  const client = {
+  const hooks = new Map();
+  const addHook = (name, cb) => {
+    const list = hooks.get(name) ?? [];
+    list.push(cb);
+    hooks.set(name, list);
+    return { dispose() {} };
+  };
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: { hook: async (name, cb) => addHook(name, cb) },
+    agent: {
+      list: async () => [{
+        name: "fixer",
+        permissions: [
+          { action: "edit", effect: "allow" },
+          { action: "bash", effect: "allow" },
+        ],
+        tools: { edit: true, bash: true, read_file: true },
+      }],
+    },
     session: {
-      get: async () => ({ data: { id: "child-fixer", parentID: "parent-main" } }),
-      messages: async () => ({ data: phase === 0 ? initialMessages : remediatedMessages() }),
-      prompt: async ({ body }) => {
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "parent-main" }),
+      context: async () => (phase === 0 ? initialMessages : remediatedMessages()),
+      synthetic: async ({ text }) => {
         promptCalls++;
-        remediationTexts.push(body?.parts?.[0]?.text);
+        remediationTexts.push(text);
         phase = 1;
-        return { data: remediatedMessages().at(-1) };
       },
-      promptAsync: async () => ({ data: {} }),
+      wait: async () => {},
     },
-    app: {
-      agents: async () => ({
-        data: [{
-          name: "fixer",
-          permission: { edit: "allow", bash: "allow" },
-          tools: { edit: true, bash: true, read_file: true },
-        }],
-      }),
+  });
+
+  for (const cb of hooks.get("execute.before") ?? []) {
+    await cb({
+      tool: "subagent", sessionID: "parent-main", id: "c-fix",
+      input: { agent: "fixer", prompt: "fix the bug" },
+    });
+  }
+
+  const event = {
+    tool: "subagent", sessionID: "parent-main", id: "c-fix",
+    input: { agent: "fixer" }, status: "completed",
+    result: {
+      output: "Initial fixer output",
+      metadata: { sessionId: "child-fixer", background: false },
     },
   };
-
-  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-  await plugin["tool.execute.before"](
-    { tool: "task", sessionID: "parent-main", callID: "c-fix" },
-    { args: { agent: "fixer", prompt: "fix the bug" } }
-  );
-
-  const output = {
-    output: "Initial fixer output",
-    metadata: { sessionId: "child-fixer", background: false },
-  };
-  await plugin["tool.execute.after"](
-    { tool: "task", sessionID: "parent-main", callID: "c-fix", args: { agent: "fixer" } },
-    output
-  );
-  await plugin.dispose();
+  for (const cb of hooks.get("execute.after") ?? []) {
+    await cb(event);
+  }
+  await cleanup?.();
 
   assert.equal(promptCalls, 1, "Write-allowed subagent MUST receive remediation when blocked");
   assert.ok(remediationTexts[0]?.includes("[opencode-guardian remediation]"));
-  assert.match(output.output, /Ran tests completely and all tests pass now/);
+  const outText = typeof event.result.output === "string" ? event.result.output : event.result.output?.output;
+  assert.match(outText, /Ran tests completely and all tests pass now/);
 });
 
 // Scenario 4: Write-requires-approval child subagent
 test("Scenario 4: Write-requires-approval child subagent does NOT receive auto-remediation", async () => {
   let promptCalls = 0;
-  const messages = [
-    {
-      info: { id: "u-ask", role: "user" },
-      parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
+  const hooks = new Map();
+  const addHook = (name, cb) => {
+    const list = hooks.get(name) ?? [];
+    list.push(cb);
+    hooks.set(name, list);
+    return { dispose() {} };
+  };
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: { hook: async (name, cb) => addHook(name, cb) },
+    agent: {
+      list: async () => [{
+        name: "ask-subagent",
+        permissions: [
+          { action: "edit", effect: "ask" },
+          { action: "bash", effect: "ask" },
+        ],
+        tools: { edit: true, bash: true },
+      }],
     },
-    {
-      info: { id: "a-ask", role: "assistant", agent: "ask-subagent" },
-      parts: [{ type: "text", text: "Cannot proceed without approval. Done." }],
-    },
-  ];
-
-  const client = {
     session: {
-      get: async () => ({ data: { id: "child-ask", parentID: "parent-main" } }),
-      messages: async () => ({ data: messages }),
-      prompt: async () => { promptCalls++; return { data: {} }; },
-      promptAsync: async () => { promptCalls++; return { data: {} }; },
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "parent-main" }),
+      context: async () => [
+        { id: "u-ask", type: "user", text: "Run all tests and verify everything before claiming completion." },
+        { id: "a-ask", type: "assistant", agent: "ask-subagent", content: [{ type: "text", text: "Cannot proceed without approval. Done." }] },
+      ],
+      synthetic: async () => { promptCalls++; },
+      wait: async () => {},
     },
-    app: {
-      agents: async () => ({
-        data: [{
-          name: "ask-subagent",
-          permission: { edit: "ask", bash: "ask" },
-          tools: { edit: true, bash: true },
-        }],
-      }),
+  });
+
+  for (const cb of hooks.get("execute.before") ?? []) {
+    await cb({
+      tool: "subagent", sessionID: "parent-main", id: "c-ask",
+      input: { agent: "ask-subagent" },
+    });
+  }
+
+  const event = {
+    tool: "subagent", sessionID: "parent-main", id: "c-ask",
+    input: { agent: "ask-subagent" }, status: "completed",
+    result: {
+      output: "Initial output",
+      metadata: { sessionId: "child-ask", background: false },
     },
   };
-
-  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-  await plugin["tool.execute.before"](
-    { tool: "task", sessionID: "parent-main", callID: "c-ask" },
-    { args: { agent: "ask-subagent" } }
-  );
-
-  const output = {
-    output: "Initial output",
-    metadata: { sessionId: "child-ask", background: false },
-  };
-  await plugin["tool.execute.after"](
-    { tool: "task", sessionID: "parent-main", callID: "c-ask", args: { agent: "ask-subagent" } },
-    output
-  );
-  await plugin.dispose();
+  for (const cb of hooks.get("execute.after") ?? []) {
+    await cb(event);
+  }
+  await cleanup?.();
 
   assert.equal(promptCalls, 0, "Write-requires-approval subagent must NOT receive auto-remediation");
-  assert.match(output.output, /Cannot proceed without approval/);
+  const outText = typeof event.result.output === "string" ? event.result.output : event.result.output?.output;
+  assert.match(outText, /Cannot proceed without approval/);
 });
 
 // Scenario 5: Unknown capability child subagent (fail-safe)
 test("Scenario 5: Unknown capability child subagent fails safe with 0 remediation and no crash", async () => {
   let promptCalls = 0;
-  const messages = [
-    {
-      info: { id: "u-unk", role: "user" },
-      parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
+  const hooks = new Map();
+  const addHook = (name, cb) => {
+    const list = hooks.get(name) ?? [];
+    list.push(cb);
+    hooks.set(name, list);
+    return { dispose() {} };
+  };
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: { hook: async (name, cb) => addHook(name, cb) },
+    agent: {
+      list: async () => { throw new Error("Agent registry timeout"); },
     },
-    {
-      info: { id: "a-unk", role: "assistant", agent: "mysterious-agent" },
-      parts: [{ type: "text", text: "Finished my work." }],
-    },
-  ];
-
-  const client = {
     session: {
-      get: async () => ({ data: { id: "child-unk", parentID: "parent-main" } }),
-      messages: async () => ({ data: messages }),
-      prompt: async () => { promptCalls++; return { data: {} }; },
-      promptAsync: async () => { promptCalls++; return { data: {} }; },
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "parent-main" }),
+      context: async () => [
+        { id: "u-unk", type: "user", text: "Run all tests and verify everything before claiming completion." },
+        { id: "a-unk", type: "assistant", agent: "mysterious-agent", content: [{ type: "text", text: "Finished my work." }] },
+      ],
+      synthetic: async () => { promptCalls++; },
+      wait: async () => {},
     },
-    app: {
-      // Simulate discovery failure / missing agent
-      agents: async () => { throw new Error("Agent registry timeout"); },
-    },
-  };
-
-  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-  await plugin["tool.execute.before"](
-    { tool: "task", sessionID: "parent-main", callID: "c-unk" },
-    { args: { agent: "mysterious-agent" } }
-  );
-
-  const output = {
-    output: "Initial output",
-    metadata: { sessionId: "child-unk", background: false },
-  };
-
-  // Must not throw/crash
-  await assert.doesNotReject(async () => {
-    await plugin["tool.execute.after"](
-      { tool: "task", sessionID: "parent-main", callID: "c-unk", args: { agent: "mysterious-agent" } },
-      output
-    );
   });
-  await plugin.dispose();
+
+  for (const cb of hooks.get("execute.before") ?? []) {
+    await cb({
+      tool: "subagent", sessionID: "parent-main", id: "c-unk",
+      input: { agent: "mysterious-agent" },
+    });
+  }
+
+  const event = {
+    tool: "subagent", sessionID: "parent-main", id: "c-unk",
+    input: { agent: "mysterious-agent" }, status: "completed",
+    result: {
+      output: "Initial output",
+      metadata: { sessionId: "child-unk", background: false },
+    },
+  };
+
+  await assert.doesNotReject(async () => {
+    for (const cb of hooks.get("execute.after") ?? []) {
+      await cb(event);
+    }
+  });
+  await cleanup?.();
 
   assert.equal(promptCalls, 0, "Unknown subagent must fail safe with 0 remediation");
-  assert.match(output.output, /Finished my work/);
+  const outText = typeof event.result.output === "string" ? event.result.output : event.result.output?.output;
+  assert.match(outText, /Finished my work/);
 });
 
 // Scenario 6: Root agent behavior unchanged
@@ -528,7 +514,10 @@ test("Scenario 8: Smart Questions child isolation is verified intact", async () 
   const engine = new GuardEngine({ enabled: true });
   const readOnlyProfile = evaluateAgentMutationProfile({
     name: "reviewer",
-    permission: { edit: "deny", bash: "deny" },
+    permissions: [
+      { action: "edit", effect: "deny" },
+      { action: "bash", effect: "deny" },
+    ],
     tools: { read_file: true },
   });
   assert.equal(readOnlyProfile.capability, "read-only");
@@ -550,67 +539,67 @@ test("Scenario 8: Smart Questions child isolation is verified intact", async () 
 
 // Scenario 9: Bounded retry for write-allowed, 0 rounds for read-only
 test("Scenario 9: Bounded retry respects limits for write-allowed, 0 rounds for read-only", async () => {
-  // Read-only subagent has 0 rounds
   let readOnlyPrompts = 0;
-  const readOnlyClient = {
+  const roHooks = new Map();
+  const roCleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: { hook: async (n, cb) => { roHooks.set(n, cb); return { dispose() {} }; } },
+    agent: { list: async () => [{ name: "ro-agent", permissions: [{ action: "edit", effect: "deny" }, { action: "bash", effect: "deny" }] }] },
     session: {
-      get: async () => ({ data: { id: "c-ro", parentID: "p-ro" } }),
-      messages: async () => ({
-        data: [
-          { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "Run all tests." }] },
-          { info: { id: "a", role: "assistant" }, parts: [{ type: "text", text: "Done." }] },
-        ],
-      }),
-      prompt: async () => { readOnlyPrompts++; return { data: {} }; },
-      promptAsync: async () => { readOnlyPrompts++; return { data: {} }; },
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "p-ro" }),
+      context: async () => [
+        { id: "u", type: "user", text: "Run all tests." },
+        { id: "a", type: "assistant", content: [{ type: "text", text: "Done." }] },
+      ],
+      synthetic: async () => { readOnlyPrompts++; },
+      wait: async () => {},
     },
-    app: {
-      agents: async () => ({
-        data: [{ name: "ro-agent", permission: { edit: "deny", bash: "deny" } }],
-      }),
-    },
-  };
-
-  const roPlugin = await OpencodeGuardian.server({ client: readOnlyClient, directory: process.cwd() });
-  await roPlugin["tool.execute.before"]({ tool: "task", sessionID: "p-ro", callID: "c1" }, { args: { agent: "ro-agent" } });
-  await roPlugin["tool.execute.after"]({ tool: "task", sessionID: "p-ro", callID: "c1", args: { agent: "ro-agent" } }, {
-    output: "Initial output",
-    metadata: { sessionId: "c-ro", background: false },
   });
-  await roPlugin.dispose();
+  await roHooks.get("execute.before")({ tool: "subagent", sessionID: "p-ro", id: "c1", input: { agent: "ro-agent" } });
+  await roHooks.get("execute.after")({
+    tool: "subagent", sessionID: "p-ro", id: "c1", input: { agent: "ro-agent" }, status: "completed",
+    result: { output: "Initial output", metadata: { sessionId: "c-ro", background: false } },
+  });
+  await roCleanup?.();
   assert.equal(readOnlyPrompts, 0, "Read-only subagent has exactly 0 remediation rounds");
 
-  // Write-allowed subagent loops boundedly under non-convergence
   let simulatedPrompts = 0;
-  const writeClient = {
-    session: {
-      get: async () => ({ data: { id: "c-wr", parentID: "p-wr" } }),
-      messages: async () => ({
-        data: [
-          { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }] },
-          { info: { id: "a", role: "assistant" }, parts: [{ type: "text", text: "I fixed the code. The remaining test failure is unrelated to this change." }] },
-        ],
-      }),
-      prompt: async () => {
-        simulatedPrompts++;
-        return { data: {} };
+  const wrHooks = new Map();
+  const wrCleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: { subscribe: () => (async function* () {})() },
+    tool: {
+      hook: async (n, cb) => {
+        const list = wrHooks.get(n) ?? [];
+        list.push(cb);
+        wrHooks.set(n, list);
+        return { dispose() {} };
       },
-      promptAsync: async () => ({ data: {} }),
     },
-    app: {
-      agents: async () => ({
-        data: [{ name: "wr-agent", permission: { edit: "allow", bash: "allow" } }],
-      }),
+    agent: { list: async () => [{ name: "wr-agent", permissions: [{ action: "edit", effect: "allow" }, { action: "bash", effect: "allow" }] }] },
+    session: {
+      get: async ({ sessionID }) => ({ id: sessionID, parentID: "p-wr" }),
+      context: async () => [
+        { id: "u", type: "user", text: "Run all tests and verify everything before claiming completion." },
+        { id: "a", type: "assistant", content: [{ type: "text", text: "I fixed the code. The remaining test failure is unrelated to this change." }] },
+      ],
+      synthetic: async () => { simulatedPrompts++; },
+      wait: async () => {},
     },
-  };
-
-  const wrPlugin = await OpencodeGuardian.server({ client: writeClient, directory: process.cwd() });
-  await wrPlugin["tool.execute.before"]({ tool: "task", sessionID: "p-wr", callID: "c2" }, { args: { agent: "wr-agent" } });
-  await wrPlugin["tool.execute.after"]({ tool: "task", sessionID: "p-wr", callID: "c2", args: { agent: "wr-agent" } }, {
-    output: "Initial output",
-    metadata: { sessionId: "c-wr", background: false },
   });
-  await wrPlugin.dispose();
+  for (const cb of wrHooks.get("execute.before") ?? []) {
+    await cb({ tool: "subagent", sessionID: "p-wr", id: "c2", input: { agent: "wr-agent" } });
+  }
+  for (const cb of wrHooks.get("execute.after") ?? []) {
+    await cb({
+      tool: "subagent", sessionID: "p-wr", id: "c2", input: { agent: "wr-agent" }, status: "completed",
+      result: { output: "Initial output", metadata: { sessionId: "c-wr", background: false } },
+    });
+  }
+  await wrCleanup?.();
 
   assert.ok(simulatedPrompts >= 1, "Write-allowed subagent undergoes bounded remediation");
 });
@@ -637,39 +626,35 @@ test("Agent names never determine session topology", async () => {
 });
 
 // Scenario 10: Unknown topology must fail safe without using agent names
-test("Scenario 10: V1 unknown session topology never infers root/child from agent name", async () => {
+test("Scenario 10: V2 unknown session topology never infers root/child from agent name", async () => {
   let promptCalls = 0;
-  const client = {
-    session: {
-      // No session.get(): topology is genuinely unavailable.
-      messages: async () => ({
-        data: [
-          {
-            info: { id: "u-unknown-topology", role: "user" },
-            parts: [{ type: "text", text: "Run all tests and verify everything before claiming completion." }],
-          },
-          {
-            // Adversarial name: policy must not infer root from this string.
-            info: { id: "a-unknown-topology", role: "assistant", agent: "orchestrator" },
-            parts: [{ type: "text", text: "Done without running tests." }],
-          },
-        ],
-      }),
-      promptAsync: async () => {
-        promptCalls++;
-        return { data: {} };
+  let releaseEvent;
+  const cleanup = await OpencodeGuardian.setup({
+    location: { directory: process.cwd() },
+    options: { secrets: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await new Promise((resolve) => { releaseEvent = resolve; });
+          yield { type: "session.idle", data: { sessionID: "topology-unknown" } };
+          await new Promise((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
       },
     },
-  };
-
-  const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-  await plugin.event({
-    event: {
-      type: "session.idle",
-      properties: { sessionID: "topology-unknown" },
+    session: {
+      context: async () => [
+        { id: "u-unknown-topology", type: "user", text: "Run all tests and verify everything before claiming completion." },
+        { id: "a-unknown-topology", type: "assistant", agent: "orchestrator", content: [{ type: "text", text: "Done without running tests." }] },
+      ],
+      synthetic: async () => { promptCalls++; },
     },
   });
-  await plugin.dispose();
+  releaseEvent();
+  await new Promise((r) => setTimeout(r, 40));
+  await cleanup?.();
 
   assert.equal(
     promptCalls,
@@ -678,13 +663,8 @@ test("Scenario 10: V1 unknown session topology never infers root/child from agen
   );
 });
 
-// Scenario 11: V1 and V2 parity across normalized capability states
-test("Scenario 11: V1 and V2 parity across normalized capability evaluation", async () => {
-  // 1. Read-only (edit: deny, bash: deny)
-  const v1ReadOnly = evaluateAgentMutationProfile({
-    name: "v1-agent",
-    permission: { edit: "deny", bash: "deny" },
-  });
+// Scenario 11: V2 normalized capability evaluation
+test("Scenario 11: V2 normalized capability evaluation", async () => {
   const v2ReadOnly = evaluateAgentMutationProfile({
     name: "v2-agent",
     permissions: [
@@ -692,57 +672,43 @@ test("Scenario 11: V1 and V2 parity across normalized capability evaluation", as
       { action: "bash", effect: "deny" },
     ],
   });
-  assert.equal(v1ReadOnly.capability, "read-only");
   assert.equal(v2ReadOnly.capability, "read-only");
 
-  // 2. Write-allowed (edit: allow)
-  const v1Write = evaluateAgentMutationProfile({
-    name: "v1-agent",
-    permission: { edit: "allow" },
-  });
   const v2Write = evaluateAgentMutationProfile({
     name: "v2-agent",
     permissions: [{ action: "edit", effect: "allow" }],
   });
-  assert.equal(v1Write.capability, "write-allowed");
   assert.equal(v2Write.capability, "write-allowed");
 
-  // 3. Write-requires-approval (edit: ask)
-  const v1Ask = evaluateAgentMutationProfile({
-    name: "v1-agent",
-    permission: { edit: "ask" },
-  });
   const v2Ask = evaluateAgentMutationProfile({
     name: "v2-agent",
     permissions: [{ action: "edit", effect: "ask" }],
   });
-  assert.equal(v1Ask.capability, "write-requires-approval");
   assert.equal(v2Ask.capability, "write-requires-approval");
 
-  // 4. Unknown (no permissions, no tools)
-  const v1Unknown = evaluateAgentMutationProfile({
-    name: "v1-agent",
-  });
   const v2Unknown = evaluateAgentMutationProfile({
     name: "v2-agent",
     permissions: [],
   });
-  assert.equal(v1Unknown.capability, "unknown");
   assert.equal(v2Unknown.capability, "unknown");
 
-  // 5. Unknown tools make read-only fail safe to unknown
-  const v1WithUnknownTool = evaluateAgentMutationProfile({
-    name: "v1-agent",
-    permission: { edit: "deny", bash: "deny" },
+  const withUnknownTool = evaluateAgentMutationProfile({
+    name: "v2-agent",
+    permissions: [
+      { action: "edit", effect: "deny" },
+      { action: "bash", effect: "deny" },
+    ],
     tools: { custom_tool_mutation: true },
   });
-  assert.equal(v1WithUnknownTool.capability, "unknown");
+  assert.equal(withUnknownTool.capability, "unknown");
 
-  // 6. Availability of a mutation alias cannot override the shared edit deny.
-  const v1MutatingTool = evaluateAgentMutationProfile({
-    name: "v1-agent",
-    permission: { edit: "deny", bash: "deny" },
+  const mutatingTool = evaluateAgentMutationProfile({
+    name: "v2-agent",
+    permissions: [
+      { action: "edit", effect: "deny" },
+      { action: "bash", effect: "deny" },
+    ],
     tools: { apply_patch: true },
   });
-  assert.equal(canSubagentRemediate(v1MutatingTool), false);
+  assert.equal(canSubagentRemediate(mutatingTool), false);
 });

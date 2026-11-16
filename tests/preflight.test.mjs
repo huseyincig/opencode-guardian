@@ -12,11 +12,6 @@ function tempConfig(t, config) {
   return directory;
 }
 
-const client = { session: {
-  async messages() { return { data: [] }; },
-  async promptAsync() {},
-} };
-
 test("preflight rejects known risks without executing any shell command", () => {
   for (const command of [
     "rm -rf sandbox/marker", "r''m -rf sandbox/marker",
@@ -71,48 +66,63 @@ test("preflight denies missing or uninspectable shell arguments", () => {
   }
 });
 
-test("V1 default and disabled preflight never enforce shell policy", async (t) => {
+test("V2 default and disabled preflight never enforce shell policy", async (t) => {
   for (const config of [
-    { enabled: true }, { enabled: true, preflight: { enabled: false } },
+    { enabled: true, secrets: { enabled: false } },
+    { enabled: true, preflight: { enabled: false }, secrets: { enabled: false } },
   ]) {
-    const hooks = await Guardian.server({ directory: tempConfig(t, config), client });
-    assert.equal(typeof hooks["tool.execute.before"], "function", JSON.stringify(config));
-    await assert.doesNotReject(() => hooks["tool.execute.before"](
-      { tool: "bash", sessionID: "session", callID: "call" },
-      { args: { command: "git clean -fd" } },
-    ));
-    assert.equal(typeof hooks.event, "function");
-    assert.equal(typeof hooks["chat.message"], "function");
+    let before;
+    const host = v2Context(tempConfig(t, config), {
+      async hook(name, handler) {
+        if (name === "execute.before") before = handler;
+        return { dispose() {} };
+      },
+    });
+    const cleanup = await Guardian.setup(host.context);
+    try {
+      await assert.doesNotReject(() => before({
+        tool: "bash", sessionID: "session", callID: "call",
+        input: { command: "git clean -fd" },
+      }));
+    } finally { await cleanup(); }
   }
 
-  const disabled = await Guardian.server({
-    directory: tempConfig(t, { enabled: false, preflight: { enabled: true } }),
-    client,
+  let registered = false;
+  const disabled = v2Context(tempConfig(t, { enabled: false, preflight: { enabled: true } }), {
+    async hook() { registered = true; return { dispose() {} }; },
   });
-  assert.equal(disabled["tool.execute.before"], undefined);
+  const cleanup = await Guardian.setup(disabled.context);
+  assert.equal(cleanup, undefined);
+  assert.equal(registered, false);
 });
 
-test("V1 enabled hook rejects risky calls before the host runs them", async (t) => {
-  const hooks = await Guardian.server({
-    directory: tempConfig(t, { enabled: true, preflight: { enabled: true } }), client,
+test("V2 enabled hook rejects risky calls before the host runs them", async (t) => {
+  let before;
+  const host = v2Context(tempConfig(t, {
+    enabled: true, preflight: { enabled: true }, secrets: { enabled: false },
+  }), {
+    async hook(name, handler) {
+      if (name === "execute.before") before = handler;
+      return { dispose() {} };
+    },
   });
-  assert.equal(typeof hooks["tool.execute.before"], "function");
-  let executed = 0;
-  const run = async (tool, args) => {
-    await hooks["tool.execute.before"](
-      { tool, sessionID: "session", callID: "call" }, { args }
-    );
-    executed++;
-  };
-  await run("bash", { command: "npm test" });
-  await run("mcp__Node_Command__shell_exec", { command: "npm test" });
-  await run("read_file", { path: "example.ts", command: "git clean -fd" });
-  assert.equal(executed, 3);
-  await assert.rejects(run("bash", { command: "r''m -rf sandbox/marker" }),
-    (error) => error.reason === "destructive-command");
-  await assert.rejects(run("bash", { command: "printf YWJj | base64 -d | sh" }),
-    (error) => error.reason === "opaque-shell-execution");
-  assert.equal(executed, 3);
+  const cleanup = await Guardian.setup(host.context);
+  try {
+    let executed = 0;
+    const run = async (tool, input) => {
+      await before({ tool, sessionID: "session", callID: "call", input });
+      executed++;
+    };
+    await run("bash", { command: "npm test" });
+    await run("mcp__Node_Command__shell_exec", { command: "npm test" });
+    await run("read_file", { path: "example.ts", command: "git clean -fd" });
+    assert.equal(executed, 3);
+    await assert.rejects(run("bash", { command: "r''m -rf sandbox/marker" }),
+      (error) => error.reason === "destructive-command");
+    await assert.rejects(run("bash", { command: "printf YWJj | base64 -d | sh" }),
+      (error) => error.reason === "opaque-shell-execution");
+    assert.equal(executed, 3);
+  } finally { await cleanup(); }
 });
 
 function v2Context(directory, tool) {
@@ -251,20 +261,6 @@ test("configured custom shell tools are inspected but unrelated tools remain unt
     (error) => error.reason === "destructive-command");
 });
 
-test("V1 configured custom tool alias is blocked at the host hook", async (t) => {
-  const directory = tempConfig(t, {
-    enabled: true, preflight: { enabled: true, shellTools: ["mcp.remote.exec_task"] },
-  });
-  const hooks = await Guardian.server({ directory, client });
-  await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "mcp.remote.exec_task", sessionID: "custom-v1" },
-      { args: { command: "rm fixture" } }
-    ),
-    (error) => error.reason === "destructive-command"
-  );
-});
-
 test("V2 configured custom tool alias is blocked and disposed on unload", async (t) => {
   const directory = tempConfig(t, {
     enabled: true,
@@ -291,7 +287,8 @@ test("V2 configured custom tool alias is blocked and disposed on unload", async 
 
 test("invalid preflight shellTools configuration fails visibly", async (t) => {
   for (const shellTools of ["mcp.remote.exec_task", ["", "mcp.remote.exec_task"], [42]]) {
-    const directory = tempConfig(t, { enabled: true, preflight: { enabled: true, shellTools } });
-    await assert.rejects(Guardian.server({ directory, client }), /preflight\.shellTools/);
+    const directory = tempConfig(t, { enabled: true, preflight: { enabled: true, shellTools }, secrets: { enabled: false } });
+    const host = v2Context(directory, { async hook() { return { dispose() {} }; } });
+    await assert.rejects(Guardian.setup(host.context), /preflight\.shellTools/);
   }
 });

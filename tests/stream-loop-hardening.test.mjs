@@ -16,24 +16,6 @@ function fixture(t, rules = "error") {
   return directory;
 }
 
-async function v1(t, setting = "error", abort = async () => ({ data: true })) {
-  const directory = fixture(t, setting);
-  let calls = 0;
-  const hooks = await Guardian.server({ directory, client: { session: {
-    async abort(input) { calls++; return abort(input); },
-    async get() { return { data: {} }; }, async messages() { return { data: [] }; },
-  } } });
-  t.after(() => hooks.dispose());
-  const send = async event => hooks.event({ event });
-  const message = (id = "a", role = "assistant", completed = false) => send({ type: "message.updated", properties: {
-    info: { id, sessionID: "s", role, time: { created: 1, ...(completed ? { completed: 2 } : {}) } },
-  } });
-  const text = (value, messageID = "a", id = "p") => send({ type: "message.part.updated", properties: {
-    part: { id, messageID, sessionID: "s", type: "text", text: value },
-  } });
-  return { directory, hooks, message, text, send, get calls() { return calls; } };
-}
-
 async function v2(t, setting = "error", interrupt = async () => {}, sessionDirectory) {
   const directory = fixture(t, setting);
   let calls = 0, wake;
@@ -75,40 +57,14 @@ test("native V2 text and reasoning deltas interrupt without waiting for idle", a
   }
 });
 
-test("V1 ignores user, unknown, completed and post-disposal text events", async t => {
-  const h = await v1(t);
-  await h.text(loop, "unknown");
-  await h.message("u", "user"); await h.text(loop, "u");
-  await h.message("done", "assistant", true); await h.text(loop, "done");
-  assert.equal(h.calls, 0);
-  await h.message(); await h.text(loop);
-  assert.equal(h.calls, 1);
-  await h.hooks.dispose(); await h.message("late"); await h.text(loop, "late", "late-part");
-  assert.equal(h.calls, 1);
-});
-
-test("both adapters honor string and object warn/off settings", async t => {
+test("V2 honors string and object warn/off settings", async t => {
   for (const setting of ["off", { severity: "off" }, "warn", { severity: "warn" }]) {
-    const a = await v1(t, setting); await a.message(); await a.text(loop);
     const b = await v2(t, setting); await b.delta(loop);
-    assert.equal(a.calls, 0, JSON.stringify(setting));
     assert.equal(b.calls, 0, JSON.stringify(setting));
     if (setting === "warn" || setting.severity === "warn") {
-      assert.equal(readGuardianStatus(a.directory).warnings, 1);
       assert.equal(readGuardianStatus(b.directory).warnings, 1);
     }
   }
-});
-
-test("V1 rejects SDK errors and retries on later growth with a bounded attempt count", async t => {
-  const h = await v1(t, "error", async () => ({ error: { message: "fixture failure" } }));
-  await h.message();
-  for (let n = 1; n <= 8; n++) await h.text(loop.repeat(n));
-  assert.equal(h.calls, 3);
-  const status = readGuardianStatus(h.directory);
-  assert.equal(status.blocked, 0);
-  assert.equal(status.errors, 3);
-  assert.ok(!readGuardianActivity(h.directory, 30).some(e => e.kind === "stream-interrupt-requested"));
 });
 
 test("V2 retries a rejected interrupt but deduplicates successful admission", async t => {
@@ -117,18 +73,6 @@ test("V2 retries a rejected interrupt but deduplicates successful admission", as
   await h.delta(loop); await h.delta(loop); await h.delta(loop);
   assert.equal(h.calls, 2);
   assert.equal(readGuardianStatus(h.directory).errors, 1);
-});
-
-test("V1 concurrent parts trigger only one stop request per active response", async t => {
-  let release;
-  const h = await v1(t, "error", () => new Promise(resolve => { release = resolve; }));
-  await h.message();
-  const first = h.text(loop, "a", "part-one");
-  await new Promise(resolve => setImmediate(resolve));
-  const second = h.text(loop, "a", "part-two");
-  assert.equal(h.calls, 1);
-  release({ data: true }); await Promise.all([first, second]);
-  assert.equal(h.calls, 1);
 });
 
 test("V2 uses the active project's rule setting for native deltas", async t => {
@@ -188,14 +132,6 @@ test("V2 lifecycle events invalidate a detection while its project lookup is pen
   assert.equal(interruptCalls, 0, "the stop belongs to the completed old response");
 });
 
-test("V1 retries boolean SDK rejection and never reports successful admission", async t => {
-  const h = await v1(t, "error", async () => ({ data: false }));
-  await h.message(); await h.text(loop); await h.text(loop.repeat(2));
-  assert.equal(h.calls, 2);
-  assert.equal(readGuardianStatus(h.directory).errors, 2);
-  assert.ok(!readGuardianActivity(h.directory, 30).some(e => e.kind === "stream-interrupt-requested"));
-});
-
 test("V2 stop requests explicitly disable host resumption", async t => {
   let input;
   const h = await v2(t, "error", async value => { input = value; });
@@ -211,21 +147,4 @@ test("V2 ignores completed parts and session deletion resets watcher ownership",
   await h.delta(loop); assert.equal(h.calls, 1);
   await h.send({ type: "session.deleted", data: { sessionID: "s" } });
   await h.delta(loop); assert.equal(h.calls, 2);
-});
-
-test("disposal cancels an outstanding V1 stop without late success notifications", async t => {
-  const h = await v1(t, "error", () => new Promise(() => {}));
-  await h.message(); const pending = h.text(loop);
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(h.calls, 1);
-  await h.hooks.dispose(); await pending;
-  assert.ok(!readGuardianActivity(h.directory, 30).some(e => e.kind === "stream-interrupt-requested"));
-});
-
-test("V1 user turn and SDK session-deleted events invalidate the previous assistant", async t => {
-  const h = await v1(t);
-  await h.message(); await h.message("u", "user"); await h.text(loop);
-  assert.equal(h.calls, 0);
-  await h.message("b");
-  await h.send({ type: "session.deleted", properties: { info: { id: "s" } } });
-  await h.text(loop, "b"); assert.equal(h.calls, 0);
 });

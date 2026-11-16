@@ -28,10 +28,6 @@ function setupConfig(t, config) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
-const client = { session: {
-  async messages() { return { data: [] }; },
-  async promptAsync() {},
-} };
 
 test("preflight-disabled project records real rule inspections but no blocked tools", (t) => {
   isolated(t);
@@ -41,29 +37,6 @@ test("preflight-disabled project records real rule inspections but no blocked to
   const status = readGuardianStatus();
   assert.deepEqual([status.preflight, status.inspected, status.blocked, status.warnings], ["disabled", 1, 0, 1]);
   assert.doesNotMatch(fs.readFileSync(guardianEventPath(), "utf8"), /secret-session/);
-});
-
-test("V1 idle counts each assistant turn only once when preflight is disabled", async (t) => {
-  isolated(t);
-  const directory = setupConfig(t, { enabled: true, updateNotice: { enabled: false }, secrets: { enabled: false } });
-  let assistantID = "a1";
-  const host = { session: {
-    async get({ path: { id } }) { return { data: { id } }; },
-    async messages() { return { data: [
-      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Review the source." }] },
-      { info: { id: assistantID, role: "assistant" }, parts: [{ type: "text", text: "Reviewed the source." }] },
-    ] }; },
-    async promptAsync() { return { data: {} }; },
-  } };
-  const hooks = await Guardian.server({ directory, client: host });
-  t.after(() => hooks.dispose());
-  const idle = () => hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } });
-  await idle();
-  await idle();
-  assert.equal(readGuardianStatus().inspected, 1);
-  assistantID = "a2";
-  await idle();
-  assert.deepEqual([readGuardianStatus().inspected, readGuardianStatus().blocked], [2, 0]);
 });
 
 test("V2 idle counts a real rule evaluation once, not duplicate idle events", async (t) => {
@@ -117,33 +90,6 @@ test("JSONL events are restrictive, command-free, and have correct bounded count
     { preflight: "active", inspected: 2, blocked: 1, warnings: 1, remediations: 1, errors: 0, truncated: false },
   );
   assert.equal(readGuardianStatus(180).truncated, true);
-});
-
-test("V1 strict preflight writes checks and blocked reasons without command text", async (t) => {
-  isolated(t);
-  const directory = setupConfig(t, { enabled: true, preflight: { enabled: true } });
-  const hooks = await Guardian.server({ directory, client });
-  await hooks["tool.execute.before"]({ tool: "bash", sessionID: "secret-session" }, { args: { command: "npm test" } });
-  await assert.rejects(hooks["tool.execute.before"]({ tool: "bash", sessionID: "secret-session" }, {
-    args: { command: "rm -rf /ultra-private-file" },
-  }), (error) => error.reason === "destructive-command");
-  assert.deepEqual([readGuardianStatus().inspected, readGuardianStatus().blocked], [2, 1]);
-  const log = fs.readFileSync(guardianEventPath(), "utf8");
-  assert.ok(!log.includes("ultra-private-file") && !log.includes("secret-session"));
-});
-
-test("V1 default preflight remains disabled even when the handoff coordination hook is installed", async (t) => {
-  isolated(t);
-  const hooks = await Guardian.server({ directory: setupConfig(t, { enabled: true }), client });
-  assert.equal(typeof hooks["tool.execute.before"], "function");
-  await hooks["tool.execute.before"](
-    { tool: "bash", sessionID: "session", callID: "call" },
-    { args: { command: "git clean -fd" } },
-  );
-  const status = readGuardianStatus();
-  assert.equal(status.preflight, "disabled");
-  assert.equal(status.inspected, 0);
-  assert.equal(status.blocked, 0);
 });
 
 test("V2 strict preflight records actual pre-execution decisions", async (t) => {

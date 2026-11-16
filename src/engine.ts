@@ -656,7 +656,13 @@ export class GuardEngine {
       }
     }
 
+    this.inspectedMessages.delete(sessionID);
     this.inspectedMessages.set(sessionID, messageID);
+    while (this.inspectedMessages.size > 512) {
+      const oldest = this.inspectedMessages.keys().next().value;
+      if (oldest === undefined) break;
+      this.inspectedMessages.delete(oldest);
+    }
 
     const canSelfRemediate = !isSubagent || options?.agentCapability === "write-allowed";
 
@@ -923,6 +929,15 @@ export class GuardEngine {
         !successfulFresh.some((record) =>
           ["test", "build", "typecheck", "lint", "audit"].includes(record.kind))) {
         verified = false;
+      }
+      if (verified && pendingRules.includes("task/completion-gate")) {
+        const required = contract?.requiredVerifications ?? [];
+        const hasRequired = required.length > 0
+          ? required.every((kind) => successfulFresh.some((record) => record.kind === kind))
+          : successfulFresh.some((record) =>
+              ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)
+            );
+        if (!hasRequired) verified = false;
       }
       if (verified && pendingRules.some((rule) =>
         !["security/no-secrets", "quality/no-shortcuts", "integrity/no-stubs",

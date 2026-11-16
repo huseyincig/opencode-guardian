@@ -35,6 +35,7 @@ export function createIdleQueue(signal, onError) {
                     entries.delete(sessionID);
             });
         }, 10);
+        entry.timer.unref?.();
     };
     return {
         enqueue(sessionID, job) {

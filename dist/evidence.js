@@ -11,7 +11,13 @@ function stringify(value) {
         return value;
     if (value === undefined || value === null)
         return "";
+    if (value instanceof Error)
+        return value.message || String(value);
     if (typeof value === "object") {
+        const obj = value;
+        if (typeof obj.message === "string" && obj.message.length > 0) {
+            return obj.message;
+        }
         try {
             return JSON.stringify(value);
         }
@@ -572,17 +578,29 @@ export function calculateProductFingerprint(directory, files) {
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export class VerificationSnapshotStore {
     sessions = new Map();
+    static MAX_SESSIONS = 512;
+    static MAX_PATHS = 512;
+    getOrCreateSession(sessionID) {
+        let session = this.sessions.get(sessionID);
+        if (!session) {
+            session = { paths: new Set(), snapshots: new Map(), before: new Map() };
+            this.sessions.set(sessionID, session);
+            while (this.sessions.size > VerificationSnapshotStore.MAX_SESSIONS) {
+                const oldest = this.sessions.keys().next().value;
+                if (oldest === undefined)
+                    break;
+                this.sessions.delete(oldest);
+            }
+        }
+        return session;
+    }
     observeBefore(sessionID, callID, tool, input, directory) {
         if (!sessionID || !callID)
             return;
         const before = captureBeforeEdit(tool, input, directory);
         if (!before)
             return;
-        let session = this.sessions.get(sessionID);
-        if (!session) {
-            session = { paths: new Set(), snapshots: new Map(), before: new Map() };
-            this.sessions.set(sessionID, session);
-        }
+        const session = this.getOrCreateSession(sessionID);
         session.before.set(callID, before);
         if (session.before.size > 32) {
             const oldest = session.before.keys().next().value;
@@ -598,27 +616,33 @@ export class VerificationSnapshotStore {
         const evidence = collectTurnEvidence([
             { info: { id: callID, role: "assistant" }, parts: [part] },
         ]);
-        let session = this.sessions.get(sessionID);
-        if (!session) {
-            session = { paths: new Set(), snapshots: new Map(), before: new Map() };
-            this.sessions.set(sessionID, session);
-        }
+        const session = this.getOrCreateSession(sessionID);
         const before = session.before.get(callID);
         session.before.delete(callID);
         if (before && status === "completed" && evidence.fileMutations.some(r => r.status === "success")) {
-            session.snapshots.set(callID, { fingerprint: "", files: [before.filePath], editIntegrity: finishEditObservation(before) });
+            const existing = session.snapshots.get(callID);
+            session.snapshots.set(callID, {
+                ...(existing?.fingerprint ? { fingerprint: existing.fingerprint } : {}),
+                files: existing?.files.length ? existing.files : [before.filePath],
+                editIntegrity: finishEditObservation(before),
+            });
         }
         for (const mutation of evidence.fileMutations) {
             if (mutation.status === "success") {
-                if (mutation.filePath)
+                if (mutation.filePath && session.paths.size < VerificationSnapshotStore.MAX_PATHS) {
                     session.paths.add(mutation.filePath);
+                }
             }
         }
         if (session.paths.size && evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
             const fingerprint = calculateProductFingerprint(directory, session.paths);
             if (fingerprint !== "unverified-state" && fingerprint !== "empty-state") {
-                session.snapshots.set(callID, { fingerprint: `sha256:${fingerprint}`,
-                    files: [...session.paths] });
+                const existing = session.snapshots.get(callID);
+                session.snapshots.set(callID, {
+                    ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
+                    fingerprint: `sha256:${fingerprint}`,
+                    files: [...session.paths],
+                });
             }
         }
         // Bound the call table even in very long sessions.
@@ -631,11 +655,8 @@ export class VerificationSnapshotStore {
     beginTurn(sessionID) {
         if (!sessionID)
             return;
-        this.sessions.set(sessionID, {
-            paths: new Set(),
-            snapshots: new Map(),
-            before: new Map(),
-        });
+        this.sessions.delete(sessionID);
+        this.getOrCreateSession(sessionID);
     }
     snapshots(sessionID) {
         return this.sessions.get(sessionID)?.snapshots ?? new Map();
@@ -675,7 +696,7 @@ export function collectTurnEvidence(currentTurn, _directory, snapshots) {
                     // Historical message replay cannot recreate the disk state at test
                     // time. Only a live after-hook may supply an observed fingerprint.
                     const snapshot = callID ? snapshots?.get(callID) : undefined;
-                    record.stateFingerprint = snapshot?.fingerprint ??
+                    record.stateFingerprint = (snapshot?.fingerprint || undefined) ??
                         `seq:${lastMutationSequence}:m${mutationCount}`;
                     if (snapshot)
                         record.snapshotFiles = [...snapshot.files];

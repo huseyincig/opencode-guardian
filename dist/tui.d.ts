@@ -1,10 +1,7 @@
-/** Dedicated TUI entrypoint: OpenCode 1 (tui / sidebar_content) and 2 (setup / sidebar.content). */
+/** Dedicated TUI entrypoint: OpenCode V2 (setup / sidebar.content & session.composer.top). */
 import type { Plugin } from "@opencode/plugin/tui";
-import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 type GuardianV2Context = Parameters<Plugin.Definition["setup"]>[0];
-/** Register in a host-owned Solid component: keymap.layer follows that owner's cleanup. */
+/** Register Guardian keymap layer and slash commands; host cleans up setup-created layers on unload. */
 export declare function registerGuardianV2Commands(context: GuardianV2Context, directory: () => string, onReset?: (directory: string) => void): void;
-/** V1 command.register is optional in the installed V1 1.18.34 contract. */
-export declare function registerGuardianV1Commands(api: TuiPluginApi): void;
-declare const guardianTui: TuiPluginModule & Plugin.Definition;
+declare const guardianTui: Plugin.Definition;
 export default guardianTui;

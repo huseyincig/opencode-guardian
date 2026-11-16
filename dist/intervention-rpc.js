@@ -8,7 +8,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
             input: {
                 type: "object",
                 properties: {
-                    sessionID: { type: "string", minLength: 1 },
+                    sessionID: { type: "string", minLength: 1, maxLength: 256 },
                 },
                 required: ["sessionID"],
                 additionalProperties: false,
@@ -30,7 +30,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
             input: {
                 type: "object",
                 properties: {
-                    sessionID: { type: "string", minLength: 1 },
+                    sessionID: { type: "string", minLength: 1, maxLength: 256 },
                 },
                 additionalProperties: false,
             },
@@ -89,7 +89,7 @@ export function readGuardianInterventionSessionID(input) {
     if (!input || typeof input !== "object" || Array.isArray(input))
         return undefined;
     const sessionID = input.sessionID;
-    return typeof sessionID === "string" && sessionID.length > 0
+    return typeof sessionID === "string" && sessionID.length > 0 && sessionID.length <= 256
         ? sessionID
         : undefined;
 }

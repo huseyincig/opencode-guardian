@@ -911,19 +911,16 @@ test("manifest/no-ghost-deps resolves RELATIVE target paths against the session 
 test("plugin exports OpencodeGuardian with id 'opencode-guardian' and backward-compatible OpencodeGuard alias", async () => {
   const pluginMod = await import("../dist/index.js");
   assert.equal(pluginMod.OpencodeGuardian.id, "opencode-guardian");
-  assert.equal(typeof pluginMod.OpencodeGuardian.server, "function");
+  assert.equal(pluginMod.OpencodeGuardian.server, undefined);
   assert.equal(typeof pluginMod.OpencodeGuardian.setup, "function");
   assert.equal(pluginMod.default, pluginMod.OpencodeGuardian);
   assert.equal(pluginMod.OpencodeGuard, pluginMod.OpencodeGuardian);
 });
 
-test("root index.js and server.js re-export plugin cleanly", async () => {
+test("root index.js re-exports plugin cleanly", async () => {
   const rootIndex = await import("../index.js");
-  const rootServer = await import("../server.js");
   assert.equal(rootIndex.OpencodeGuardian.id, "opencode-guardian");
   assert.equal(rootIndex.default.id, "opencode-guardian");
-  assert.equal(rootServer.OpencodeGuardian.id, "opencode-guardian");
-  assert.equal(rootServer.default.id, "opencode-guardian");
 });
 
 test("loadConfig supports opencode-guardian.json and falls back to opencode-guard.json", async () => {
@@ -3847,47 +3844,6 @@ test("GuardEngine uses an independent bounded iterative continuation budget", as
       parts: [{ type: "text", text: "Denetim tamamlandı." }] },
   ];
   assert.equal((await engine.inspect("iteration-session", process.cwd(), stalled)).decision, "pass");
-});
-
-test("OpenCode V1 chat.message and system.transform preserve explicit task guidance", async () => {
-  const request = "Her hata bulduğunda düzelt, ardından incelemeyi baştan başlat.";
-  const injected = [];
-  const messages = taskTurn(request, [
-    completedTool("write", { filePath: "src/item.ts", content: "export const item = 1;" }),
-    { type: "text", text: "İnceleme tamamlandı." },
-  ]);
-  const hooks = await OpencodeGuardian.server({
-    directory: process.cwd(),
-    client: {
-      session: {
-        get: async ({ path: requestPath }) => ({
-          data: { id: requestPath.id, parentID: undefined },
-        }),
-        messages: async () => ({ data: messages }),
-        promptAsync: async (input) => { injected.push(input.body.parts[0].text); },
-      },
-    },
-  });
-  await hooks["chat.message"](
-    { sessionID: "v1-task", messageID: "task-user" },
-    { message: { role: "user" }, parts: [{ type: "text", text: request }] }
-  );
-  const output = { system: [] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "v1-task" }, output);
-  assert.equal(output.system.length, 1);
-  assert.match(output.system[0], /another review pass/);
-  await hooks["experimental.chat.system.transform"]({ sessionID: "v1-task" }, output);
-  assert.equal(output.system.length, 1, "must not duplicate guidance");
-  await hooks["experimental.chat.system.transform"]({ sessionID: "another-session" }, output);
-  assert.equal(output.system.length, 1, "must not leak tasks to other sessions");
-
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "v1-task" } } });
-  assert.equal(injected.length, 1);
-  assert.match(injected[0], /another substantive review/);
-  await hooks.event({ event: { type: "session.deleted", properties: { sessionID: "v1-task" } } });
-  const cleared = { system: [] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "v1-task" }, cleared);
-  assert.deepEqual(cleared.system, []);
 });
 
 test("OpenCode V2 prompt/context hooks and idle subscription use real domain signatures", async () => {

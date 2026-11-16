@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.15.0 — 2026-11-17
+
+- **BREAKING CHANGE — Pure OpenCode V2 (`>=2.3.0`) & OpenTUI (`>=0.8.4`) Alignment:**
+  - Removed OpenCode V1 (`1.x` / `@opencode-ai/plugin` / `./server` / `sidebar_content` / V1 idle fallback) support. Users on OpenCode 1.x should pin `opencode-guardian@0.14.0`.
+  - Updated `peerDependencies` floors to `@opencode/plugin >=2.3.0`, `@opentui/core >=0.8.4`, `@opentui/solid >=0.8.4`, and `solid-js >=1.9.0`.
+- **New `./rpc` Export (`dist/intervention-rpc.js`):**
+  - Added typed `opencode-guardian/rpc` entrypoint (`src/intervention-rpc.ts`) implementing `Rpc.define` (`@opencode/plugin/rpc`) for `guardian.interventions.get` and `guardian.interventions.clear` with `sessionID` `maxLength: 256` validation and project-directory-scoped `{}` clearing.
+- **V2 Server, Hook & Subagent Hardening:**
+  - Registered `context.shell?.hook("create.before")` preflight with LIFO hook rollback on setup failure.
+  - Updated `StreamLoopWatcher` to treat `{ interrupted: false }` as a rejected interruption without emitting warning toasts or entering a stopped state.
+  - V2 `prompt` hook cancels in-flight `idleQueue` inspection and clears stale `TaskContract` state (including empty/attachment-only prompts).
+  - Treated `session.fork` / `session.forked` as independent root sessions, honored top-level `location.directory` before `ctx.session.get()`, and isolated `background === true` subagents in `execute.after` so sibling background subagents are never starved.
+  - Normalized V2 `Error` instances and `{ type, message }` tool error objects in `src/evidence.ts`, and normalized V2 `shell` and `agent-switched` context entries.
+  - Handled array, `{ data }`, and null/throwing list responses in `resolveV2AgentCapability`, and bounded capability caches and per-session Maps/Sets with `.unref?.()` timers.
+  - Cleaned up `telemetryConfigRegistry` on early throw in `setup()`.
+- **Security, Preflight & Sanitizer Fixes:**
+  - Preserved `Uint8Array` / `ArrayBuffer` views and non-plain object prototypes (e.g., `Message` class) in `sanitizeObject` and `sanitizeMessages`.
+  - Split multi-stage shell commands via `splitShellStages` in `extractGitCommitMessage`, `isLazyCommitMessage`, and `isHallucinatedOrMalformedPackageInstall` for both `tool.execute.before` and `shell.create.before`.
+  - Fixed `task/completion-gate` so `"in progress"` replies with file mutations are not falsely marked `"remediation-verified"`.
+  - Updated `VerificationSnapshotStore.observe` to preserve both `editIntegrity` and `fingerprint` on the same `callID`.
+  - Re-verified state directory permissions with `lstatSync` in `verifiedStateDirs`.
+- **TUI Reactivity, RPC Race & Bun Compatibility Fixes:**
+  - Fixed reactive `GuardianSidebar` prop updates (avoiding frozen destructured `sessionID`), subscribed to `session.moved`, and added per-session generation/epoch gating so in-flight 500ms RPC polls cannot resurrect cleared interventions.
+  - Fixed `version-notice.ts` `ftruncateSync` safety on cache writes.
+  - Fixed `scripts/emit-tui.mjs` adaptive loader catch block so `dist/tui.js` cleanly falls back to `./tui-standalone.js` in Bun (`1.4.4`) without throwing `ResolveMessage`.
+- **Test, Sandbox & Live Host Acceptance:**
+  - Migrated all test and sandbox suites to pure V2 `setup(ctx)` and added `tests/v2-stage2a-regressions.test.mjs`.
+  - Verified **765/765** unit/regression tests, **18/18** sandbox scenarios, and **10/10** live OpenCode `v2.3.0` + Bun `1.4.4` + packed `.tgz` acceptance checks.
+
 ## 0.14.0 — 2026-11-16
 
 - **Low-I/O Telemetry & Bounded Audit Log (`telemetry.level`):**

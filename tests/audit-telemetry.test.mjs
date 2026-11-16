@@ -131,7 +131,7 @@ test("log rotation refuses symlink archives without touching their targets", (t)
   assert.equal(fs.statSync(log).size, before);
 });
 
-test("real V1 post-turn intervention writes fixed reasons but never raw command text", async (t) => {
+test("real V2 post-turn intervention writes fixed reasons but never raw command text", async (t) => {
   isolated(t);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-real-audit-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -142,42 +142,57 @@ test("real V1 post-turn intervention writes fixed reasons but never raw command 
   }));
   const SECRET = "sk-proj-NEVER-IN-THE-LOG";
   const sent = [];
-  const client = { session: {
-    async get({ path: requestPath }) {
-      return { data: { id: requestPath.id, parentID: undefined } };
+  let releaseEvent;
+  const host = {
+    location: { directory },
+    options: { secrets: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          await new Promise((resolve) => { releaseEvent = resolve; });
+          yield { type: "session.idle", data: { sessionID: "private-v2-session" } };
+          await new Promise((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", resolve, { once: true });
+          });
+        })();
+      },
     },
-    async messages() {
-      return { data: [
-        { info: { id: "u1", role: "user" },
-          parts: [{ type: "text", text: "Run the tests and address failures." }] },
-        { info: { id: "a1", role: "assistant", time: { completed: 1 } },
-          parts: [
-            { type: "tool", tool: "bash",
-              state: { input: { command: "npm test || true # " + SECRET }, output: "tests failed" } },
-            { type: "text", text: "The work is done." },
-          ] },
-      ] };
+    session: {
+      async get() { return { id: "private-v2-session", parentID: undefined }; },
+      async context() {
+        return [
+          { id: "u1", type: "user", text: "Run the tests and address failures." },
+          {
+            id: "a1",
+            type: "assistant",
+            content: [
+              {
+                type: "tool",
+                name: "bash",
+                state: { input: { command: "npm test || true # " + SECRET }, output: "tests failed" },
+              },
+              { type: "text", text: "The work is done." },
+            ],
+          },
+        ];
+      },
+      async synthetic(input) {
+        sent.push(input);
+      },
     },
-    async promptAsync(input) {
-      sent.push(input);
-      return { data: {}, error: undefined };
-    },
-  } };
-  const hooks = await Guardian.server({ directory, client });
+  };
+  const cleanup = await Guardian.setup(host);
   try {
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "private-v1-session" } } });
+    releaseEvent();
+    const deadline = Date.now() + 1500;
+    while (sent.length < 1 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
     const remediation = sent.filter(
-      (request) => request.body?.parts?.[0]?.synthetic === true
-    );
-    const visible = sent.filter(
-      (request) =>
-        request.body?.noReply === true &&
-        request.body?.parts?.[0]?.ignored === true &&
-        request.body?.parts?.[0]?.metadata?.["opencode-guardian-visible"] === true
+      (request) => request.resume === true
     );
     assert.equal(remediation.length, 1);
-    assert.equal(visible.length, 1);
-    assert.doesNotMatch(visible[0].body.parts[0].text, /sk-proj-NEVER-IN-THE-LOG|npm test/);
 
     const data = fs.readFileSync(guardianEventPath(), "utf8");
     assert.ok(!data.includes(SECRET) && !data.includes("npm test"));
@@ -187,5 +202,5 @@ test("real V1 post-turn intervention writes fixed reasons but never raw command 
     assert.deepEqual(event.reasons, [
       { rule: "integrity/no-silent-failure", code: "masked-verification-failure" },
     ]);
-  } finally { await hooks.dispose?.(); }
+  } finally { await cleanup?.(); }
 });

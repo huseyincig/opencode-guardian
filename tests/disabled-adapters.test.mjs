@@ -19,23 +19,6 @@ function disabledDirectory(t) {
   return directory;
 }
 
-test("disabled V1 plugin does not inject task contracts or inspect idle turns", async (t) => {
-  const directory = disabledDirectory(t);
-  const hooks = await Guardian.server({ directory, client: { session: {
-    async messages() { assert.fail("disabled plugin must not inspect a session"); },
-    async promptAsync() { assert.fail("disabled plugin must not send remediation"); },
-  } } });
-  assert.equal(hooks["tool.execute.before"], undefined);
-  await hooks["chat.message"]({ sessionID: "disabled", messageID: "u" }, {
-    parts: [{ type: "text", text: "Implement the requested fix" }],
-  });
-  const output = { system: [] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "disabled" }, output);
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "disabled" } } });
-  assert.deepEqual(output.system, []);
-  assert.equal(readGuardianStatus().preflight, "disabled");
-});
-
 test("disabled V2 plugin does not subscribe or register hooks", async (t) => {
   const directory = disabledDirectory(t);
   const cleanup = await Guardian.setup({ location: { directory },

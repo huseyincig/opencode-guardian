@@ -347,12 +347,18 @@ export function sanitizeObject<T>(
         return output;
       }
 
+      if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {
+        return val;
+      }
+
       if (Array.isArray(val)) {
         return val.map((item) => recurse(item));
       }
 
       if (typeof val === 'object') {
-        const output: Record<string, unknown> = {};
+        const proto = Object.getPrototypeOf(val);
+        const output: Record<string, unknown> =
+          proto && proto !== Object.prototype ? Object.create(proto) : {};
         for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
           Object.defineProperty(output, k, {
             value: propertyValue(k, v), enumerable: true, writable: true, configurable: true,
@@ -397,7 +403,7 @@ export function sanitizeToolResult<T>(result: T, options: SanitizerOptions = {})
       // Check for common tool result shapes
       const resObj = result as Record<string, unknown>;
 
-      // 1. OpenCode V1/V2 tool output shape: { title?, output, metadata? }
+      // 1. OpenCode V2 tool output shape: { title?, output, metadata? }
       if ('output' in resObj && typeof resObj.output === 'string') {
         // output may coexist with content, title and provider-specific fields.
         // Redact the complete envelope before returning any sibling to a host.

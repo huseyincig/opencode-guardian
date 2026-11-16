@@ -237,47 +237,62 @@ test("Suite 4: Read-only subagent output in various languages receives 0 synthet
 
   for (const { lang, text } of multilingualOutputs) {
     let syntheticCalls = 0;
-    const client = {
+    const hooks = new Map();
+    const cleanup = await OpencodeGuardian.setup({
+      location: { directory: process.cwd() },
+      options: { secrets: { enabled: false } },
+      event: { subscribe: () => (async function* () {})() },
+      tool: {
+        hook: async (name, handler) => {
+          hooks.set(name, handler);
+          return { dispose() {} };
+        },
+      },
       session: {
-        get: async () => ({ data: { id: `child-${lang}`, parentID: "parent-root" } }),
-        messages: async () => ({
-          data: [
-            { info: { id: "u-sub", role: "user" }, parts: [{ type: "text", text: "Audit the codebase thoroughly." }] },
-            { info: { id: "a-sub", role: "assistant", agent: "auditor" }, parts: [{ type: "text", text }] },
+        get: async ({ sessionID }) => ({
+          id: sessionID,
+          parentID: sessionID.startsWith("child-") ? "parent-root" : undefined,
+        }),
+        context: async () => [
+          { id: "u-sub", type: "user", text: "Audit the codebase thoroughly." },
+          { id: "a-sub", type: "assistant", agent: "auditor", content: [{ type: "text", text }] },
+        ],
+        synthetic: async () => { syntheticCalls++; },
+        wait: async () => {},
+      },
+      agent: {
+        list: async () => [{
+          name: "auditor",
+          permission: [
+            { permission: "edit", pattern: "*", action: "deny" },
+            { permission: "bash", pattern: "*", action: "deny" },
           ],
-        }),
-        prompt: async () => { syntheticCalls++; return { data: {} }; },
-        promptAsync: async () => { syntheticCalls++; return { data: {} }; },
+        }],
       },
-      app: {
-        agents: async () => ({
-          data: [{
-            name: "auditor",
-            permission: { edit: "deny", bash: "deny" },
-            tools: { read_file: true, grep: true },
-          }],
-        }),
-      },
-    };
+    });
 
-    const plugin = await OpencodeGuardian.server({ client, directory: process.cwd() });
-    await plugin["tool.execute.before"](
-      { tool: "task", sessionID: "parent-root", callID: `call-${lang}` },
-      { args: { agent: "auditor", prompt: "audit" } }
-    );
+    await hooks.get("execute.before")?.({
+      tool: "task",
+      sessionID: "parent-root",
+      callID: `call-${lang}`,
+      input: { agent: "auditor", prompt: "audit" },
+    });
 
-    const output = {
+    const result = {
       output: text,
       metadata: { sessionId: `child-${lang}`, background: false },
     };
 
-    await plugin["tool.execute.after"](
-      { tool: "task", sessionID: "parent-root", callID: `call-${lang}`, args: { agent: "auditor" } },
-      output
-    );
-    await plugin.dispose();
+    await hooks.get("execute.after")({
+      tool: "task",
+      sessionID: "parent-root",
+      callID: `call-${lang}`,
+      input: { agent: "auditor" },
+      result,
+    });
+    await cleanup();
 
     assert.equal(syntheticCalls, 0, `Read-only auditor in ${lang} must receive 0 synthetic prompts`);
-    assert.match(output.output, new RegExp(text), `Output in ${lang} must be preserved intact`);
+    assert.match(result.output, new RegExp(text), `Output in ${lang} must be preserved intact`);
   }
 });

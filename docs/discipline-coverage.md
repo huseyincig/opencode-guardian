@@ -1,6 +1,6 @@
 # Engine discipline coverage and evidence boundaries
 
-Guardian v0.14.0 strengthens the shared engine. It keeps the existing fourteen rule IDs, host adapters and remediation budgets, and adds no runtime dependencies or installed skills.
+Guardian v0.15.0 targets pure OpenCode V2 (`>=2.3.0`). It keeps the existing fourteen rule IDs and remediation budgets, adds the typed `./rpc` export and `shell.hook("create.before")` preflight, and adds no runtime dependencies or installed skills. (OpenCode V1 support ended in `v0.14.0`.)
 
 ## Evidence
 
@@ -37,7 +37,7 @@ The output parser supports selected observed formats, not all runner versions. N
 
 ## Edit observations and safety
 
-Existing V1/V2 before/after hooks capture hashes, sizes and declaration-name sets for recognized whole-file `content` writes. Files must resolve inside the project, be regular files and not exceed 2 MiB. A file with more than 1,024 distinct declaration names is outside this bounded observation. Pending before observations are capped at 32 per session and completed records at 512; session cleanup clears them. Raw source content is not retained in audit events.
+V2 before/after hooks capture hashes, sizes and declaration-name sets for recognized whole-file `content` writes via `VerificationSnapshotStore` (preserving both `editIntegrity` and `fingerprint` on the same `callID`). Files must resolve inside the project, be regular files and not exceed 2 MiB. A file with more than 1,024 distinct declaration names is outside this bounded observation. Pending before observations are capped at 32 per session and completed records at 512; session cleanup clears them. Raw source content is not retained in audit events.
 
 An advisory is produced when an observed successful replacement removes at least two declaration names and reduces byte length below half. These are explicit heuristics for review, **not proof of unintended deletion**. Targeted edits, missing before hooks, failed writes and unsupported mutation shapes do not invent a previous file. Empty successful replacements still count as mutations and invalidate prior verification.
 
@@ -64,7 +64,7 @@ Default production-dependency findings are advisory, including when the rule sev
 
 `tests/discipline-coverage.test.mjs` exercises one violation and one legitimate-negative case for each of the fourteen rules: 28 labeled cases, plus a corpus-completeness check. Focused suites add format, cancellation, symlink, empty-write, authorization and lexical adversarial cases. This small synthetic corpus is a regression baseline, not a real-world accuracy estimate. It does not justify equal precision/recall across disciplines or languages.
 
-Validation commands: `npm test`, `npm run typecheck`, `npm run typecheck:strict`, `npm run lint`, `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI. Existing published acceptance reports remain historical.
+Validation commands: `npm test`, `npm run typecheck`, `npm run typecheck:strict`, `npm run lint`, `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI. Existing published acceptance reports remain historical.
 
-Observed on 2026-10-20: **725 tests passed**, zero failed, cancelled or skipped; standard and strict TypeScript checks and lint passed. The isolated smoke scenario and all **18/18** comprehensive sandbox scenarios passed. The pre-change suite contained 619 tests. V1/V2 adapter tests exercise observed whole-file loss and the absence of before-hook evidence using simulated host callbacks. A live host/TUI acceptance run was not performed for this change.
+Observed on 2026-11-17 for **v0.15.0**: **765 / 765 tests passed**, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 107 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.3.0` + Bun `1.4.4` acceptance checks passed.
 

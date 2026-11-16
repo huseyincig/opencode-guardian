@@ -169,5 +169,5 @@ test("disabled update notices also disable sidebar update checks", () => {
     "utf8"
   );
   assert.match(source, /checkUpdates\?:\s*boolean/);
-  assert.match(source, /checkUpdates=\{config\.updateNotice\?\.enabled\s*!==\s*false\}/);
+  assert.match(source, /checkUpdates=\{sessionConfig\(\)\.updateNotice\?\.enabled\s*!==\s*false\}/);
 });

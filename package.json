@@ -1,7 +1,7 @@
 {
   "name": "opencode-guardian",
-  "version": "0.14.0",
-  "description": "Universal quality and safety guardian plugin for OpenCode AI agents (Dual-Mode: OpenCode v1 & v2)",
+  "version": "0.15.0",
+  "description": "Autonomous quality, discipline, and runtime security guardian plugin for OpenCode V2 AI agents",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,13 +10,13 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./server": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    },
     "./tui": {
       "import": "./dist/tui.js",
       "types": "./dist/tui.d.ts"
+    },
+    "./rpc": {
+      "import": "./dist/intervention-rpc.js",
+      "types": "./dist/intervention-rpc.d.ts"
     }
   },
   "files": [
@@ -26,12 +26,11 @@
     "CHANGELOG.md",
     "LICENSE",
     "index.js",
-    "server.js",
     "tui.js",
     "scripts/guardian-status.mjs"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"import('node:fs').then(f=>f.rmSync('dist',{recursive:true,force:true}))\" && tsc",
     "postbuild": "node scripts/emit-tui.mjs",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
@@ -63,10 +62,9 @@
   "devDependencies": {
     "@babel/core": "^7.29.7",
     "@babel/preset-typescript": "^7.27.1",
-    "@opencode-ai/plugin": "^1.18.34",
-    "@opencode/plugin": "^2.0.22",
-    "@opentui/core": "^0.5.14",
-    "@opentui/solid": "^0.5.14",
+    "@opencode/plugin": "^2.3.0",
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
     "@types/node": "^22.0.0",
     "babel-preset-solid": "^1.9.12",
     "oxlint": "1.87.0",
@@ -77,11 +75,15 @@
     "opencode-guardian-status": "scripts/guardian-status.mjs"
   },
   "peerDependencies": {
-    "@opentui/core": ">=0.5.8",
-    "@opentui/solid": ">=0.5.8",
+    "@opencode/plugin": ">=2.3.0",
+    "@opentui/core": ">=0.8.4",
+    "@opentui/solid": ">=0.8.4",
     "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    },
     "@opentui/core": {
       "optional": true
     },

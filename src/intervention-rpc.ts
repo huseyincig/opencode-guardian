@@ -1,3 +1,4 @@
+import type { Rpc } from "@opencode/plugin/rpc";
 import type { GuardianToastPayload } from "./toast.js";
 
 export const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
@@ -11,7 +12,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
       input: {
         type: "object",
         properties: {
-          sessionID: { type: "string", minLength: 1 },
+          sessionID: { type: "string", minLength: 1, maxLength: 256 },
         },
         required: ["sessionID"],
         additionalProperties: false,
@@ -33,7 +34,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
       input: {
         type: "object",
         properties: {
-          sessionID: { type: "string", minLength: 1 },
+          sessionID: { type: "string", minLength: 1, maxLength: 256 },
         },
         additionalProperties: false,
       },
@@ -48,7 +49,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
     },
   },
   events: {},
-} as const;
+} as const satisfies Rpc.Definition;
 
 export interface GuardianInterventionSnapshot extends GuardianToastPayload {
   active: boolean;
@@ -106,7 +107,7 @@ export function readGuardianInterventionSessionID(
 ): string | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
   const sessionID = (input as Record<string, unknown>).sessionID;
-  return typeof sessionID === "string" && sessionID.length > 0
+  return typeof sessionID === "string" && sessionID.length > 0 && sessionID.length <= 256
     ? sessionID
     : undefined;
 }

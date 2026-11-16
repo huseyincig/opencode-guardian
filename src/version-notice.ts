@@ -69,9 +69,10 @@ function writeCache(cachePath: string, latest: string, now: number): void {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (!privateDirectory(dir)) return;
     fd = fs.openSync(cachePath, fs.constants.O_WRONLY | fs.constants.O_CREAT |
-      fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+      (fs.constants.O_NOFOLLOW ?? 0), 0o600);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return;
+    fs.ftruncateSync(fd, 0);
     if (process.platform !== "win32") fs.fchmodSync(fd, 0o600);
     fs.writeSync(fd, JSON.stringify({ checkedAt: now, latest }));
   } catch {

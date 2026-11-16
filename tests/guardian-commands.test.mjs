@@ -10,9 +10,7 @@ import {
 import {
   GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport,
 } from "../dist/commands.js";
-import GuardianTui, {
-  registerGuardianV1Commands, registerGuardianV2Commands,
-} from "../dist/tui-standalone.js";
+import GuardianTui, { registerGuardianV2Commands } from "../dist/tui-standalone.js";
 
 function isolated(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-commands-"));
@@ -109,52 +107,6 @@ test("reset reports success only after recording the reset event", (t) => {
   const result = guardianResetReport(dir);
   assert.match(result.message, /No audit-log wipe was performed/);
   assert.equal(readGuardianStatus(dir).lastKind, "statistics-reset");
-});
-
-test("V1 uses the installed command.register contract and requires reset confirmation", async (t) => {
-  const dir = isolated(t);
-  let registered;
-  let dialogState;
-  let dialogCleared = 0;
-  const dialog = {
-    setSize() {},
-    replace(render) { dialogState = render(); },
-    clear() { dialogCleared++; },
-  };
-  const api = {
-    state: { path: { directory: dir } },
-    command: { register(factory) { registered = factory(); return () => {}; } },
-    ui: {
-      dialog,
-      DialogAlert: (props) => ({ ...props, type: "alert" }),
-      DialogConfirm: (props) => ({ ...props, type: "confirm" }),
-    },
-    slots: { register() {} },
-  };
-  registerGuardianV1Commands(api);
-  assert.equal(registered.length, 7);
-  for (const command of registered) {
-    assert.match(command.title, /^Guardian:/);
-    assert.match(command.slash.name, /^guardian-/);
-    assert.equal(typeof command.onSelect, "function");
-  }
-  recordGuardianEvent({ kind: "preflight-blocked", tool: "bash", rules: ["destructive-command"] }, dir);
-  const status = registered.find((c) => c.value.endsWith(".status"));
-  await status.onSelect();
-  assert.equal(dialogState.type, "alert");
-  assert.ok(dialogState.message.includes("Blocked tools (preflight): 1"));
-  const reset = registered.find((c) => c.value.endsWith(".reset"));
-  await reset.onSelect();
-  assert.equal(dialogState.type, "confirm");
-  dialogState.onCancel();
-  assert.equal(dialogCleared, 1);
-  assert.equal(readGuardianStatus(dir).blocked, 1);
-  await reset.onSelect();
-  dialogState.onConfirm();
-  assert.equal(readGuardianStatus(dir).blocked, 0);
-  assert.equal(dialogState.type, "alert");
-  assert.match(dialogState.message, /Counters reset/);
-  assert.equal(typeof GuardianTui.tui, "function");
 });
 
 test("V2 registers a pure keymap layer with Ctrl+P and slash and prompts for reset", async (t) => {
@@ -277,26 +229,6 @@ test("V2 command actions resolve the current project at invocation time", async 
   await reset.run();
   assert.equal(readGuardianStatus(a).blocked, 1);
   assert.equal(readGuardianStatus(b).warnings, 0);
-});
-
-test("V1 command registration disposes with the verified TUI lifecycle", async (t) => {
-  const dir = isolated(t);
-  let registered = 0;
-  let disposed = 0;
-  const cleanup = [];
-  await GuardianTui.tui({
-    state: { path: { directory: dir } },
-    slots: { register() { return "guardian-slot"; } },
-    command: { register(factory) {
-      registered = factory().length;
-      return () => { disposed++; };
-    } },
-    lifecycle: { onDispose(fn) { cleanup.push(fn); return () => {}; } },
-  });
-  assert.equal(registered, 7);
-  assert.equal(cleanup.length, 1);
-  cleanup[0]();
-  assert.equal(disposed, 1);
 });
 
 test("V2 setup owns global commands independent of sidebar and conversation rendering", (t) => {

@@ -30,11 +30,13 @@ function compile(moduleName) {
 }
 
 const runtime = compile("opentui:runtime-module:%40opentui%2Fsolid")
-  .replace(/from (["'])solid-js\1/g, 'from "opentui:runtime-module:solid-js"');
+  .replace(/from (["'])solid-js\1/g, 'from "opentui:runtime-module:solid-js"')
+  .replace(/from (["'])@opentui\/core\1/g, 'from "opentui:runtime-module:%40opentui%2Fcore"');
 const standalone = compile("@opentui/solid");
 
 if (runtime.includes('from "@opentui/solid"') ||
     runtime.includes('from "@opentui/solid/jsx-runtime"') ||
+    runtime.includes('from "@opentui/core"') ||
     runtime.includes('from "solid-js"') ||
     runtime.includes('from "@opencode/plugin/tui"')) {
   throw new Error("Guardian host TUI still imports an isolated/bare runtime");
@@ -55,17 +57,14 @@ writeFileSync(path.join(dist, "tui.js"), [
   "try {",
   '  await import("opentui:runtime-module:%40opentui%2Fsolid");',
   "  hostRuntime = true;",
-  "} catch (error) {",
-  '  if (error?.code !== "ERR_MODULE_NOT_FOUND" && error?.code !== "ERR_UNSUPPORTED_ESM_URL_SCHEME" &&',
-  '      error?.code !== "ERR_UNKNOWN_URL_SCHEME") throw error;',
+  "} catch {",
+  "  hostRuntime = false;",
   "}",
   "const implementation = hostRuntime",
   '  ? await import("./tui-runtime.js")',
   '  : await import("./tui-standalone.js");',
   "export default implementation.default;",
-  "export const tui = implementation.default.tui;",
   "export const setup = implementation.default.setup;",
-  "export const registerGuardianV1Commands = implementation.registerGuardianV1Commands;",
   "export const registerGuardianV2Commands = implementation.registerGuardianV2Commands;",
   "",
 ].join("\n"));

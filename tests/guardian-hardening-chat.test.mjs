@@ -9,8 +9,6 @@ import Guardian, {
   GUARDIAN_INTERVENTION_RPC_METHOD,
 } from "../dist/index.js";
 
-const v1Server = Guardian.server;
-
 function failedEvidence() {
   const failure = {
     kind: "test",
@@ -53,96 +51,6 @@ test("write-capable root blocks an unresolved concrete failure without an explic
   assert.equal(result.decision, "block");
   assert.ok(result.findings.some((finding) => finding.pattern === "unresolved test failure"));
 });
-
-
-test("V1 remediation creates a visible display-only Guardian transcript message", async (t) => {
-  const fs = await import("node:fs");
-  const os = await import("node:os");
-  const path = await import("node:path");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-chat-v1-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-
-  const prompts = [];
-  const mockClient = {
-    session: {
-      get: async () => ({ data: { parentID: undefined } }),
-      messages: async () => ({
-        data: [
-          {
-            info: { id: "u1", role: "user" },
-            parts: [{ type: "text", text: "Fix the bug." }],
-          },
-          {
-            info: { id: "a1", role: "assistant", time: { completed: 1 } },
-            parts: [{ type: "text", text: "The test failure is unrelated to this change." }],
-          },
-        ],
-      }),
-      promptAsync: async (request) => {
-        prompts.push(request);
-        return { data: {} };
-      },
-    },
-  };
-
-  const hooks = await v1Server({ client: mockClient, directory: dir });
-  await hooks.event({
-    event: {
-      type: "session.idle",
-      properties: { sessionID: "root-v1" },
-    },
-  });
-
-  const remediation = prompts.find((request) => request.body?.parts?.[0]?.synthetic === true);
-  assert.ok(remediation, "synthetic remediation must still be delivered to the agent");
-
-  const visible = prompts.find((request) =>
-    request.body?.noReply === true &&
-    request.body?.parts?.[0]?.ignored === true &&
-    request.body?.parts?.[0]?.synthetic !== true &&
-    request.body?.parts?.[0]?.metadata?.["opencode-guardian-visible"] === true
-  );
-
-  assert.ok(visible, "Guardian intervention must also be visible in the transcript");
-  const text = visible.body.parts[0].text;
-  assert.match(text, /GUARDIAN · ERROR/);
-  assert.match(text, /discipline\/no-evasion/);
-  assert.doesNotMatch(text, /unrelated to this change/);
-});
-
-
-test("V1 visible Guardian transcript rows never become human task contracts", async () => {
-  const mockClient = { session: {} };
-  const hooks = await v1Server({ client: mockClient, directory: process.cwd() });
-
-  await hooks["chat.message"](
-    { sessionID: "display-only-v1", messageID: "guardian-display-1" },
-    {
-      parts: [{
-        type: "text",
-        text: "Implement this change and run tests.",
-        ignored: true,
-        metadata: {
-          "opencode-guardian": true,
-          "opencode-guardian-visible": true,
-        },
-      }],
-    }
-  );
-
-  const transformed = { system: [] };
-  await hooks["experimental.chat.system.transform"](
-    { sessionID: "display-only-v1" },
-    transformed
-  );
-
-  assert.deepEqual(
-    transformed.system,
-    [],
-    "display-only Guardian rows must not replace the actual human task contract"
-  );
-});
-
 
 test("V2 remediation remains synthetic and does not create a phantom pending prompt", async (t) => {
   const fs = await import("node:fs");

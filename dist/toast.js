@@ -173,26 +173,7 @@ export function dispatchGuardianToast(payload, options) {
     // Disabling toast notifications must not disable that separate UI channel.
     if (options?.enabled === false)
         return;
-    // 2. V1 Host Client (client.tui.showToast)
-    const client = options?.client;
-    if (typeof client?.tui?.showToast === "function") {
-        try {
-            const showToast = client.tui.showToast;
-            void showToast({
-                body: {
-                    title: payload.title,
-                    message: payload.message,
-                    variant: payload.variant,
-                    duration: payload.duration,
-                },
-                ...(options?.directory ? { query: { directory: options.directory } } : {}),
-            }).catch(() => { });
-        }
-        catch {
-            // V1 toast dispatch failure is tolerated
-        }
-    }
-    // 3. V2 Context (context.ui.toast.show or context.client.tui.showToast)
+    // 2. V2 Context (context.ui.toast.show or context.client.tui.showToast)
     const context = options?.context;
     if (typeof context?.ui?.toast?.show === "function") {
         try {

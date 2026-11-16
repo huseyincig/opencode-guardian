@@ -50,7 +50,6 @@ export type GuardianToastClearListener = (
 ) => void | Promise<unknown>;
 
 export interface GuardianToastNotifierOptions extends GuardianToastScope {
-  client?: unknown;
   context?: unknown;
   enabled?: boolean | undefined;
 }
@@ -265,41 +264,7 @@ export function dispatchGuardianToast(
   // Disabling toast notifications must not disable that separate UI channel.
   if (options?.enabled === false) return;
 
-  // 2. V1 Host Client (client.tui.showToast)
-  const client = options?.client as
-    | {
-        tui?: {
-          showToast?: (opts: {
-            body: {
-              title: string;
-              message: string;
-              variant: "info" | "success" | "warning" | "error";
-              duration: number;
-            };
-            query?: { directory?: string };
-          }) => Promise<unknown>;
-        };
-      }
-    | undefined;
-
-  if (typeof client?.tui?.showToast === "function") {
-    try {
-      const showToast = client.tui.showToast;
-      void showToast({
-        body: {
-          title: payload.title,
-          message: payload.message,
-          variant: payload.variant,
-          duration: payload.duration,
-        },
-        ...(options?.directory ? { query: { directory: options.directory } } : {}),
-      }).catch(() => {});
-    } catch {
-      // V1 toast dispatch failure is tolerated
-    }
-  }
-
-  // 3. V2 Context (context.ui.toast.show or context.client.tui.showToast)
+  // 2. V2 Context (context.ui.toast.show or context.client.tui.showToast)
   const context = options?.context as
     | {
         ui?: {

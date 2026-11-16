@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import Guardian from "../dist/index.js";
 
-const ES = "Cada vez que encuentres un error, corrígelo y vuelve a revisar todo desde el principio hasta que no queden errores.";
 const ZH = "每发现一个错误就修复，然后从头重新检查，直到没有错误。";
 const CODE = "export const done = true;";
 
@@ -12,37 +11,6 @@ function previousFix() {
     metadata: { exit: 0 },
   } };
 }
-
-test("OpenCode V1 task hooks preserve a Spanish iterative task and request a bounded second pass", async () => {
-  const prompts = [];
-  const hooks = await Guardian.server({
-    directory: process.cwd(),
-    client: { session: {
-      async get({ path: requestPath }) {
-        return { data: { id: requestPath.id, parentID: undefined } };
-      },
-      async messages() {
-        return { data: [
-          { info: { id: "user-es", role: "user" }, parts: [{ type: "text", text: ES }] },
-          { info: { id: "agent-es", role: "assistant" }, parts: [
-            previousFix(), { type: "text", text: "Tarea completada." },
-          ] },
-        ] };
-      },
-      async promptAsync(input) { prompts.push(input.body.parts[0].text); },
-    } },
-  });
-  await hooks["chat.message"](
-    { sessionID: "spanish-task", messageID: "user-es" },
-    { message: { role: "user" }, parts: [{ type: "text", text: ES }] }
-  );
-  const output = { system: [] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "spanish-task" }, output);
-  assert.match(output.system.join("\n"), /another review pass/);
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "spanish-task" } } });
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /another substantive review/);
-});
 
 test("OpenCode V2 typed prompt/context and idle path preserve Chinese task requirements", async () => {
   const handlers = new Map();

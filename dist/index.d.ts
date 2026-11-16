@@ -1,4 +1,3 @@
-import type { Plugin as OpenCodeV1ServerPlugin } from "@opencode-ai/plugin";
 import type { Plugin as OpenCodeV2 } from "@opencode/plugin";
 import type { SessionMessage } from "./types.js";
 export * from "./types.js";
@@ -30,7 +29,6 @@ export * from "./preflight.js";
 export * from "./telemetry.js";
 export * from "./audit.js";
 export * from "./version-notice.js";
-export * from "./v1-turn-watcher.js";
 export * from "./handoff.js";
 export * from "./agent-capability.js";
 export * from "./secrets/index.js";
@@ -44,16 +42,14 @@ export * from "./provenance.js";
  */
 export declare function normalizeV2Messages(messages: readonly unknown[], sessionID?: string): SessionMessage[];
 /**
- * OpenCode Dual-Mode Plugin Definition.
+ * OpenCode V2 Plugin Definition.
  */
 export declare const OpencodeGuardian: {
     id: string;
-    server: OpenCodeV1ServerPlugin;
     setup: (context: OpenCodeV2.Context) => Promise<OpenCodeV2.Cleanup | void> | OpenCodeV2.Cleanup | void;
 };
 export declare const OpencodeGuard: {
     id: string;
-    server: OpenCodeV1ServerPlugin;
     setup: (context: OpenCodeV2.Context) => Promise<OpenCodeV2.Cleanup | void> | OpenCodeV2.Cleanup | void;
 };
 export default OpencodeGuardian;

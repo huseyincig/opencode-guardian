@@ -11,7 +11,7 @@ export interface GuardianEvent {
     kind: GuardianEventKind;
     action?: GuardianAction;
     outcome?: GuardianOutcome;
-    runtime?: "v1" | "v2";
+    runtime?: "v2";
     preflight?: PreflightState;
     /** Only a 16-character SHA-256 fingerprint, never the raw session ID. */
     session?: string;

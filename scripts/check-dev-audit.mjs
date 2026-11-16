@@ -30,7 +30,7 @@ if (!report.vulnerabilities || !report.metadata?.vulnerabilities) {
 const knownUpstreamChain = new Set([
   "@npmcli/arborist", "@npmcli/config", "@npmcli/map-workspaces",
   "@npmcli/metavuln-calculator", "@npmcli/package-json", "@npmcli/run-script",
-  "@opencode-ai/plugin", "@opencode/ai", "@opencode/client", "@opencode/plugin",
+  "@opencode/ai", "@opencode/client", "@opencode/plugin",
   "@opencode/protocol", "@opencode/schema", "@opencode/util", "@opentui/solid",
   "@sigstore/sign", "@sigstore/tuf", "@tufjs/models",
   "babel-plugin-module-resolver", "cacache", "effect", "gaxios", "gcp-metadata",

@@ -16,10 +16,10 @@ export declare class StreamLoopWatcher {
         notifier: GuardianToastNotifier;
     });
     clear(): void;
-    dispatch(raw: unknown, version: "v1" | "v2"): void;
+    dispatch(raw: unknown): void;
     drain(): Promise<void>;
     forget(sessionID: string): void;
     private response;
-    event(raw: unknown, version: "v1" | "v2"): Promise<void>;
+    event(raw: unknown): Promise<void>;
 }
 export {};

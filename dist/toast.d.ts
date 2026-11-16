@@ -33,7 +33,6 @@ export interface GuardianToastScope {
 export type GuardianToastListener = (payload: GuardianToastPayload, scope: GuardianToastScope) => void | Promise<unknown>;
 export type GuardianToastClearListener = (scope: GuardianToastScope) => void | Promise<unknown>;
 export interface GuardianToastNotifierOptions extends GuardianToastScope {
-    client?: unknown;
     context?: unknown;
     enabled?: boolean | undefined;
 }

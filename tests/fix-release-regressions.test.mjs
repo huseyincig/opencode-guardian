@@ -98,85 +98,89 @@ function tempProject(t) {
   return directory;
 }
 
-function failedAssistant(completed = false) {
+function failedAssistant() {
   return [
-    { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the broken tests." }] },
-    { info: { id: "a1", role: "assistant", ...(completed ? { time: { completed: 123456 } } : {}) },
-      parts: [{ type: "text", text: "The test failures are unrelated to my changes." }] },
+    { id: "u1", type: "user", text: "Fix the broken tests." },
+    { id: "a1", type: "assistant", content: [{ type: "text", text: "The test failures are unrelated to my changes." }] },
   ];
 }
 
-test("V1 rejected promptAsync response rolls back remediation and a later idle retries", async (t) => {
+test("V2 rejected synthetic response rolls back remediation and a later idle retries", async (t) => {
   const directory = tempProject(t);
   let syntheticAttempts = 0;
-  let visibleCalls = 0;
-  const hooks = await Guardian.server({ directory, client: { session: {
-    async get({ path: requestPath }) {
-      return { data: { id: requestPath.id, parentID: undefined } };
+  let emitEvent;
+  const cleanup = await Guardian.setup({
+    location: { directory },
+    options: { secrets: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const next = await new Promise((resolve) => { emitEvent = resolve; });
+            if (next === null) break;
+            yield next;
+          }
+        })();
+      },
     },
-    async messages() { return { data: failedAssistant() }; },
-    async promptAsync(input) {
-      const part = input.body?.parts?.[0];
-      if (part?.synthetic === true) {
+    session: {
+      async get() { return { id: "retry", parentID: undefined }; },
+      async context() { return failedAssistant(); },
+      async synthetic() {
         syntheticAttempts++;
-        return syntheticAttempts === 1
-          ? { data: undefined, error: { message: "simulated host rejection" } }
-          : { data: {}, error: undefined };
-      }
-      visibleCalls++;
-      return { data: {}, error: undefined };
+        if (syntheticAttempts === 1) throw new Error("simulated host rejection");
+      },
     },
-  } } });
-  t.after(async () => hooks.dispose?.());
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "retry" } } });
+  });
+  t.after(async () => { emitEvent?.(null); await cleanup?.(); });
+  emitEvent({ type: "session.idle", data: { sessionID: "retry" } });
+  for (let i = 0; i < 60 && readGuardianStatus(directory).errors === 0; i++) {
+    await new Promise((r) => setTimeout(r, 15));
+  }
   assert.equal(syntheticAttempts, 1);
-  assert.equal(visibleCalls, 0);
   assert.equal(readGuardianStatus(directory).remediations, 0);
   assert.equal(readGuardianStatus(directory).errors, 1);
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "retry" } } });
+  emitEvent({ type: "session.idle", data: { sessionID: "retry" } });
+  for (let i = 0; i < 60 && readGuardianStatus(directory).remediations === 0; i++) {
+    await new Promise((r) => setTimeout(r, 15));
+  }
   assert.equal(syntheticAttempts, 2);
-  assert.equal(visibleCalls, 1);
   assert.equal(readGuardianStatus(directory).remediations, 1);
 });
 
-test("V1 completion watcher also rejects an API error instead of recording a delivered remediation", async (t) => {
-  const directory = tempProject(t);
-  let attempts = 0;
-  const hooks = await Guardian.server({ directory, client: { session: {
-    async get({ path: requestPath }) {
-      return { data: { id: requestPath.id, parentID: undefined } };
-    },
-    async status() { return { data: {} }; },
-    async messages() { return { data: failedAssistant(true) }; },
-    async promptAsync() {
-      attempts++;
-      return { data: undefined, error: { message: "simulated host rejection" } };
-    },
-  } } });
-  t.after(async () => hooks.dispose?.());
-  await hooks["chat.message"]({ sessionID: "watcher", messageID: "u1" },
-    { parts: [{ type: "text", text: "Fix the broken tests." }] });
-  const deadline = Date.now() + 3600;
-  while (attempts === 0 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.equal(attempts, 1);
-  assert.equal(readGuardianStatus(directory).remediations, 0);
-  assert.equal(readGuardianStatus(directory).errors, 1);
-});
-
-test("V1 session fetch failures are reported without exposing raw exception in console", async (t) => {
+test("V2 session fetch failures are reported without exposing raw exception in console", async (t) => {
   const directory = tempProject(t);
   const marker = "SYNTHETIC_PRIVATE_ERROR_MARKER";
-  const hooks = await Guardian.server({ directory, client: { session: {
-    async messages() { throw new Error(marker); },
-  } } });
-  t.after(async () => hooks.dispose?.());
+  let emitEvent;
+  const cleanup = await Guardian.setup({
+    location: { directory },
+    options: { secrets: { enabled: false } },
+    event: {
+      subscribe({ signal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const next = await new Promise((resolve) => { emitEvent = resolve; });
+            if (next === null) break;
+            yield next;
+          }
+        })();
+      },
+    },
+    session: {
+      async get() { return { id: "failed-fetch", parentID: undefined }; },
+      async context() { throw new Error(marker); },
+      async synthetic() {},
+    },
+  });
+  t.after(async () => { emitEvent?.(null); await cleanup?.(); });
   const old = console.error;
   const captured = [];
   console.error = (...args) => captured.push(args);
   try {
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "failed-fetch" } } });
+    emitEvent({ type: "session.idle", data: { sessionID: "failed-fetch" } });
+    for (let i = 0; i < 60 && readGuardianStatus(directory).errors === 0; i++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
   } finally {
     console.error = old;
   }

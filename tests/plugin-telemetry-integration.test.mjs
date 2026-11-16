@@ -20,7 +20,7 @@ function setupProject(t, config) {
   return dir;
 }
 
-test("V1 server with telemetry.level='violations' suppresses preflight-allowed but writes preflight-blocked", async (t) => {
+test("V2 server with telemetry.level='violations' suppresses preflight-allowed but writes preflight-blocked", async (t) => {
   const dir = setupProject(t, {
     enabled: true,
     preflight: { enabled: true },
@@ -29,30 +29,35 @@ test("V1 server with telemetry.level='violations' suppresses preflight-allowed b
     secrets: { enabled: false },
   });
 
+  let executeBefore;
   const host = {
+    location: { directory: dir },
+    event: { subscribe: () => (async function* () {})() },
     session: {
-      async get() { return { data: { id: "s1" } }; },
-      async messages() { return { data: [] }; },
-      async promptAsync() { return { data: {} }; },
+      async context() { return []; },
+      async synthetic() {},
+    },
+    tool: {
+      async hook(name, handler) {
+        if (name === "execute.before") executeBefore = handler;
+        return { dispose() {} };
+      },
     },
   };
 
-  const hooks = await Guardian.server({ directory: dir, client: host });
-  t.after(() => hooks.dispose());
+  const cleanup = await Guardian.setup(host);
+  t.after(() => cleanup?.());
 
-  // Allowed command -> inspectPreflight -> preflight-allowed
-  await hooks["tool.execute.before"]({ sessionID: "s1", callID: "c1", tool: "bash" }, { args: { command: "ls -la" } });
+  await executeBefore({ sessionID: "s1", callID: "c1", tool: "bash", input: { command: "ls -la" } });
 
   const eventPath = guardianEventPath(dir);
-  // File might exist if runtime-started was written, but must NOT have preflight-allowed
   if (fs.existsSync(eventPath)) {
     const content = fs.readFileSync(eventPath, "utf8");
     assert.doesNotMatch(content, /preflight-allowed/);
   }
 
-  // Blocked command -> inspectPreflight -> preflight-blocked
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ sessionID: "s1", callID: "c2", tool: "bash" }, { args: { command: "rm -rf /" } }),
+    () => executeBefore({ sessionID: "s1", callID: "c2", tool: "bash", input: { command: "rm -rf /" } }),
     /GuardianPreflightError/
   );
 
@@ -62,7 +67,7 @@ test("V1 server with telemetry.level='violations' suppresses preflight-allowed b
   assert.doesNotMatch(content, /preflight-allowed/);
 });
 
-test("V1 server with telemetry.level='off' writes no events at all", async (t) => {
+test("V2 server with telemetry.level='off' writes no events at all", async (t) => {
   const dir = setupProject(t, {
     enabled: true,
     preflight: { enabled: true },
@@ -71,20 +76,28 @@ test("V1 server with telemetry.level='off' writes no events at all", async (t) =
     secrets: { enabled: false },
   });
 
+  let executeBefore;
   const host = {
+    location: { directory: dir },
+    event: { subscribe: () => (async function* () {})() },
     session: {
-      async get() { return { data: { id: "s1" } }; },
-      async messages() { return { data: [] }; },
-      async promptAsync() { return { data: {} }; },
+      async context() { return []; },
+      async synthetic() {},
+    },
+    tool: {
+      async hook(name, handler) {
+        if (name === "execute.before") executeBefore = handler;
+        return { dispose() {} };
+      },
     },
   };
 
-  const hooks = await Guardian.server({ directory: dir, client: host });
-  t.after(() => hooks.dispose());
+  const cleanup = await Guardian.setup(host);
+  t.after(() => cleanup?.());
 
-  await hooks["tool.execute.before"]({ sessionID: "s1", callID: "c1", tool: "bash" }, { args: { command: "echo ok" } });
+  await executeBefore({ sessionID: "s1", callID: "c1", tool: "bash", input: { command: "echo ok" } });
   await assert.rejects(
-    () => hooks["tool.execute.before"]({ sessionID: "s1", callID: "c2", tool: "bash" }, { args: { command: "rm -rf /" } }),
+    () => executeBefore({ sessionID: "s1", callID: "c2", tool: "bash", input: { command: "rm -rf /" } }),
     /GuardianPreflightError/
   );
 

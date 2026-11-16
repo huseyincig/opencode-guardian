@@ -26,11 +26,6 @@ export interface NormalizedAgentInput {
     tools?: Record<string, boolean> | undefined;
     permission?: unknown;
     permissions?: unknown;
-    v1Permission?: {
-        edit?: string | undefined;
-        bash?: string | Record<string, string> | undefined;
-        [key: string]: unknown;
-    } | undefined;
     v2Permissions?: V2PermissionRule[] | undefined;
 }
 /**
@@ -48,14 +43,6 @@ export declare function cacheV2SessionPermissions(sessionID: string, permissions
 export declare function getCachedV2SessionPermissions(sessionID: string): readonly V2PermissionRule[] | undefined;
 export declare function clearAgentCapability(sessionID: string): void;
 export declare function clearAllAgentCapabilities(): void;
-/**
- * Resolves capability for a V1 agent via the V1 client.
- */
-export declare function resolveV1AgentCapability(client: {
-    app?: {
-        agents?: (...args: any[]) => Promise<any>;
-    } | undefined;
-}, directory: string, agentName?: string | undefined, messageTools?: Record<string, boolean> | undefined): Promise<AgentMutationProfile>;
 /**
  * Resolves capability for a V2 agent via the V2 context.
  */

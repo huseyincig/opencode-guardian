@@ -17,13 +17,16 @@ export declare function extractMutatedFilePath(part: MessagePart): string | unde
 export declare function calculateProductFingerprint(directory?: string, files?: Iterable<string>): string;
 /** Captured by a real tool-after event, not reconstructed from message history. */
 export interface VerificationSnapshot {
-    fingerprint: string;
+    fingerprint?: string | undefined;
     files: string[];
     editIntegrity?: EditIntegrityEvidence;
 }
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export declare class VerificationSnapshotStore {
     private readonly sessions;
+    private static readonly MAX_SESSIONS;
+    private static readonly MAX_PATHS;
+    private getOrCreateSession;
     observeBefore(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, directory: string): void;
     observe(sessionID: string, callID: string, tool: string, input: Record<string, unknown>, output: unknown, metadata: Record<string, unknown>, directory: string, status?: string): void;
     beginTurn(sessionID: string): void;

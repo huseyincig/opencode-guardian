@@ -58,11 +58,9 @@ async function host(t, directory, sessionDirectory, overrides = {}) {
   } };
 }
 
-test("native write preflight checks V1/V2 paths, secrets and truncation", async t => {
+test("native write preflight checks V2 paths, secrets and truncation", async t => {
   const { create } = projects(t);
   const directory = create("strict", { preflight: { enabled: true }, secrets: { enabled: false } });
-  const v1 = await Guardian.server({ directory, client: { session: {} } });
-  t.after(() => v1.dispose());
   const v2 = await host(t, directory, directory);
   for (const field of ["filePath", "path"]) {
     for (const [content, reason] of [
@@ -71,8 +69,6 @@ test("native write preflight checks V1/V2 paths, secrets and truncation", async 
     ]) {
       const args = { [field]: "src/a.ts", content };
       assert.equal(evaluatePreflight("write", args), reason);
-      await assert.rejects(v1["tool.execute.before"](
-        { tool: "write", sessionID: "s", callID: "c" }, { args }), e => e.reason === reason);
       await assert.rejects(async () => v2.tools.get("execute.before")(
         { tool: "write", sessionID: "s", id: "c", input: args }), e => e.reason === reason);
     }

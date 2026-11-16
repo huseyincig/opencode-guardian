@@ -5,7 +5,7 @@ import type { MessagePart, SessionMessage } from "./types.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
-import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
+import { configureGuardianTelemetry, recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
@@ -33,6 +33,7 @@ import {
 } from "./secrets/index.js";
 import {
   createGuardianToastNotifier,
+  dispatchGuardianToastClear,
   formatGuardianToast,
   type GuardianToastNotifier,
   type GuardianToastPayload,
@@ -47,6 +48,7 @@ import {
   isTrustedGuardianMetadata,
 } from "./provenance.js";
 import {
+  GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD,
   GUARDIAN_INTERVENTION_RPC_DEFINITION,
   GUARDIAN_INTERVENTION_RPC_METHOD,
   activeGuardianIntervention,
@@ -323,6 +325,86 @@ function latestAssistantText(messages: readonly SessionMessage[]): string | unde
   return text || undefined;
 }
 
+const INTERVENTION_TRACKER = Symbol("opencode-guardian.intervention-tracker");
+
+interface InterventionResolutionTracker {
+  noteHumanPrompt(sessionID: string): void;
+  recordOutcome(
+    sessionID: string,
+    result: EngineExecutionResult,
+    findingsCount: number,
+    toastNotifier?: GuardianToastNotifier
+  ): void;
+  forget(sessionID: string): void;
+}
+
+type TrackedGuardianToastNotifier = GuardianToastNotifier & {
+  [INTERVENTION_TRACKER]?: InterventionResolutionTracker;
+};
+
+function createTrackedToastNotifier(base: GuardianToastNotifier): TrackedGuardianToastNotifier {
+  const remainingCleanTurns = new Map<string, number>();
+  const tracker: InterventionResolutionTracker = {
+    noteHumanPrompt(sessionID: string): void {
+      const remaining = remainingCleanTurns.get(sessionID);
+      if (remaining !== undefined && remaining > 1) {
+        remainingCleanTurns.set(sessionID, 1);
+      }
+    },
+    recordOutcome(
+      sessionID: string,
+      result: EngineExecutionResult,
+      findingsCount: number,
+      toastNotifier?: GuardianToastNotifier
+    ): void {
+      if (result.remediationStatus === "verified") {
+        remainingCleanTurns.delete(sessionID);
+        return;
+      }
+      if (
+        findingsCount > 0 ||
+        result.decision === "block" ||
+        result.remediationStatus === "failed" ||
+        result.remediationStatus === "unverified"
+      ) {
+        if (remainingCleanTurns.has(sessionID) && (remainingCleanTurns.get(sessionID) ?? 0) < 1) {
+          remainingCleanTurns.set(sessionID, 1);
+        }
+        return;
+      }
+      if (result.results.length === 0) return;
+      const remaining = remainingCleanTurns.get(sessionID);
+      if (remaining === undefined) return;
+      if (remaining <= 1) {
+        remainingCleanTurns.delete(sessionID);
+        toastNotifier?.clear?.(sessionID);
+      } else {
+        remainingCleanTurns.set(sessionID, remaining - 1);
+      }
+    },
+    forget(sessionID: string): void {
+      remainingCleanTurns.delete(sessionID);
+    },
+  };
+  return {
+    notify(input): void {
+      if (typeof input.sessionID === "string" && input.sessionID.length > 0) {
+        const requiredCleanTurns =
+          input.kind === "stream-interrupt-requested" || input.kind === "preflight-blocked"
+            ? 2
+            : 1;
+        remainingCleanTurns.set(input.sessionID, requiredCleanTurns);
+      }
+      base.notify(input);
+    },
+    clear(sessionID: string): void {
+      remainingCleanTurns.delete(sessionID);
+      base.clear?.(sessionID);
+    },
+    [INTERVENTION_TRACKER]: tracker,
+  };
+}
+
 function recordInspectionOutcome(
   result: EngineExecutionResult,
   sessionID: string,
@@ -381,6 +463,12 @@ function recordInspectionOutcome(
     });
   }
 
+  (toastNotifier as TrackedGuardianToastNotifier | undefined)?.[INTERVENTION_TRACKER]?.recordOutcome(
+    sessionID,
+    result,
+    findings.length,
+    toastNotifier
+  );
   return findings;
 }
 
@@ -616,6 +704,7 @@ function inspectPreflight(
 
 const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptions) => {
   const mergedConfig = resolveEffectiveConfig(loadConfig(directory), pluginOptions);
+  configureGuardianTelemetry(directory, mergedConfig.telemetry);
   if (mergedConfig.enabled === false) {
     recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "disabled" }, directory);
     // Preserve the V1 hook shape without inspecting turns or injecting context.
@@ -627,11 +716,11 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
   }
   const unregisterGuardianCapability = registerGuardianCapability();
   const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
-  const toastNotifier = createGuardianToastNotifier({
+  const toastNotifier = createTrackedToastNotifier(createGuardianToastNotifier({
     client,
     directory,
     enabled: mergedConfig.notifications?.enabled !== false,
-  });
+  }));
   const engine = new GuardEngine(mergedConfig);
   const verificationStore = new VerificationSnapshotStore();
   const contracts = new Map<string, TaskContract>();
@@ -834,6 +923,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
       }
       provenanceSessions.clear();
       unregisterGuardianCapability();
+      configureGuardianTelemetry(directory, undefined);
     },
     "tool.execute.before": async (input, output) => {
       const args =
@@ -1007,6 +1097,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
         .map((part) => part.type === "text" ? part.text : "")
         .join("\n");
       if (!guardianRemediation) {
+        toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(input.sessionID);
         cancelSessionInspection(input.sessionID);
         verificationStore.beginTurn(input.sessionID);
         contracts.delete(input.sessionID);
@@ -1092,6 +1183,7 @@ const server: OpenCodeV1ServerPlugin = async ({ client, directory }, pluginOptio
           eventData.data?.sessionID ??
           eventData.data?.info?.id;
         if (deletedSessionID) {
+          toastNotifier.clear?.(deletedSessionID);
           cancelSessionInspection(deletedSessionID);
           watcher?.stop(deletedSessionID);
           engine.forgetSession(deletedSessionID);
@@ -1169,6 +1261,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   // silently disappear merely because another v2 capability is unavailable.
   const directory = context?.location?.directory ?? process.cwd();
   const mergedConfig = resolveEffectiveConfig(loadConfig(directory), context.options);
+  configureGuardianTelemetry(directory, mergedConfig.telemetry);
   if (mergedConfig.enabled === false) {
     recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
     return;
@@ -1191,7 +1284,18 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     return;
   }
 
+  const runtimeByDirectory = new Map<string, {
+    config: typeof mergedConfig;
+    sanitizer: ReturnType<typeof resolveSanitizerOptions>;
+    engine: GuardEngine;
+  }>();
   const controller = new AbortController();
+  controller.signal.addEventListener("abort", () => {
+    configureGuardianTelemetry(directory, undefined);
+    for (const key of runtimeByDirectory.keys()) {
+      configureGuardianTelemetry(key, undefined);
+    }
+  });
   const provenanceSessions = new Set<string>();
   const v2GuardianMetadata = (
     sessionID: string,
@@ -1227,15 +1331,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
   let toolOutputProtectionReady = false;
   let modelRequestProtectionReady = false;
-  const runtimeByDirectory = new Map<string, {
-    config: typeof mergedConfig;
-    sanitizer: ReturnType<typeof resolveSanitizerOptions>;
-    engine: GuardEngine;
-  }>();
   const runtimeForDirectory = (runtimeDirectory: string) => {
     const key = runtimeDirectory || directory;
     const cached = runtimeByDirectory.get(key);
     const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
+    configureGuardianTelemetry(key, config.telemetry);
     const runtime = cached ?? {
       config,
       sanitizer: resolveSanitizerOptions(config),
@@ -1308,6 +1408,18 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               ? activeGuardianIntervention(payload)
               : inactiveGuardianIntervention();
           },
+          [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input) => {
+            const sessionID = readGuardianInterventionSessionID(input);
+            if (sessionID) {
+              toastNotifier.clear?.(sessionID);
+              return { cleared: true };
+            }
+            for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
+              toastNotifier.clear?.(activeSessionID);
+            }
+            dispatchGuardianToastClear({ directory });
+            return { cleared: true };
+          },
         }
       );
       if (rpcRegistration && typeof rpcRegistration.dispose === "function") {
@@ -1334,7 +1446,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     toastNotifiersByDirectory.set(key, notifier);
     return notifier;
   };
-  const toastNotifier: GuardianToastNotifier = {
+  const toastNotifier: TrackedGuardianToastNotifier = createTrackedToastNotifier({
     notify(input): void {
       if (
         typeof input.sessionID === "string" &&
@@ -1360,7 +1472,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       const runtimeDirectory = sessionDirectories.get(sessionID) ?? directory;
       baseToastForDirectory(runtimeDirectory).clear?.(sessionID);
     },
-  };
+  });
 
   const streamWatcher = new StreamLoopWatcher({
     signal: controller.signal,
@@ -1655,6 +1767,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           return;
         }
 
+        toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
         const text = event.prompt.text;
         if (!text) return;
         verificationStore.beginTurn(event.sessionID);
@@ -1796,6 +1909,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             verificationStore.forget(deletedSessionID);
             contracts.delete(deletedSessionID);
             foregroundHandoffs.delete(deletedSessionID);
+            toastNotifier.clear?.(deletedSessionID);
             interventionSnapshots.delete(deletedSessionID);
             clearAgentCapability(deletedSessionID);
             forgetGuardianProvenance(deletedSessionID);
@@ -1837,6 +1951,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             verificationStore.forget(movedSessionID);
             contracts.delete(movedSessionID);
             foregroundHandoffs.delete(movedSessionID);
+            toastNotifier.clear?.(movedSessionID);
             interventionSnapshots.delete(movedSessionID);
             clearAgentCapability(movedSessionID);
             forgetGuardianProvenance(movedSessionID);

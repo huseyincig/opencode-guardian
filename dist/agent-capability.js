@@ -7,7 +7,7 @@ export const KNOWN_READ_ONLY_TOOLS = new Set([
     "ask_question", "question", "form", "form_create", "form_get", "form_reply", "form_list",
     "subagent", "task",
     "lsp", "definition", "hover", "references", "document_symbols",
-    "status", "git_status", "vcs",
+    "status", "git_status", "vcs", "diff", "git_diff", "log", "git_log", "show", "git_show",
 ]);
 export function isKnownReadOnlyTool(toolName) {
     const normalized = toolName.toLowerCase().trim();

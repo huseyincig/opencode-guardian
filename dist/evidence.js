@@ -75,7 +75,16 @@ function statusFromPart(part, outputText) {
     if (!state)
         return { status: "unknown", errorText: "" };
     const errorText = stringify(state.error).trim();
-    const exitCode = parseExitCode(part);
+    let exitCode = parseExitCode(part);
+    // OpenCode v2.2.7+ shell results explicitly end with "Exit code: N" in the output
+    if (exitCode === undefined && outputText) {
+        const exitMatch = /(?:^|\n)Exit code:\s*(\d+)\s*$/im.exec(outputText);
+        if (exitMatch && exitMatch[1]) {
+            const parsed = Number(exitMatch[1]);
+            if (Number.isFinite(parsed))
+                exitCode = parsed;
+        }
+    }
     if (state.status === "error") {
         return {
             status: "failure",
@@ -89,6 +98,10 @@ function statusFromPart(part, outputText) {
             exitCode,
             errorText: exitCode === 0 ? "" : errorText || outputText,
         };
+    }
+    // OpenCode v2.2.7+ commands killed by a signal or timed out
+    if (/(?:^|\n)Command (?:killed by signal|timed out)\b/i.test(outputText)) {
+        return { status: "failure", errorText: outputText };
     }
     if (state.status === "completed") {
         // Trust the host's completed state unless an explicit non-zero exit code or

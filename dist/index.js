@@ -1,7 +1,7 @@
 import { GuardEngine, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
-import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
+import { configureGuardianTelemetry, recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore } from "./evidence.js";
 import { announceGuardianUpdate } from "./version-notice.js";
@@ -10,10 +10,10 @@ import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV1AgentCapability, resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, cacheV2SessionPermissions, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
 import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
-import { createGuardianToastNotifier, formatGuardianToast, } from "./toast.js";
+import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
 import { formatGuardianTranscriptMessage, GUARDIAN_VISIBLE_INTERVENTION_KEY, } from "./intervention.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
-import { GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
+import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
 export * from "./types.js";
 export * from "./engine.js";
@@ -251,6 +251,64 @@ function latestAssistantText(messages) {
         .trim();
     return text || undefined;
 }
+const INTERVENTION_TRACKER = Symbol("opencode-guardian.intervention-tracker");
+function createTrackedToastNotifier(base) {
+    const remainingCleanTurns = new Map();
+    const tracker = {
+        noteHumanPrompt(sessionID) {
+            const remaining = remainingCleanTurns.get(sessionID);
+            if (remaining !== undefined && remaining > 1) {
+                remainingCleanTurns.set(sessionID, 1);
+            }
+        },
+        recordOutcome(sessionID, result, findingsCount, toastNotifier) {
+            if (result.remediationStatus === "verified") {
+                remainingCleanTurns.delete(sessionID);
+                return;
+            }
+            if (findingsCount > 0 ||
+                result.decision === "block" ||
+                result.remediationStatus === "failed" ||
+                result.remediationStatus === "unverified") {
+                if (remainingCleanTurns.has(sessionID) && (remainingCleanTurns.get(sessionID) ?? 0) < 1) {
+                    remainingCleanTurns.set(sessionID, 1);
+                }
+                return;
+            }
+            if (result.results.length === 0)
+                return;
+            const remaining = remainingCleanTurns.get(sessionID);
+            if (remaining === undefined)
+                return;
+            if (remaining <= 1) {
+                remainingCleanTurns.delete(sessionID);
+                toastNotifier?.clear?.(sessionID);
+            }
+            else {
+                remainingCleanTurns.set(sessionID, remaining - 1);
+            }
+        },
+        forget(sessionID) {
+            remainingCleanTurns.delete(sessionID);
+        },
+    };
+    return {
+        notify(input) {
+            if (typeof input.sessionID === "string" && input.sessionID.length > 0) {
+                const requiredCleanTurns = input.kind === "stream-interrupt-requested" || input.kind === "preflight-blocked"
+                    ? 2
+                    : 1;
+                remainingCleanTurns.set(input.sessionID, requiredCleanTurns);
+            }
+            base.notify(input);
+        },
+        clear(sessionID) {
+            remainingCleanTurns.delete(sessionID);
+            base.clear?.(sessionID);
+        },
+        [INTERVENTION_TRACKER]: tracker,
+    };
+}
 function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
     const findings = result.results.filter((item) => item.findings.length > 0);
     // Only completed, non-duplicate rule evaluations count toward Inspected.
@@ -303,6 +361,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
             sessionID,
         });
     }
+    toastNotifier?.[INTERVENTION_TRACKER]?.recordOutcome(sessionID, result, findings.length, toastNotifier);
     return findings;
 }
 async function finalizeSubagentHandoff(input) {
@@ -502,6 +561,7 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
 }
 const server = async ({ client, directory }, pluginOptions) => {
     const mergedConfig = resolveEffectiveConfig(loadConfig(directory), pluginOptions);
+    configureGuardianTelemetry(directory, mergedConfig.telemetry);
     if (mergedConfig.enabled === false) {
         recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "disabled" }, directory);
         // Preserve the V1 hook shape without inspecting turns or injecting context.
@@ -513,11 +573,11 @@ const server = async ({ client, directory }, pluginOptions) => {
     }
     const unregisterGuardianCapability = registerGuardianCapability();
     const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
-    const toastNotifier = createGuardianToastNotifier({
+    const toastNotifier = createTrackedToastNotifier(createGuardianToastNotifier({
         client,
         directory,
         enabled: mergedConfig.notifications?.enabled !== false,
-    });
+    }));
     const engine = new GuardEngine(mergedConfig);
     const verificationStore = new VerificationSnapshotStore();
     const contracts = new Map();
@@ -704,6 +764,7 @@ const server = async ({ client, directory }, pluginOptions) => {
             }
             provenanceSessions.clear();
             unregisterGuardianCapability();
+            configureGuardianTelemetry(directory, undefined);
         },
         "tool.execute.before": async (input, output) => {
             const args = output.args && typeof output.args === "object" && !Array.isArray(output.args)
@@ -855,6 +916,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                 .map((part) => part.type === "text" ? part.text : "")
                 .join("\n");
             if (!guardianRemediation) {
+                toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(input.sessionID);
                 cancelSessionInspection(input.sessionID);
                 verificationStore.beginTurn(input.sessionID);
                 contracts.delete(input.sessionID);
@@ -920,6 +982,7 @@ const server = async ({ client, directory }, pluginOptions) => {
                     eventData.data?.sessionID ??
                     eventData.data?.info?.id;
                 if (deletedSessionID) {
+                    toastNotifier.clear?.(deletedSessionID);
                     cancelSessionInspection(deletedSessionID);
                     watcher?.stop(deletedSessionID);
                     engine.forgetSession(deletedSessionID);
@@ -987,6 +1050,7 @@ const setup = async (context) => {
     // silently disappear merely because another v2 capability is unavailable.
     const directory = context?.location?.directory ?? process.cwd();
     const mergedConfig = resolveEffectiveConfig(loadConfig(directory), context.options);
+    configureGuardianTelemetry(directory, mergedConfig.telemetry);
     if (mergedConfig.enabled === false) {
         recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
         return;
@@ -1006,7 +1070,14 @@ const setup = async (context) => {
         }
         return;
     }
+    const runtimeByDirectory = new Map();
     const controller = new AbortController();
+    controller.signal.addEventListener("abort", () => {
+        configureGuardianTelemetry(directory, undefined);
+        for (const key of runtimeByDirectory.keys()) {
+            configureGuardianTelemetry(key, undefined);
+        }
+    });
     const provenanceSessions = new Set();
     const v2GuardianMetadata = (sessionID, kind, base = {}) => {
         provenanceSessions.add(sessionID);
@@ -1036,11 +1107,11 @@ const setup = async (context) => {
     }
     let toolOutputProtectionReady = false;
     let modelRequestProtectionReady = false;
-    const runtimeByDirectory = new Map();
     const runtimeForDirectory = (runtimeDirectory) => {
         const key = runtimeDirectory || directory;
         const cached = runtimeByDirectory.get(key);
         const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
+        configureGuardianTelemetry(key, config.telemetry);
         const runtime = cached ?? {
             config,
             sanitizer: resolveSanitizerOptions(config),
@@ -1110,6 +1181,18 @@ const setup = async (context) => {
                         ? activeGuardianIntervention(payload)
                         : inactiveGuardianIntervention();
                 },
+                [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input) => {
+                    const sessionID = readGuardianInterventionSessionID(input);
+                    if (sessionID) {
+                        toastNotifier.clear?.(sessionID);
+                        return { cleared: true };
+                    }
+                    for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
+                        toastNotifier.clear?.(activeSessionID);
+                    }
+                    dispatchGuardianToastClear({ directory });
+                    return { cleared: true };
+                },
             });
             if (rpcRegistration && typeof rpcRegistration.dispose === "function") {
                 registrations.push(rpcRegistration);
@@ -1135,7 +1218,7 @@ const setup = async (context) => {
         toastNotifiersByDirectory.set(key, notifier);
         return notifier;
     };
-    const toastNotifier = {
+    const toastNotifier = createTrackedToastNotifier({
         notify(input) {
             if (typeof input.sessionID === "string" &&
                 input.sessionID.length > 0) {
@@ -1160,7 +1243,7 @@ const setup = async (context) => {
             const runtimeDirectory = sessionDirectories.get(sessionID) ?? directory;
             baseToastForDirectory(runtimeDirectory).clear?.(sessionID);
         },
-    };
+    });
     const streamWatcher = new StreamLoopWatcher({
         signal: controller.signal,
         directory,
@@ -1426,6 +1509,7 @@ const setup = async (context) => {
                     contracts.delete(event.sessionID);
                     return;
                 }
+                toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
                 const text = event.prompt.text;
                 if (!text)
                     return;
@@ -1541,6 +1625,7 @@ const setup = async (context) => {
                             verificationStore.forget(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
+                            toastNotifier.clear?.(deletedSessionID);
                             interventionSnapshots.delete(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
                             forgetGuardianProvenance(deletedSessionID);
@@ -1576,6 +1661,7 @@ const setup = async (context) => {
                             verificationStore.forget(movedSessionID);
                             contracts.delete(movedSessionID);
                             foregroundHandoffs.delete(movedSessionID);
+                            toastNotifier.clear?.(movedSessionID);
                             interventionSnapshots.delete(movedSessionID);
                             clearAgentCapability(movedSessionID);
                             forgetGuardianProvenance(movedSessionID);

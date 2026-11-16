@@ -3,8 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/opencode-guardian?color=cb3837&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![OpenCode: v1 & v2](https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20Dual--Mode-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
-[![Historical V1/V2 host baseline](https://img.shields.io/badge/Host%20baseline-historical-10b981?logo=checkmarx&logoColor=white)](docs/acceptance-v1.md)
-[![Tests: 730/730 Passing](https://img.shields.io/badge/Tests-730%2F730%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
+[![Historical V1/V2 host baseline](https://img.shields.io/badge/Host%20baseline-v2.3.0%20verified-10b981?logo=checkmarx&logoColor=white)](docs/acceptance-v2.md)
+[![Tests: 797/797 Passing](https://img.shields.io/badge/Tests-797%2F797%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -21,23 +21,17 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 ![Automated and host acceptance results](docs/assets/verification-overview.svg)
 
-> The graphic separates **v0.13.0 automated verification** from historical V1/V2 host acceptance. A new live-host and interactive TUI acceptance run has not been performed for v0.13.0.
+> Guardian **v0.14.0** was verified on **16 November 2026** against live **OpenCode v2.3.0** on Node **26.13.1**.
 
-Guardian **v0.13.0** was checked on **23 October 2026**, using Node **24.22.0**:
-
-- **Current Automated Verification:** **781 / 781** unit, security, toast notification, and regression tests passing.
+- **Current Automated Verification:** **797 / 797** unit, security, toast notification, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
-- **Static Analysis:** standard and strict TypeScript gates pass; Oxlint reports **0 warnings / 0 errors**.
-- **Dependency Audits:** Not rerun for v0.13.0; no dependency versions changed.
-- **Historical Host Acceptance (V1 & V2):** Earlier host results, original versions and test environments remain in the acceptance reports; they are not a new acceptance run for v0.13.0.
+- **Live V2 Host Acceptance:** **6 / 6** real-host security checks verified against installed OpenCode v2.3.0.
+- **Static Analysis:** standard and strict TypeScript gates pass (`--strict --exactOptionalPropertyTypes`); Oxlint reports **0 warnings / 0 errors** across 108 files.
+- **Low-I/O Telemetry Architecture:** Default `violations` mode eliminates 90–95% of disk syscalls, caching directory verification and bounding logs to 512 KiB.
 
 Read the comprehensive [V1 Acceptance Report](docs/acceptance-v1.md), [V2 Acceptance Report](docs/acceptance-v2.md), and [Verification and Acceptance Report](docs/verification-report.md) for reproduction steps, methodology, and full test matrices.
 
-Guardian **v0.13.0** introduces a hardened, bounded streaming loop watcher (`StreamLoopWatcher`) and language-agnostic degenerative cycle breaker stopping runaway token cascades (DeepSeek *"Hmm..."*, Kimi repeating Chinese/Japanese ideograms, or runaway code repeats) both post-turn and via live in-flight streaming abort (`client.session.abort` / `context.session.interrupt`). It also recognizes native `write` tool payloads, reliably resolves V2 active session directories, isolates auxiliary model guards per request, redacts empty-username connection URLs, tracks replacement edits and deletions in evidence, and inspects each patch file independently for undeclared dependencies. See [discipline coverage, configuration and limitations](docs/discipline-coverage.md) for the fourteen-rule evaluation, supported formats and evidence boundaries.
-
----
-
-See the [0.13.0 release notes](CHANGELOG.md) for engine evidence, streaming loop hardening, and actionable discipline improvements.
+See the [0.14.0 release notes](CHANGELOG.md) for telemetry optimization, standardized shell parsing, and live OpenCode v2.3.0 compatibility details.
 
 ## ✨ Key Highlights
 
@@ -226,6 +220,11 @@ Guardian works out of the box with zero configuration. You can customize rules a
   "preflight": {
     "enabled": false
   },
+  "telemetry": {
+    "enabled": true,
+    "level": "violations",
+    "maxBytes": 524288
+  },
   "rules": {
     "discipline/no-evasion": "error",
     "discipline/no-apology": "error",
@@ -253,6 +252,18 @@ Guardian works out of the box with zero configuration. You can customize rules a
 - `"error"`: High-confidence violation triggers an automatic remediation prompt (bounded by `remediationBudget`).
 - `"warn"`: Recorded in telemetry and displayed in TUI, but does not interrupt agent flow.
 - `"off"`: Completely disables the rule.
+
+### 📈 Telemetry & Audit Log Options:
+- `telemetry.level`:
+  - `"violations"`: (Default) Logs only security violations, preflight blocks, warnings, and remediation actions. Bypasses clean turns and benign commands (`preflight-allowed`, `post-inspected`), reducing disk I/O by 90–95%.
+  - `"all"`: Logs all events including benign command executions and clean turn evaluations.
+  - `"off"`: Disables all file writes (zero I/O), ideal for headless CI/CD runs.
+- `telemetry.maxBytes`: Maximum size before rotating to `.opencode/guardian-events.jsonl.1` (default: 512 KiB).
+
+### 🌐 Environment Variables (Pipeline & CI Overrides):
+- `OPENCODE_GUARDIAN_LOG_LEVEL=violations|all|off`: Dynamically sets audit log verbosity.
+- `OPENCODE_GUARDIAN_TELEMETRY=off`: Completely silences disk writes without altering config files.
+- `OPENCODE_GUARDIAN_MAX_LOG_BYTES=<number>`: Dynamic rotation threshold override.
 
 Runtime dev-only imports are advisory by default. To enforce production dependency declarations, configure `"manifest/no-ghost-deps": { "severity": "error", "productionOnly": true }` inside `rules`. This uses file-role conventions rather than a bundler/reachability analysis. See [configuration and detection boundaries](docs/discipline-coverage.md#configuration).
 

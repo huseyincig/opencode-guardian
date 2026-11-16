@@ -1,4 +1,6 @@
 import { type AuditReason } from "./audit.js";
+import type { GuardianTelemetryConfig, TelemetryLevel } from "./types.js";
+export type { GuardianTelemetryConfig, TelemetryLevel };
 export type GuardianEventKind = "stream-interrupt-requested" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected" | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
 export type GuardianAction = "interrupt-requested" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned" | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
@@ -39,6 +41,13 @@ export declare function guardianStateDirectory(directory?: string): string;
 export declare function guardianEventPath(directory?: string): string;
 export declare function sessionFingerprint(value: string): string;
 export declare function sessionFingerprint(value?: string): string | undefined;
+export declare function configureGuardianTelemetry(directory: string | undefined, config?: GuardianTelemetryConfig): void;
+export declare function clearGuardianTelemetryConfig(): void;
+export declare function resolveTelemetrySettings(directory?: string): {
+    enabled: boolean;
+    level: TelemetryLevel;
+    maxBytes: number;
+};
 export declare function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryArg?: string): boolean;
 /** Reads at most the newest 2 MiB across the current log and one archive. */
 export declare function readGuardianStatus(directoryOrMaxBytes?: string | number, maxBytesArg?: number): GuardianStatus;

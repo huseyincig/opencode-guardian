@@ -188,6 +188,8 @@ test("V1 session fetch failures are reported without exposing raw exception in c
 
 test("status reports the newest event instead of mistaking past blocked counters for current state", (t) => {
   const directory = tempProject(t);
+  process.env.OPENCODE_GUARDIAN_LOG_LEVEL = "all";
+  t.after(() => delete process.env.OPENCODE_GUARDIAN_LOG_LEVEL);
   recordGuardianEvent({ kind: "runtime-started", runtime: "v1", preflight: "active" }, directory);
   recordGuardianEvent({ kind: "preflight-blocked", rules: ["destructive-command"] }, directory);
   recordGuardianEvent({ kind: "post-remediation", rules: ["discipline/no-evasion"] }, directory);

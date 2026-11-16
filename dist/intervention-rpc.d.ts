@@ -1,6 +1,7 @@
 import type { GuardianToastPayload } from "./toast.js";
 export declare const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
 export declare const GUARDIAN_INTERVENTION_RPC_METHOD = "latest";
+export declare const GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD = "clear";
 export declare const GUARDIAN_INTERVENTION_RPC_DEFINITION: {
     readonly id: "opencode-guardian.intervention";
     readonly methods: {
@@ -37,6 +38,28 @@ export declare const GUARDIAN_INTERVENTION_RPC_DEFINITION: {
                     };
                 };
                 readonly required: readonly ["active", "title", "message", "variant", "duration"];
+                readonly additionalProperties: false;
+            };
+        };
+        readonly clear: {
+            readonly input: {
+                readonly type: "object";
+                readonly properties: {
+                    readonly sessionID: {
+                        readonly type: "string";
+                        readonly minLength: 1;
+                    };
+                };
+                readonly additionalProperties: false;
+            };
+            readonly output: {
+                readonly type: "object";
+                readonly properties: {
+                    readonly cleared: {
+                        readonly type: "boolean";
+                    };
+                };
+                readonly required: readonly ["cleared"];
                 readonly additionalProperties: false;
             };
         };

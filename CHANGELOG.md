@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.14.0 — 2026-11-16
+
+- **Low-I/O Telemetry & Bounded Audit Log (`telemetry.level`):**
+  - Introduce configurable audit log granularity (`"violations" | "all" | "off"`) with a safe, performance-first default of `"violations"`.
+  - In `"violations"` mode, high-frequency benign events (`preflight-allowed` on every shell command and `post-inspected` on clean turns) are eliminated, reducing disk I/O operations by 90–95% during active development and multi-command agent executions.
+  - Retain full audit trail for security-critical actions: blocks (`preflight-blocked`), warnings (`post-warning`), remediation requests (`post-remediation`), verification outcomes (`remediation-verified`, `remediation-failed`), errors (`inspection-error`), statistics resets, and runtime bootstrap.
+  - In `"off"` mode, suppresses all audit file operations (zero I/O) for headless CI/CD runs and resource-constrained environments.
+  - Lower default bounded rotation limit from 2 MiB to 512 KiB per archive (`512 * 1024` bytes), configurable via `telemetry.maxBytes`.
+  - Cache verified state directory permissions in-process (`verifiedStateDirs`) to eliminate redundant `mkdirSync` and `lstatSync` filesystem calls on every event write.
+- **Environment Variable Controls for Test Runners & Pipelines:**
+  - Add `OPENCODE_GUARDIAN_LOG_LEVEL=violations|all|off` to dynamically control log verbosity without touching project configuration files.
+  - Add `OPENCODE_GUARDIAN_TELEMETRY=off|0|false` to immediately silence disk I/O when running automated test suites (`npm test`, Jest, Vitest, pytest).
+  - Add `OPENCODE_GUARDIAN_MAX_LOG_BYTES=<number>` for dynamic log size threshold overrides.
+- **OpenCode v2.2.7+ – v2.3.0 Standardized Shell Output & Signal Termination:**
+  - Parse standardized `"Exit code: N"` lines at the end of shell outputs directly in `src/evidence.ts` when metadata is absent or stripped.
+  - Detect signal terminations (`Command killed by signal`) and timeouts (`Command timed out`) from v2.2.7+ CLI outputs and classify them accurately as verification failures rather than unexpected exceptions.
+- **Expanded Read-Only VCS Tools:**
+  - Register `diff`, `git_diff`, `log`, `git_log`, `show`, `git_show` in `KNOWN_READ_ONLY_TOOLS` in `src/agent-capability.ts`, preventing read-only git inspection commands from being misclassified as mutation channels.
+- **Engine, Lifecycle & TUI Hardening:**
+  - Fix temporal dead zone (TDZ) initialization order of `runtimeByDirectory` in V2 `setup` abort listeners.
+  - Fix syntax error in `src/index.ts` handler closing brace.
+  - Standardize condition statements in `src/tui.tsx` reset action to satisfy strict oxlint checks.
+- **Test Suite Expansion & Real OpenCode v2.3.0 Verification:**
+  - Add 16 new automated tests across `tests/telemetry-config-validation.test.mjs`, `tests/telemetry-optimization.test.mjs`, and `tests/plugin-telemetry-integration.test.mjs`, bringing test suite total to **797 tests** (100% passing).
+  - Verified with live OpenCode v2.3.0 CLI standalone server execution and 6/6 host acceptance security checks.
+
+Validation on Node 26.13.1 / OpenCode v2.3.0: 797 tests, strict TypeScript checks (`--strict --exactOptionalPropertyTypes`), Oxlint (0 warnings, 0 errors), smoke test, 18 simulated multi-turn scenarios, and live V2 host acceptance passed.
+
 ## 0.13.0 — 2026-10-23
 
 - Introduce hardened, bounded streaming loop watcher (`StreamLoopWatcher` in `src/stream-loop.ts`) shared across both OpenCode V1 and V2 host adapters.

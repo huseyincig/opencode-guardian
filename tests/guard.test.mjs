@@ -1454,6 +1454,48 @@ test("integrity/no-unverified-claims blocks a claim contradicted by the latest t
   assert.match(result.remediationPrompt, /contradictory completion claim/i);
 });
 
+test("integrity/no-unverified-claims blocks a claim when OpenCode v2.2.7+ shell output ends with Exit code: 1 without metadata", () => {
+  const context = makeEvidenceContext(
+    [
+      {
+        type: "tool",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "npm test" },
+          output: "npm test failed\nAssertionError: expected true but got false\n\nExit code: 1",
+        },
+      },
+    ],
+    "All tests pass."
+  );
+  const result = noUnverifiedClaimsRule.inspect(context);
+  assert.equal(result.decision, "block");
+  assert.equal(result.findings[0].confidence, "high");
+  assert.match(result.remediationPrompt, /contradictory completion claim/i);
+});
+
+test("integrity/no-unverified-claims blocks a claim when OpenCode v2.2.7+ command was killed by signal or timed out", () => {
+  const context = makeEvidenceContext(
+    [
+      {
+        type: "tool",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "npm test" },
+          output: "Command killed by signal: SIGKILL",
+        },
+      },
+    ],
+    "All tests pass."
+  );
+  const result = noUnverifiedClaimsRule.inspect(context);
+  assert.equal(result.decision, "block");
+  assert.equal(result.findings[0].confidence, "high");
+  assert.match(result.remediationPrompt, /contradictory completion claim/i);
+});
+
 test("integrity/no-unverified-claims does not block an unsupported claim by default", () => {
   const context = makeEvidenceContext([], "The build succeeded.");
   const result = noUnverifiedClaimsRule.inspect(context);

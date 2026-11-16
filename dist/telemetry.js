@@ -98,17 +98,72 @@ function checkFile(file) {
     if (process.platform !== "win32" && (stat.mode & 0o077) !== 0)
         fs.chmodSync(file, 0o600);
 }
+const telemetryConfigRegistry = new Map();
+const verifiedStateDirs = new Set();
+export function configureGuardianTelemetry(directory, config) {
+    const key = directory ? path.resolve(directory) : "__default__";
+    if (config) {
+        telemetryConfigRegistry.set(key, config);
+    }
+    else {
+        telemetryConfigRegistry.delete(key);
+    }
+}
+export function clearGuardianTelemetryConfig() {
+    telemetryConfigRegistry.clear();
+    verifiedStateDirs.clear();
+}
+export function resolveTelemetrySettings(directory) {
+    const envTelemetry = process.env.OPENCODE_GUARDIAN_TELEMETRY?.trim().toLowerCase();
+    if (envTelemetry === "off" || envTelemetry === "0" || envTelemetry === "false") {
+        return { enabled: false, level: "off", maxBytes: GUARDIAN_MAX_LOG_BYTES };
+    }
+    const envLevel = process.env.OPENCODE_GUARDIAN_LOG_LEVEL?.trim().toLowerCase();
+    const envMaxBytes = Number(process.env.OPENCODE_GUARDIAN_MAX_LOG_BYTES);
+    const key = directory ? path.resolve(directory) : "__default__";
+    const registered = telemetryConfigRegistry.get(key) ?? telemetryConfigRegistry.get("__default__");
+    const enabled = registered?.enabled !== false;
+    let level = registered ? (registered.level ?? "violations") : "all";
+    if (envLevel === "violations" || envLevel === "audit") {
+        level = "violations";
+    }
+    else if (envLevel === "off") {
+        level = "off";
+    }
+    else if (envLevel === "all") {
+        level = "all";
+    }
+    let maxBytes = registered?.maxBytes && Number.isFinite(registered.maxBytes) && registered.maxBytes > 0
+        ? Math.floor(registered.maxBytes)
+        : GUARDIAN_MAX_LOG_BYTES;
+    if (Number.isFinite(envMaxBytes) && envMaxBytes > 0) {
+        maxBytes = Math.floor(envMaxBytes);
+    }
+    return { enabled, level, maxBytes };
+}
 let reportedWriteFailure = false;
 export function recordGuardianEvent(event, directoryArg) {
+    const settings = resolveTelemetrySettings(directoryArg);
+    if (!settings.enabled || settings.level === "off") {
+        return true;
+    }
+    if (settings.level === "violations") {
+        if (event.kind === "preflight-allowed" || event.kind === "post-inspected") {
+            return true;
+        }
+    }
     try {
         const dir = guardianStateDirectory(directoryArg);
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        const stat = fs.lstatSync(dir);
         const isProjectDirectory = Boolean(directoryArg && !process.env.OPENCODE_GUARDIAN_STATE_DIR);
-        if (!stat.isDirectory() || (process.platform !== "win32" &&
-            ((!isProjectDirectory && (stat.mode & 0o077) !== 0) ||
-                (typeof process.getuid === "function" && stat.uid !== process.getuid())))) {
-            throw new Error("Guardian state directory is not private to the current user");
+        if (!verifiedStateDirs.has(dir) || !fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+            const stat = fs.lstatSync(dir);
+            if (!stat.isDirectory() || (process.platform !== "win32" &&
+                ((!isProjectDirectory && (stat.mode & 0o077) !== 0) ||
+                    (typeof process.getuid === "function" && stat.uid !== process.getuid())))) {
+                throw new Error("Guardian state directory is not private to the current user");
+            }
+            verifiedStateDirs.add(dir);
         }
         const line = JSON.stringify(safeEvent(event)) + "\n";
         const filePath = guardianEventPath(directoryArg);
@@ -122,7 +177,7 @@ export function recordGuardianEvent(event, directoryArg) {
             }
             if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600)
                 fs.fchmodSync(fd, 0o600);
-            if (info.size + Buffer.byteLength(line) > GUARDIAN_MAX_LOG_BYTES) {
+            if (info.size + Buffer.byteLength(line) > settings.maxBytes) {
                 // Keep exactly one bounded archive. Refuse unsafe pre-existing archive paths.
                 if (fs.existsSync(archive) || fs.lstatSync(archive, { throwIfNoEntry: false })) {
                     checkFile(archive);

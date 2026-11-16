@@ -8,11 +8,13 @@ import { readGuardianStatus } from "./telemetry.js";
 import { loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { announceGuardianUpdate, checkGuardianUpdate } from "./version-notice.js";
 import {
+  dispatchGuardianToastClear,
   registerToastClearListener,
   registerToastListener,
   type GuardianToastPayload,
 } from "./toast.js";
 import {
+  GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD,
   GUARDIAN_INTERVENTION_RPC_DEFINITION,
   GUARDIAN_INTERVENTION_RPC_METHOD,
   parseGuardianInterventionSnapshot,
@@ -93,8 +95,8 @@ function v2SessionDirectory(
 }
 
 function v2CommandDirectory(context: GuardianV2Context, fallback: string): string {
-  const route = context.ui.router.current();
-  if (route.type === "session") {
+  const route = context.ui?.router?.current?.();
+  if (route?.type === "session") {
     return v2SessionDirectory(context, route.sessionID, fallback);
   }
   return context.data.location.default()?.directory ?? fallback;
@@ -108,7 +110,8 @@ function v2UiConfig(directory: string, options: unknown) {
 }
 
 async function v2PerformCommand(
-  context: GuardianV2Context, command: GuardianCommand, directory: string
+  context: GuardianV2Context, command: GuardianCommand, directory: string,
+  onReset?: (directory: string) => void
 ): Promise<void> {
   if (command === "reset") {
     const confirmed = await context.ui.dialog.confirm({
@@ -118,6 +121,11 @@ async function v2PerformCommand(
     });
     if (confirmed !== true) return;
     const result = guardianResetReport(directory);
+    if (onReset) {
+      onReset(directory);
+    } else {
+      dispatchGuardianToastClear({ directory });
+    }
     await context.ui.dialog.alert(result);
     return;
   }
@@ -127,7 +135,8 @@ async function v2PerformCommand(
 
 /** Register in a host-owned Solid component: keymap.layer follows that owner's cleanup. */
 export function registerGuardianV2Commands(
-  context: GuardianV2Context, directory: () => string
+  context: GuardianV2Context, directory: () => string,
+  onReset?: (directory: string) => void
 ): void {
   if (typeof context.keymap?.layer !== "function") return;
   const commands = GUARDIAN_COMMANDS.map((command) => ({
@@ -137,7 +146,7 @@ export function registerGuardianV2Commands(
     group: "Guardian",
     palette: true as const,
     slash: { name: "guardian-" + command.id },
-    run: () => v2PerformCommand(context, command.id, directory()),
+    run: () => v2PerformCommand(context, command.id, directory(), onReset),
   }));
   context.keymap.layer(() => ({
     mode: "global",
@@ -158,7 +167,7 @@ export function registerGuardianV2Commands(
           });
           return;
         }
-        await v2PerformCommand(context, requested.id, directory());
+        await v2PerformCommand(context, requested.id, directory(), onReset);
       },
     }],
   }));
@@ -189,7 +198,9 @@ export function registerGuardianV1Commands(api: TuiPluginApi): void {
           message: "Reset this project's counters? The audit log is not wiped (normal rotation still applies). Protection stays active.",
           onConfirm: () => {
             dialog.clear();
-            v1ShowReport(api, guardianResetReport(directory), dialog);
+            const report = guardianResetReport(directory);
+            dispatchGuardianToastClear({ directory });
+            v1ShowReport(api, report, dialog);
           },
           onCancel: () => dialog.clear(),
         }));
@@ -409,7 +420,8 @@ const v2Plugin: Plugin.Definition = {
     if (config.enabled === false) return;
     const updateNoticeController = new AbortController();
     // The pinned V2 host owns setup-created layers and removes them on unload.
-    registerGuardianV2Commands(context, () => v2CommandDirectory(context, directory));
+    let clearOnReset: ((targetDirectory: string) => void) | undefined;
+    registerGuardianV2Commands(context, () => v2CommandDirectory(context, directory), (dir) => clearOnReset?.(dir));
     if (config.updateNotice?.enabled !== false && typeof context.ui.toast?.show === "function") {
       void announceGuardianUpdate((current, latest) => context.ui.toast.show({
         title: "OpenCode Guardian — New version", message: `v${current} → v${latest} (update manually)`, variant: "info", duration: 5000,
@@ -492,11 +504,38 @@ const v2Plugin: Plugin.Definition = {
       }
     };
 
+    clearOnReset = (targetDirectory: string): void => {
+      const route = context.ui?.router?.current?.();
+      if (route?.type === "session") {
+        storeIntervention(route.sessionID, undefined);
+        dispatchGuardianToastClear({ directory: targetDirectory, sessionID: route.sessionID });
+        if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
+          const sessionLocation = context.data?.session?.get?.(route.sessionID)?.location ?? context.location;
+          void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD](
+            { sessionID: route.sessionID },
+            sessionLocation ? { location: sessionLocation } : undefined
+          ).catch(() => {});
+        }
+        return;
+      }
+      for (const sessionID of Object.keys(interventions())) {
+        if (v2SessionDirectory(context, sessionID, directory) === targetDirectory) {
+          storeIntervention(sessionID, undefined);
+        }
+      }
+      dispatchGuardianToastClear({ directory: targetDirectory });
+      if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
+        void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD](
+          {},
+          { location: { directory: targetDirectory } }
+        ).catch(() => {});
+      }
+    };
     let rpcPoll: ReturnType<typeof setInterval> | undefined;
     if (interventionRpc) {
       const refreshCurrentSession = () => {
-        const route = context.ui.router.current();
-        if (route.type === "session") {
+        const route = context.ui?.router?.current?.();
+        if (route?.type === "session") {
           void refreshIntervention(route.sessionID);
         }
       };
@@ -546,6 +585,13 @@ const v2Plugin: Plugin.Definition = {
       if (!ownsInterventionScope(scope)) return;
       if (scope.sessionID) {
         storeIntervention(scope.sessionID, undefined);
+      } else {
+        const targetDir = scope.directory ?? directory;
+        for (const sessionID of Object.keys(interventions())) {
+          if (v2SessionDirectory(context, sessionID, directory) === targetDir) {
+            storeIntervention(sessionID, undefined);
+          }
+        }
       }
     });
     const unregisterSessionDelete = typeof context.data?.on === "function"

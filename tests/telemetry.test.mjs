@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+process.env.OPENCODE_GUARDIAN_LOG_LEVEL = "all";
+
 import Guardian, {
   guardianEventPath, readGuardianStatus, recordGuardianEvent,
   sessionFingerprint,

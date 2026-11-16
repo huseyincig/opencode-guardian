@@ -17,6 +17,12 @@ export interface GuardianSecretsConfig {
     includeRuntimeEnv?: boolean;
     safeKeyNames?: string[];
 }
+export type TelemetryLevel = "all" | "violations" | "off";
+export interface GuardianTelemetryConfig {
+    enabled?: boolean;
+    level?: TelemetryLevel;
+    maxBytes?: number;
+}
 export interface GuardConfig {
     enabled?: boolean;
     remediationBudget?: number;
@@ -37,6 +43,8 @@ export interface GuardConfig {
     };
     /** Post-execution tool output secret redaction & LLM context gatekeeper configuration. */
     secrets?: GuardianSecretsConfig | undefined;
+    /** Local audit telemetry log configuration. Controls event granularity and file bounds. */
+    telemetry?: GuardianTelemetryConfig | undefined;
     rules?: {
         "discipline/no-evasion"?: Severity | GuardRuleConfig;
         "discipline/no-apology"?: Severity | GuardRuleConfig;

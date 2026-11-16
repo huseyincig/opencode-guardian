@@ -65,6 +65,11 @@ export const DEFAULT_CONFIG = {
         enabled: true,
         replacement: "[REDACTED]",
     },
+    telemetry: {
+        enabled: true,
+        level: "violations",
+        maxBytes: 512 * 1024,
+    },
     rules: {
         "discipline/no-evasion": "error",
         "discipline/no-apology": "error",
@@ -137,6 +142,18 @@ function validateConfig(value) {
             fail("secrets.safeKeyNames");
         }
     }
+    if (value.telemetry !== undefined) {
+        if (!value.telemetry || typeof value.telemetry !== "object" || Array.isArray(value.telemetry))
+            fail("telemetry");
+        const tel = value.telemetry;
+        if (tel.enabled !== undefined && typeof tel.enabled !== "boolean")
+            fail("telemetry.enabled");
+        if (tel.level !== undefined && !["all", "violations", "off"].includes(tel.level))
+            fail("telemetry.level");
+        if (tel.maxBytes !== undefined && (typeof tel.maxBytes !== "number" || !Number.isFinite(tel.maxBytes) || tel.maxBytes <= 0)) {
+            fail("telemetry.maxBytes");
+        }
+    }
     if (value.rules !== undefined) {
         if (!value.rules || typeof value.rules !== "object" || Array.isArray(value.rules))
             fail("rules");
@@ -184,6 +201,7 @@ export function resolveEffectiveConfig(base, rawOptions) {
         "updateNotice",
         "notifications",
         "secrets",
+        "telemetry",
         "rules",
     ]) {
         if (options[key] !== undefined)
@@ -237,6 +255,12 @@ export function resolveEffectiveConfig(base, rawOptions) {
             ...base.secrets,
             ...validated.secrets,
         },
+        telemetry: base.telemetry || validated.telemetry
+            ? {
+                ...base.telemetry,
+                ...validated.telemetry,
+            }
+            : undefined,
         rules: mergedRules,
     };
 }

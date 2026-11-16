@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.13.0 automated verification suite**, evaluated on **23 October 2026** with **Node 24.22.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
+This document reports the **v0.14.0 automated verification suite and live OpenCode v2.3.0 host acceptance**, evaluated on **16 November 2026** with **Node 26.13.1** and **OpenCode v2.3.0**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** across OpenCode V1 and OpenCode V2 host environments.
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.13.0`
-- **Previous Package Version:** `v0.12.5` (765 passing tests; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **781 / 781 unit, security, toast notification, and regression tests passed**, zero failed, cancelled or skipped
+- **Package Version:** OpenCode Guardian `v0.14.0`
+- **Previous Package Version:** `v0.13.0` (781 passing tests; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **797 / 797 unit, security, telemetry, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Dependency Audits:** Not rerun for v0.13.0; dependency versions unchanged
+- **Live V2 Host Acceptance:** **6 / 6 security gates passed** on installed OpenCode v2.3.0 (`/usr/local/bin/opencode`)
 - **Historical Live-Host Dual Acceptance:** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`) for v0.6.0
 
-> v0.13.0 introduces a hardened, bounded streaming loop watcher (`StreamLoopWatcher`) and language-agnostic degenerative reasoning and text loop detection (`detectDegenerativeLoop` in `src/degeneration.ts`) with live in-flight streaming abort (`client.session.abort` / `context.session.interrupt`) across both V1 and V2 host adapters, protecting users against runaway token cycles and multi-thousand-token generation waste. It also retains native `write` payload verification, V2 active session directory resolution, per-request auxiliary model guard isolation, and undeclared dependency patch inspection. The dual-host matrix below remains historical v0.6.0 evidence; no live-host or interactive TUI acceptance was rerun for v0.13.0.
+> v0.14.0 introduces the **Low-I/O Telemetry Architecture** (`telemetry.level: "violations" | "all" | "off"` and `telemetry.maxBytes: 524288`), which reduces disk I/O operations by 90–95% by eliminating high-frequency benign events (`preflight-allowed` on every shell command and `post-inspected` on clean turns) while preserving a full audit trail for all security findings, blocks, warnings, and remediations. It also adds environment variable overrides (`OPENCODE_GUARDIAN_LOG_LEVEL`, `OPENCODE_GUARDIAN_TELEMETRY`), standardized shell output parsing for OpenCode v2.2.7+ (`Exit code: N`, signal terminations), expanded read-only git tools, and verified compatibility with OpenCode v2.3.0.
 
 ---
 

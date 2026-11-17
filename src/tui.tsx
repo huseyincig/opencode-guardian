@@ -23,22 +23,24 @@ import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport,
 
 const guardianVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
+type SidebarColor = string | RGBA;
+
 type SidebarColors = {
-  accent: RGBA;
-  onAccent: RGBA;
-  text: RGBA;
-  muted: RGBA;
-  success?: RGBA;
-  warning?: RGBA;
-  error?: RGBA;
+  accent: SidebarColor;
+  onAccent: SidebarColor;
+  text: SidebarColor;
+  muted: SidebarColor;
+  success?: SidebarColor;
+  warning?: SidebarColor;
+  error?: SidebarColor;
 };
 
 function StatRow(props: {
   label: string;
   value: string | number;
-  valueColor?: RGBA;
-  muted: RGBA;
-  text: RGBA;
+  valueColor?: SidebarColor;
+  muted: SidebarColor;
+  text: SidebarColor;
 }) {
   return (
     <box width="100%" flexDirection="row" justifyContent="space-between">
@@ -128,7 +130,7 @@ async function v2PerformCommand(
     await context.ui.dialog.alert(result);
     return;
   }
-  const result = await guardianCommandReport(command, directory, guardianVersion);
+  const result = await guardianCommandReport(command, directory, guardianVersion, context.options);
   await context.ui.dialog.alert(result);
 }
 
@@ -402,10 +404,10 @@ const v2Plugin: Plugin.Definition = {
       }), { signal: updateNoticeController.signal });
     }
     const colors = (): SidebarColors => ({
-      accent: context.theme?.status?.success?.base ?? context.theme?.text?.base,
-      onAccent: context.theme?.text?.action?.primary?.base ?? context.theme?.text?.base,
-      text: context.theme?.text?.base,
-      muted: context.theme?.text?.muted ?? context.theme?.text?.base,
+      accent: context.theme?.status?.success?.base ?? context.theme?.text?.base ?? "green",
+      onAccent: context.theme?.text?.action?.primary?.base ?? context.theme?.text?.base ?? "white",
+      text: context.theme?.text?.base ?? "white",
+      muted: context.theme?.text?.muted ?? context.theme?.text?.base ?? "gray",
       success: context.theme?.status?.success?.base,
       warning: context.theme?.status?.warning?.base,
       error: context.theme?.status?.error?.base,
@@ -503,7 +505,7 @@ const v2Plugin: Plugin.Definition = {
       dispatchGuardianToastClear({ directory: targetDirectory });
       if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
         void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD](
-          {},
+          { directory: targetDirectory },
           { location: { directory: targetDirectory } }
         ).catch(() => {});
       }
@@ -529,7 +531,9 @@ const v2Plugin: Plugin.Definition = {
         return scope.directory === undefined || scope.directory === directory;
       }
       const session = context.data?.session?.get?.(scope.sessionID);
-      if (!session) return false;
+      if (!session) {
+        return scope.directory !== undefined && scope.directory === directory;
+      }
       const sessionDirectory = session.location?.directory ?? directory;
       return scope.directory === undefined || scope.directory === sessionDirectory;
     };

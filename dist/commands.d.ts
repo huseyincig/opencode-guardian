@@ -32,6 +32,6 @@ export interface GuardianReport {
     title: string;
     message: string;
 }
-export declare function guardianCommandReport(command: Exclude<GuardianCommand, "reset">, directory: string, installedVersion: string): Promise<GuardianReport>;
+export declare function guardianCommandReport(command: Exclude<GuardianCommand, "reset">, directory: string, installedVersion: string, options?: unknown): Promise<GuardianReport>;
 /** Must only be invoked after explicit UI confirmation. */
 export declare function guardianResetReport(directory: string): GuardianReport;

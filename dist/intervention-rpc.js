@@ -1,7 +1,11 @@
+import { Rpc } from "@opencode/plugin/rpc";
 export const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
 export const GUARDIAN_INTERVENTION_RPC_METHOD = "latest";
 export const GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD = "clear";
-export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
+const defineRpc = typeof Rpc?.define === "function"
+    ? Rpc.define
+    : (definition) => definition;
+export const GUARDIAN_INTERVENTION_RPC_DEFINITION = defineRpc({
     id: GUARDIAN_INTERVENTION_RPC_ID,
     methods: {
         [GUARDIAN_INTERVENTION_RPC_METHOD]: {
@@ -31,6 +35,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
                 type: "object",
                 properties: {
                     sessionID: { type: "string", minLength: 1, maxLength: 256 },
+                    directory: { type: "string", minLength: 1, maxLength: 4096 },
                 },
                 additionalProperties: false,
             },
@@ -45,7 +50,7 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = {
         },
     },
     events: {},
-};
+});
 export function inactiveGuardianIntervention() {
     return {
         active: false,
@@ -91,5 +96,13 @@ export function readGuardianInterventionSessionID(input) {
     const sessionID = input.sessionID;
     return typeof sessionID === "string" && sessionID.length > 0 && sessionID.length <= 256
         ? sessionID
+        : undefined;
+}
+export function readGuardianInterventionDirectory(input) {
+    if (!input || typeof input !== "object" || Array.isArray(input))
+        return undefined;
+    const dir = input.directory;
+    return typeof dir === "string" && dir.trim().length > 0 && dir.length <= 4096
+        ? dir
         : undefined;
 }

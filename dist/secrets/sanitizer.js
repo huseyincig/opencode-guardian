@@ -42,7 +42,10 @@ function escapeRegExp(str) {
 /**
  * Sanitizes a single line if it resembles an environment variable assignment or key-value pair.
  */
-function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findings = []) {
+function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findings = [], safeValues) {
+    const stripQuotes = (raw) => (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))
+        ? raw.slice(1, -1)
+        : raw;
     // 1. Env assignment: [export ]KEY=VALUE
     const envMatch = line.match(/^(\s*(?:export\s+)?)([a-zA-Z0-9_.-]+)(\s*=\s*)(.*)$/);
     if (envMatch) {
@@ -50,7 +53,7 @@ function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findi
         const key = envMatch[2] ?? '';
         const eq = envMatch[3] ?? '';
         const rawVal = envMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys, safeKeyNames)) {
+        if (isSensitiveKey(key, customKeys, safeKeyNames) && !safeValues?.has(stripQuotes(rawVal))) {
             findings.push({ kind: 'key-value', category: 'env-assignment', keyName: key });
             // Preserve quotes if present
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
@@ -68,7 +71,7 @@ function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findi
         const key = yamlMatch[2] ?? '';
         const colon = yamlMatch[3] ?? '';
         const rawVal = yamlMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys, safeKeyNames)) {
+        if (isSensitiveKey(key, customKeys, safeKeyNames) && !safeValues?.has(stripQuotes(rawVal))) {
             findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: key });
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
                 (rawVal.startsWith("'") && rawVal.endsWith("'"))) {
@@ -85,6 +88,10 @@ function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findi
  */
 export function sanitizeString(text, options = {}) {
     if (typeof text !== 'string') {
+        return { sanitized: text, redactedCount: 0, findings: [] };
+    }
+    const safeValueSet = options.safeValues?.length ? new Set(options.safeValues) : undefined;
+    if (safeValueSet?.has(text)) {
         return { sanitized: text, redactedCount: 0, findings: [] };
     }
     const replacement = options.replacement ?? DEFAULT_REPLACEMENT;
@@ -151,7 +158,7 @@ export function sanitizeString(text, options = {}) {
         let lineModified = false;
         for (let i = 0; i < lines.length; i++) {
             const original = lines[i] ?? '';
-            const sanitized = sanitizeKeyValueLine(original, replacement, options.customSensitiveKeys, options.safeKeyNames, findings);
+            const sanitized = sanitizeKeyValueLine(original, replacement, options.customSensitiveKeys, options.safeKeyNames, findings, safeValueSet);
             if (sanitized !== original) {
                 lines[i] = sanitized;
                 lineModified = true;
@@ -167,7 +174,7 @@ export function sanitizeString(text, options = {}) {
             if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
                 return match;
             }
-            if (val === replacement || val === '[REDACTED:PRIVATE_KEY]') {
+            if (val === replacement || val === '[REDACTED:PRIVATE_KEY]' || safeValueSet?.has(val)) {
                 return match;
             }
             if (/^\s+$/.test(sep)) {
@@ -183,7 +190,9 @@ export function sanitizeString(text, options = {}) {
         for (const pattern of KNOWN_CREDENTIAL_PATTERNS) {
             pattern.regex.lastIndex = 0;
             if (pattern.regex.test(result)) {
-                result = result.replace(pattern.regex, () => {
+                result = result.replace(pattern.regex, (matched) => {
+                    if (safeValueSet?.has(matched))
+                        return matched;
                     redactedCount++;
                     findings.push({ kind: 'known-pattern', category: pattern.name });
                     return replacement;
@@ -193,7 +202,9 @@ export function sanitizeString(text, options = {}) {
         // 5. Bearer tokens
         const bearerRegex = /\bBearer\s+([A-Za-z0-9._~-]{24,})\b/gi;
         if (bearerRegex.test(result)) {
-            result = result.replace(bearerRegex, () => {
+            result = result.replace(bearerRegex, (matched, token) => {
+                if (safeValueSet?.has(matched) || safeValueSet?.has(token))
+                    return matched;
                 redactedCount++;
                 findings.push({ kind: 'known-pattern', category: 'Bearer Token' });
                 return `Bearer ${replacement}`;
@@ -203,7 +214,9 @@ export function sanitizeString(text, options = {}) {
         for (const p of PASSWORD_HASH_PATTERNS) {
             p.regex.lastIndex = 0;
             if (p.regex.test(result)) {
-                result = result.replace(p.regex, () => {
+                result = result.replace(p.regex, (matched) => {
+                    if (safeValueSet?.has(matched))
+                        return matched;
                     redactedCount++;
                     findings.push({ kind: 'password-hash', category: p.name });
                     return replacement;
@@ -221,7 +234,7 @@ export function sanitizeString(text, options = {}) {
         // Dedup secret literals
         const seenLiterals = new Set();
         for (const secretVal of allSecretLiterals) {
-            if (!secretVal || secretVal.length < 6 || seenLiterals.has(secretVal))
+            if (!secretVal || secretVal.length < 6 || seenLiterals.has(secretVal) || safeValueSet?.has(secretVal))
                 continue;
             seenLiterals.add(secretVal);
             if (result.includes(secretVal)) {
@@ -255,6 +268,9 @@ export function sanitizeObject(data, options = {}) {
     let redactedCount = 0;
     try {
         function propertyValue(key, value) {
+            if (typeof value === 'string' && options.safeValues?.includes(value)) {
+                return value;
+            }
             if (isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
                 redactedCount++;
                 findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
@@ -392,30 +408,37 @@ export function sanitizeMessages(messages, options = {}) {
             if (!msg || typeof msg !== 'object')
                 return msg;
             const msgObj = msg;
-            // Handle message with parts: { info, parts: [...] }
+            // Handle message with parts: { info, parts: [...] } while preserving Message/Part prototypes
             if (Array.isArray(msgObj.parts)) {
                 const sanitizedParts = msgObj.parts.map((part) => {
                     if (!part || typeof part !== 'object')
                         return part;
-                    const partObj = { ...part };
-                    if (partObj.type === 'text' && typeof partObj.text === 'string') {
-                        partObj.text = sanitizeString(partObj.text, options).sanitized;
-                    }
-                    else if (partObj.type === 'tool' && partObj.state && typeof partObj.state === 'object') {
-                        // FINAL context gate: sanitize the complete tool state, not only
-                        // selected output/result/error fields. Host metadata/raw/content
-                        // can also become model-visible when a POST adapter misses them.
-                        partObj.state = sanitizeObject(partObj.state, options).sanitized;
-                    }
-                    else {
-                        // General part fields
-                        if (typeof partObj.content === 'string') {
-                            partObj.content = sanitizeString(partObj.content, options).sanitized;
-                        }
-                    }
-                    return partObj;
+                    return sanitizeObject(part, options).sanitized;
                 });
-                return { ...msgObj, parts: sanitizedParts };
+                const msgProto = Object.getPrototypeOf(msgObj);
+                const clonedMsg = msgProto && msgProto !== Object.prototype ? Object.create(msgProto) : {};
+                for (const [k, v] of Object.entries(msgObj)) {
+                    if (k === 'parts')
+                        continue;
+                    const sanitizedVal = typeof v === 'string' && options.safeValues?.includes(v)
+                        ? v
+                        : isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
+                            ? (options.replacement ?? DEFAULT_REPLACEMENT)
+                            : sanitizeObject(v, options).sanitized;
+                    Object.defineProperty(clonedMsg, k, {
+                        value: sanitizedVal,
+                        enumerable: true,
+                        writable: true,
+                        configurable: true,
+                    });
+                }
+                Object.defineProperty(clonedMsg, 'parts', {
+                    value: sanitizedParts,
+                    enumerable: true,
+                    writable: true,
+                    configurable: true,
+                });
+                return clonedMsg;
             }
             return sanitizeObject(msg, options).sanitized;
         });
@@ -440,5 +463,6 @@ export function resolveSanitizerOptions(config) {
         customSecretValues: config?.secrets?.customSecretValues,
         includeRuntimeEnv: config?.secrets?.includeRuntimeEnv !== false,
         safeKeyNames: config?.secrets?.safeKeyNames,
+        safeValues: config?.secrets?.safeValues,
     };
 }

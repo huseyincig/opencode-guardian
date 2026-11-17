@@ -10,7 +10,7 @@ import { resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapabilit
 import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
 import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
-import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
+import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
 export * from "./types.js";
 export * from "./engine.js";
@@ -591,6 +591,7 @@ const setup = async (context) => {
     configureGuardianTelemetry(directory, mergedConfig.telemetry);
     if (mergedConfig.enabled === false) {
         recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
+        configureGuardianTelemetry(directory, undefined);
         return;
     }
     const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
@@ -744,19 +745,25 @@ const setup = async (context) => {
                         ? activeGuardianIntervention(payload)
                         : inactiveGuardianIntervention();
                 },
-                [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input) => {
+                [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input, ...rest) => {
                     const sessionID = readGuardianInterventionSessionID(input);
                     if (sessionID) {
                         toastNotifier.clear?.(sessionID);
                         return { cleared: true };
                     }
+                    const rpcContext = rest[0];
+                    const contextDir = typeof rpcContext?.location?.directory === "string" && rpcContext.location.directory.trim()
+                        ? rpcContext.location.directory
+                        : undefined;
+                    const targetDirectory = readGuardianInterventionDirectory(input) ?? contextDir ?? directory;
                     for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
-                        const sessionDir = sessionDirectories.get(activeSessionID) ?? directory;
-                        if (sessionDir === directory) {
+                        const sessionDir = sessionDirectories.get(activeSessionID) ??
+                            await resolveSessionDirectory(activeSessionID);
+                        if (sessionDir === targetDirectory) {
                             toastNotifier.clear?.(activeSessionID);
                         }
                     }
-                    dispatchGuardianToastClear({ directory });
+                    dispatchGuardianToastClear({ directory: targetDirectory });
                     return { cleared: true };
                 },
             });
@@ -1064,7 +1071,9 @@ const setup = async (context) => {
                     ? await resolveSessionDirectory(sid)
                     : (typeof eventRecord.location?.directory === "string" && eventRecord.location.directory.trim()
                         ? eventRecord.location.directory
-                        : directory);
+                        : typeof eventRecord.cwd === "string" && eventRecord.cwd.trim()
+                            ? eventRecord.cwd
+                            : directory);
                 if (controller.signal.aborted)
                     return;
                 const runtime = runtimeForDirectory(runtimeDirectory);

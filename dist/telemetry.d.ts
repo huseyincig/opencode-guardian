@@ -36,6 +36,7 @@ export type GuardianStatus = {
     /** Most recent event kind; counters above cover retained history. */
     lastKind?: GuardianEventKind;
 };
+export declare const DEFAULT_GUARDIAN_LOG_BYTES: number;
 export declare const GUARDIAN_MAX_LOG_BYTES: number;
 export declare function guardianStateDirectory(directory?: string): string;
 export declare function guardianEventPath(directory?: string): string;

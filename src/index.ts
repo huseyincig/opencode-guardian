@@ -45,6 +45,7 @@ import {
   GUARDIAN_INTERVENTION_RPC_METHOD,
   activeGuardianIntervention,
   inactiveGuardianIntervention,
+  readGuardianInterventionDirectory,
   readGuardianInterventionSessionID,
 } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
@@ -729,6 +730,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   configureGuardianTelemetry(directory, mergedConfig.telemetry);
   if (mergedConfig.enabled === false) {
     recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
+    configureGuardianTelemetry(directory, undefined);
     return;
   }
   const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
@@ -895,19 +897,28 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               ? activeGuardianIntervention(payload)
               : inactiveGuardianIntervention();
           },
-          [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input) => {
+          [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input, ...rest: unknown[]) => {
             const sessionID = readGuardianInterventionSessionID(input);
             if (sessionID) {
               toastNotifier.clear?.(sessionID);
               return { cleared: true };
             }
+            const rpcContext = rest[0] as { location?: { directory?: unknown } } | undefined;
+            const contextDir =
+              typeof rpcContext?.location?.directory === "string" && rpcContext.location.directory.trim()
+                ? rpcContext.location.directory
+                : undefined;
+            const targetDirectory =
+              readGuardianInterventionDirectory(input) ?? contextDir ?? directory;
             for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
-              const sessionDir = sessionDirectories.get(activeSessionID) ?? directory;
-              if (sessionDir === directory) {
+              const sessionDir =
+                sessionDirectories.get(activeSessionID) ??
+                await resolveSessionDirectory(activeSessionID);
+              if (sessionDir === targetDirectory) {
                 toastNotifier.clear?.(activeSessionID);
               }
             }
-            dispatchGuardianToastClear({ directory });
+            dispatchGuardianToastClear({ directory: targetDirectory });
             return { cleared: true };
           },
         }
@@ -1242,6 +1253,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         const eventRecord = event as {
           sessionID?: string;
           command?: unknown;
+          cwd?: unknown;
           location?: { directory?: string };
         };
         const sid = typeof eventRecord.sessionID === "string" ? eventRecord.sessionID : undefined;
@@ -1249,7 +1261,9 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           ? await resolveSessionDirectory(sid)
           : (typeof eventRecord.location?.directory === "string" && eventRecord.location.directory.trim()
               ? eventRecord.location.directory
-              : directory);
+              : typeof eventRecord.cwd === "string" && eventRecord.cwd.trim()
+                ? eventRecord.cwd
+                : directory);
         if (controller.signal.aborted) return;
         const runtime = runtimeForDirectory(runtimeDirectory);
         if (runtime.config.enabled === false) return;

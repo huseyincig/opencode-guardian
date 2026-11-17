@@ -16,6 +16,7 @@ export interface GuardianSecretsConfig {
     customSecretValues?: string[];
     includeRuntimeEnv?: boolean;
     safeKeyNames?: string[];
+    safeValues?: string[];
 }
 export type TelemetryLevel = "all" | "violations" | "off";
 export interface GuardianTelemetryConfig {

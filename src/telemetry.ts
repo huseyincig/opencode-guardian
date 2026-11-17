@@ -50,6 +50,7 @@ export type GuardianStatus = {
   lastKind?: GuardianEventKind;
 };
 
+export const DEFAULT_GUARDIAN_LOG_BYTES = 512 * 1024;
 export const GUARDIAN_MAX_LOG_BYTES = 2 * 1024 * 1024;
 const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -173,7 +174,7 @@ export function resolveTelemetrySettings(directory?: string): {
 } {
   const envTelemetry = process.env.OPENCODE_GUARDIAN_TELEMETRY?.trim().toLowerCase();
   if (envTelemetry === "off" || envTelemetry === "0" || envTelemetry === "false") {
-    return { enabled: false, level: "off", maxBytes: GUARDIAN_MAX_LOG_BYTES };
+    return { enabled: false, level: "off", maxBytes: DEFAULT_GUARDIAN_LOG_BYTES };
   }
 
   const envLevel = process.env.OPENCODE_GUARDIAN_LOG_LEVEL?.trim().toLowerCase();
@@ -196,7 +197,7 @@ export function resolveTelemetrySettings(directory?: string): {
   let maxBytes =
     registered?.maxBytes && Number.isFinite(registered.maxBytes) && registered.maxBytes > 0
       ? Math.floor(registered.maxBytes)
-      : GUARDIAN_MAX_LOG_BYTES;
+      : DEFAULT_GUARDIAN_LOG_BYTES;
 
   if (Number.isFinite(envMaxBytes) && envMaxBytes > 0) {
     maxBytes = Math.floor(envMaxBytes);

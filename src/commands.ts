@@ -1,6 +1,6 @@
 /** Shared, host-independent command reports; no SDK objects or raw log payloads. */
 import fs from "node:fs";
-import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig } from "./engine.js";
+import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { checkGuardianUpdate } from "./version-notice.js";
 import { guardianEventPath, readGuardianActivity, readGuardianStatus,
   resetGuardianStatistics } from "./telemetry.js";
@@ -23,7 +23,8 @@ function option(value: boolean): string { return value ? "enabled" : "disabled";
 export async function guardianCommandReport(
   command: Exclude<GuardianCommand, "reset">,
   directory: string,
-  installedVersion: string
+  installedVersion: string,
+  options?: unknown
 ): Promise<GuardianReport> {
   const status = readGuardianStatus(directory);
   switch (command) {
@@ -64,8 +65,8 @@ export async function guardianCommandReport(
       };
     }
     case "doctor": {
-      let config: ReturnType<typeof loadConfig>;
-      try { config = loadConfig(directory); } catch {
+      let config: ReturnType<typeof resolveEffectiveConfig>;
+      try { config = resolveEffectiveConfig(loadConfig(directory), options); } catch {
         return { title: "Guardian: Diagnostics", message: "Configuration: invalid. Fix the Guardian configuration before continuing." };
       }
       const log = guardianEventPath(directory);
@@ -88,8 +89,8 @@ export async function guardianCommandReport(
       };
     }
     case "rules": {
-      let config: ReturnType<typeof loadConfig>;
-      try { config = loadConfig(directory); } catch {
+      let config: ReturnType<typeof resolveEffectiveConfig>;
+      try { config = resolveEffectiveConfig(loadConfig(directory), options); } catch {
         return { title: "Guardian: Rules", message: "Configuration is invalid; rule settings cannot be verified." };
       }
       return {
@@ -103,8 +104,8 @@ export async function guardianCommandReport(
       };
     }
     case "config": {
-      let config: ReturnType<typeof loadConfig>;
-      try { config = loadConfig(directory); } catch {
+      let config: ReturnType<typeof resolveEffectiveConfig>;
+      try { config = resolveEffectiveConfig(loadConfig(directory), options); } catch {
         return { title: "Guardian: Configuration", message: "Configuration is invalid. No raw file contents will be displayed." };
       }
       return {

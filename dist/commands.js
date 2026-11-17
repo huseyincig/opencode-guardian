@@ -1,6 +1,6 @@
 /** Shared, host-independent command reports; no SDK objects or raw log payloads. */
 import fs from "node:fs";
-import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig } from "./engine.js";
+import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { checkGuardianUpdate } from "./version-notice.js";
 import { guardianEventPath, readGuardianActivity, readGuardianStatus, resetGuardianStatistics } from "./telemetry.js";
 export const GUARDIAN_COMMANDS = [
@@ -13,7 +13,7 @@ export const GUARDIAN_COMMANDS = [
     { id: "reset", title: "Guardian: Reset Statistics", description: "Reset counters without erasing the security audit trail" },
 ];
 function option(value) { return value ? "enabled" : "disabled"; }
-export async function guardianCommandReport(command, directory, installedVersion) {
+export async function guardianCommandReport(command, directory, installedVersion, options) {
     const status = readGuardianStatus(directory);
     switch (command) {
         case "status": {
@@ -56,7 +56,7 @@ export async function guardianCommandReport(command, directory, installedVersion
         case "doctor": {
             let config;
             try {
-                config = loadConfig(directory);
+                config = resolveEffectiveConfig(loadConfig(directory), options);
             }
             catch {
                 return { title: "Guardian: Diagnostics", message: "Configuration: invalid. Fix the Guardian configuration before continuing." };
@@ -83,7 +83,7 @@ export async function guardianCommandReport(command, directory, installedVersion
         case "rules": {
             let config;
             try {
-                config = loadConfig(directory);
+                config = resolveEffectiveConfig(loadConfig(directory), options);
             }
             catch {
                 return { title: "Guardian: Rules", message: "Configuration is invalid; rule settings cannot be verified." };
@@ -101,7 +101,7 @@ export async function guardianCommandReport(command, directory, installedVersion
         case "config": {
             let config;
             try {
-                config = loadConfig(directory);
+                config = resolveEffectiveConfig(loadConfig(directory), options);
             }
             catch {
                 return { title: "Guardian: Configuration", message: "Configuration is invalid. No raw file contents will be displayed." };

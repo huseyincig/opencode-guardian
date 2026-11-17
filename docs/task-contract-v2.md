@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.15.0**.
+Documentation for OpenCode Guardian **v0.15.1**.
 
 Guardian implements a pure **OpenCode V2** (`@opencode/plugin >=2.3.0`) architecture across its server entry (`.`), terminal UI entry (`./tui`), and typed intervention RPC contract (`./rpc`) using standard, non-invasive V2 plugin hooks.
 
@@ -24,7 +24,7 @@ Guardian implements a pure **OpenCode V2** (`@opencode/plugin >=2.3.0`) architec
 | **Background Subagent Isolation** | `background === true` in `execute.after` skips foreground handoff wait and prevents starving sibling background subagents |
 | **Forked & Moved Sessions** | `session.fork` / `session.forked` treated as independent root sessions; `session.moved` clears stale TUI intervention state |
 | **Resolve Project Directory** | Top-level `location.directory` → `ctx.session.get().location.directory` → instance `ctx.location.directory` |
-| **Plugin Teardown** | `AbortController` signal + LIFO disposer rollback on partial setup failure + `.unref?.()` timers |
+| **Plugin Teardown** | `AbortController` signal + LIFO disposer rollback on partial setup failure + `.unref?.()` on periodic cleanup intervals |
 | **TUI Commands & Keymaps** | `ctx.command.register(...)` (7 `/guardian-*` palette/slash commands + `/guardian` dispatcher) and global `ctx.keymap.layer` |
 
 ---
@@ -76,19 +76,19 @@ Research-only enforcement recognizes narrow English/Turkish phrases and checks o
 - **Graceful Fallbacks:** Missing optional hooks in transition environments fail open without breaking the core inspection pipeline. `resolveV2AgentCapability` safely handles array, `{ data }`, and null/throwing list responses.
 - **Fail-Fast Security:** When strict preflight (`preflight.enabled: true`) is explicitly configured, setup requires valid tool/shell hook registration and rolls back any earlier hooks if a later registration fails.
 - **Configuration Integrity:** Explicit configuration files (`opencode-guardian.json`, `.opencode/opencode-guardian.json`) must be valid JSON objects. Corrupt or malformed files throw a visible `GuardianConfigError` rather than silently degrading to insecure defaults.
-- **Bounded Session State & Timers:** Per-session Maps/Sets and capability caches are bounded and evicted on `session.deleted` or teardown; background retry and coalesce timers call `.unref?.()`.
+- **Bounded Session State & Timers:** Per-session Maps/Sets and capability caches are bounded and evicted on `session.deleted` or teardown; periodic background cleanup/polling intervals call `.unref?.()`, while active one-shot coalesce and retry timers keep the event loop alive until completion or abort.
 
 ---
 
 ## V2 Instance, Session Scope, and RPC Surface
 
-V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian resolves top-level `location.directory` first, then `ctx.session.get({ sessionID }).location.directory` when available, falling back to the instance directory. Tool-before and `shell.hook("create.before")` checks use the known session directory or fall back to the instance directory. Hook registration and fail-fast strict-preflight availability checks happen at instance setup; another project's configuration cannot supply a missing host hook. Use independent plugin instances for projects requiring different strict policies.
+V2 `ctx.location.directory` identifies the plugin instance; it is not guaranteed to be the working directory of every session. Guardian resolves top-level `location.directory` first, then `ctx.session.get({ sessionID }).location.directory` when available, falling back to `event.cwd` (on `shell.hook("create.before")`) or the instance directory. Tool-before and `shell.hook("create.before")` checks use the known session/cwd directory or fall back to the instance directory. Hook registration and fail-fast strict-preflight availability checks happen at instance setup; another project's configuration cannot supply a missing host hook. Use independent plugin instances for projects requiring different strict policies.
 
 When an event subscription unexpectedly ends or fails, Guardian records an inspection error and makes up to three bounded stream attempts. Teardown aborts pending reconnects. Failure to restore the stream is logged visibly; this is not a substitute for monitoring host health.
 
 The typed `./rpc` export (`src/intervention-rpc.ts`) exposes `guardian.interventions.get` and `guardian.interventions.clear` using `Rpc.define` (`@opencode/plugin/rpc`):
 - `sessionID` inputs enforce `maxLength: 256`.
-- `guardian.interventions.clear` with `{}` is strictly scoped to the plugin instance's project `directory`, preventing cross-project intervention clearing.
+- `guardian.interventions.clear` with `{}` is strictly scoped to the requested project `directory` / `location.directory` (falling back to the plugin instance's `directory` and resolving uncached session directories asynchronously), preventing cross-project intervention clearing.
 - In `src/tui.tsx`, per-session generation/epoch tracking prevents in-flight 500ms RPC polls from resurrecting interventions cleared by `/guardian-reset`, clean turns, `session.moved`, or `session.deleted`.
 
 ---

@@ -28,5 +28,6 @@ export declare function resolveSanitizerOptions(config?: {
         customSecretValues?: string[] | undefined;
         includeRuntimeEnv?: boolean | undefined;
         safeKeyNames?: string[] | undefined;
+        safeValues?: string[] | undefined;
     } | undefined;
 } | undefined): SanitizerOptions | null;

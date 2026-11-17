@@ -51,6 +51,11 @@ export declare const GUARDIAN_INTERVENTION_RPC_DEFINITION: {
                         readonly minLength: 1;
                         readonly maxLength: 256;
                     };
+                    readonly directory: {
+                        readonly type: "string";
+                        readonly minLength: 1;
+                        readonly maxLength: 4096;
+                    };
                 };
                 readonly additionalProperties: false;
             };
@@ -75,3 +80,4 @@ export declare function inactiveGuardianIntervention(): GuardianInterventionSnap
 export declare function activeGuardianIntervention(payload: GuardianToastPayload): GuardianInterventionSnapshot;
 export declare function parseGuardianInterventionSnapshot(value: unknown): GuardianInterventionSnapshot | undefined;
 export declare function readGuardianInterventionSessionID(input: unknown): string | undefined;
+export declare function readGuardianInterventionDirectory(input: unknown): string | undefined;

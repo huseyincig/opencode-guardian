@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.15.1 — 2026-11-17
+
+- **Security & V2 Context Hardening:**
+  - Preserved `Message` and `Part` class prototypes in `sanitizeMessages` when `parts` arrays are present, and sanitized `reasoning` parts, top-level `tool` part fields, and message metadata fields.
+  - Implemented `SanitizerOptions.safeValues` (and `GuardConfig.secrets.safeValues`) end-to-end across string, key-value, credential-pattern, Bearer, hash, runtime-secret, and object sanitization.
+- **Multi-Project Isolation & V2 Hook Alignment:**
+  - Updated `context.shell.hook("create.before")` to inspect `event.cwd` when `sessionID` and `location.directory` are absent.
+  - Updated `guardian.interventions.clear` (`./rpc` & `src/index.ts`) to accept optional `directory` input / `rpcContext.location.directory` and asynchronously resolve uncached session directories before clearing interventions.
+  - Wired runtime `Rpc.define` (`@opencode/plugin/rpc`) in `src/intervention-rpc.ts`.
+  - Cleared `telemetryConfigRegistry` on early return when `enabled: false` in `setup()`.
+  - Aligned `resolveTelemetrySettings` default `maxBytes` for unregistered directories to `DEFAULT_GUARDIAN_LOG_BYTES` (`512 KiB`) while retaining `GUARDIAN_MAX_LOG_BYTES` (`2 MiB`) as the rotation ceiling.
+- **TUI & Command Reporting Fixes:**
+  - Passed `context.options` into `guardianCommandReport` (`doctor`, `rules`, `config`) so `/guardian-doctor`, `/guardian-rules`, and `/guardian-config` reflect `opencode.json` plugin options.
+  - Fixed `ownsInterventionScope` in `src/tui.tsx` so same-directory preflight toasts are delivered even before `context.data.session` syncs, and added safe fallback strings to `SidebarColors`.
+- **Documentation & Regression Coverage:**
+  - Added 8 dedicated regression tests in `tests/v0151-audit-regressions.test.mjs` (**773 / 773** passing).
+  - Aligned `README.md` and `docs/task-contract-v2.md` timer descriptions (`setInterval` `.unref?.()` vs. one-shot coalesce/retry timers).
+
 ## 0.15.0 — 2026-11-17
 
 - **BREAKING CHANGE — Pure OpenCode V2 (`>=2.3.0`) & OpenTUI (`>=0.8.4`) Alignment:**

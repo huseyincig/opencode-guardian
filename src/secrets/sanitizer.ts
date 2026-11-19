@@ -323,6 +323,15 @@ export function sanitizeObject<T>(
 
   try {
     function propertyValue(key: string, value: unknown): unknown {
+      if (
+        value === null ||
+        value === undefined ||
+        typeof value === 'boolean' ||
+        typeof value === 'number' ||
+        value === ''
+      ) {
+        return value;
+      }
       if (typeof value === 'string' && options.safeValues?.includes(value)) {
         return value;
       }

@@ -91,12 +91,21 @@ function statusFromPart(part, outputText) {
                 exitCode = parsed;
         }
     }
-    if (state.status === "error") {
+    if (state.status === "error" || state.metadata?.error === true) {
         return {
             status: "failure",
             ...(exitCode !== undefined ? { exitCode } : {}),
             errorText: errorText || outputText,
         };
+    }
+    // OpenCode v2.3.1+ backgrounded or timed-out-to-background shell commands
+    // return status: "completed" with metadata.status === "running" / shellID
+    // and no exit code yet. Never treat a running background job as finished.
+    if (state.metadata?.status === "running" ||
+        (typeof state.metadata?.shellID === "string" && exitCode === undefined) ||
+        /(?:^|\n)Command moved to the background\b/i.test(outputText) ||
+        /(?:^|\n)The command did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText)) {
+        return { status: "unknown", errorText: "" };
     }
     if (exitCode !== undefined) {
         return {
@@ -430,14 +439,17 @@ function recordFromPart(part, sequence) {
         const mutationErrorFingerprint = outcome.status === "failure"
             ? normalizeErrorFingerprint(outcome.errorText || outputText)
             : undefined;
+        const mutationStatus = outcome.status === "failure"
+            ? "failure"
+            : command && outcome.status === "success" && outcome.exitCode === undefined
+                ? "unknown"
+                : outcome.status === "success"
+                    ? "success"
+                    : "unknown";
         for (const filePath of paths.length ? paths : [undefined])
             records.push({
                 kind: "file-mutation",
-                status: outcome.status === "failure"
-                    ? "failure"
-                    : outcome.status === "success"
-                        ? "success"
-                        : "unknown",
+                status: mutationStatus,
                 sequence,
                 toolName,
                 ...(command ? { command } : {}),

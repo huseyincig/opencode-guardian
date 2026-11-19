@@ -424,7 +424,7 @@ const CLEAR_BLOCKER_REGEX =
   /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|\b(?:engellendi|ilerleyemiyorum|doğrulayamıyorum|çalıştıramıyorum|tamamlanmadı|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum|bitmedi|bitmiş\s+sayılmıyor|bitmiş\s+sayılmaz|tamamlanmış\s+sayılmıyor)\b/iu;
 
 const IN_PROGRESS_REGEX =
-  /(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report)|(?:işlem\w*\s+devam\s+ediyor|çalışma\w*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\w*\s+sürüyor|çalışıyorum|inceliyorum|hazırlıyorum|uyguluyorum|başlıyorum|deniyorum|devredildi|aktarıldı|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu)/iu;
+  /(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report|running\s+in\s+the\s+background|moved\s+to\s+the\s+background|waiting\s+for\s+(?:the\s+)?background)|(?:işlem\w*\s+devam\s+ediyor|çalışma\w*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\w*\s+sürüyor|çalışıyorum|inceliyorum|hazırlıyorum|uyguluyorum|başlıyorum|deniyorum|devredildi|aktarıldı|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu|arka\s+planda\s+(?:çalışıyor|devam\s+ediyor))/iu;
 
 export function classifyAgentReport(input: string): {
   state: AgentReportState;

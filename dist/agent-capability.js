@@ -281,14 +281,9 @@ export async function resolveV2AgentCapability(context, sessionID, agentName, me
         // Transient session.get failure is tolerated; a live event/cache or agent
         // catalog lookup can still provide bounded capability evidence.
     }
-    if (sessionPermissions && sessionPermissions.length > 0) {
-        return evaluateAgentMutationProfile({
-            name: resolvedAgentName,
-            v2Permissions: [...sessionPermissions],
-            tools: messageTools,
-        });
-    }
-    // Query the agent catalog in the active session/worktree location.
+    // Query the agent catalog in the active session/worktree location and merge
+    // agent base permissions with session-scoped overrides (Permission.merge order).
+    let foundAgent;
     if (resolvedAgentName && typeof context.agent?.list === "function") {
         try {
             const agentList = await context.agent.list(resolvedDirectory ? { location: { directory: resolvedDirectory } } : undefined);
@@ -298,29 +293,38 @@ export async function resolveV2AgentCapability(context, sessionID, agentName, me
                     ? agentList.data
                     : undefined;
             if (agents) {
-                const found = agents.find((a) => a?.name === resolvedAgentName || a?.id === resolvedAgentName);
-                if (found) {
-                    const mergedTools = {
-                        ...found.tools,
-                        ...messageTools,
-                    };
-                    return evaluateAgentMutationProfile({
-                        name: found.name ?? found.id,
-                        v2Permissions: found.permissions,
-                        tools: mergedTools,
-                    });
-                }
+                foundAgent = agents.find((a) => a?.name === resolvedAgentName || a?.id === resolvedAgentName);
             }
         }
         catch {
-            return {
-                capability: "unknown",
-                evidence: {
-                    agentName: resolvedAgentName,
-                    reasons: ["context.agent.list query failed"],
-                },
-            };
+            if (!sessionPermissions || sessionPermissions.length === 0) {
+                return {
+                    capability: "unknown",
+                    evidence: {
+                        agentName: resolvedAgentName,
+                        reasons: ["context.agent.list query failed"],
+                    },
+                };
+            }
         }
+    }
+    const basePermissions = Array.isArray(foundAgent?.permissions)
+        ? foundAgent.permissions
+        : [];
+    const mergedPermissions = [
+        ...basePermissions,
+        ...(sessionPermissions ?? []),
+    ];
+    if (foundAgent || mergedPermissions.length > 0) {
+        const mergedTools = {
+            ...foundAgent?.tools,
+            ...messageTools,
+        };
+        return evaluateAgentMutationProfile({
+            name: foundAgent?.name ?? foundAgent?.id ?? resolvedAgentName,
+            v2Permissions: mergedPermissions,
+            tools: mergedTools,
+        });
     }
     return {
         capability: "unknown",

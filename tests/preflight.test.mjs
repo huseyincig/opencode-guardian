@@ -203,7 +203,7 @@ test("V2 setup can run without a tool hook when preflight and secret protection 
   }), undefined);
   const cleanup = await Guardian.setup(host.context);
   assert.equal(typeof cleanup, "function");
-  assert.equal(host.sessionHooks.size, 5);
+  assert.equal(host.sessionHooks.size, 6);
   await cleanup();
   assert.equal(host.signal.aborted, true);
 });

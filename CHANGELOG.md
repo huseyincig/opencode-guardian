@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.2 — 2026-11-19
+
+- **OpenCode V2.3.1–V2.3.2 Runtime Compatibility:**
+  - **Background & Timed-Out `shell` Handling:** Treated `metadata.status === "running"`, exitless `shellID` returns, and `v2.3.1` `"Command moved to the background"` / timeout-to-background outputs as `"unknown"` rather than completed success or completed file mutations. Normalized `type: "synthetic"` (`metadata.source === "shell"`) completion notifications into assistant `shell` tool evidence, and normalized `type: "shell"` (`status: "running"`) messages as `"running"` instead of `"error"`.
+  - **Code Mode (`execute`) Visibility:** Expanded `execute` `state.metadata.toolCalls` into inspectable tool parts during `normalizeV2Messages` (exposing nested `write`/`edit`/`patch`/`shell` calls to rules and evidence tracking) and treated `state.metadata.error === true` as `"failure"`.
+  - **`experimental.idle` & Background Isolation:** Registered optional `ctx.session.hook("experimental.idle", ...)` to track active `"codemode" | "shell" | "subagent" | "image"` background jobs, added `hasUnfinishedBackgroundTool` guarding in `handleSessionIdle`, and expanded `IN_PROGRESS_REGEX` for background wait phrasing.
+  - **Structured `read` Output & Directory Review Guard:** Added string `Tool.Result.content` and structured `{ type: "text" | "directory", ... }` `output` extraction in `stringifyV2ToolContent` / `extractV2OutputText`, and excluded `"Read directory ..."` and `"Read file ..., 0 lines"` outputs from `isSourceReviewEvidence`.
+  - **Permission Merging (`Permission.merge`):** Updated `resolveV2AgentCapability` to merge `context.agent.list()` base permissions with `session.permissions` overrides instead of returning early on partial session permission entries.
+- **Secret Redaction Precision:**
+  - Refined `SENSITIVE_KEY_REGEX` (`PASS(?:WORD|WD|PHRASE)`) so test summary counters like `pass` are not treated as secret keys, and preserved `null`, `undefined`, `boolean`, `number`, and empty string values in `sanitizeObject`.
+- **Verification:**
+  - Added 8 regression tests in `tests/v232-compatibility-regressions.test.mjs` (**781 / 781** passing), **18 / 18** sandbox scenarios, and live **OpenCode `v2.3.2` + Bun `1.4.4`** acceptance checks.
+
 ## 0.15.1 — 2026-11-17
 
 - **Security & V2 Context Hardening:**

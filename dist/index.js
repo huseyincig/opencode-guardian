@@ -82,6 +82,8 @@ function sanitizeV2ToolError(error, options) {
     }
 }
 function stringifyV2ToolContent(content) {
+    if (typeof content === "string")
+        return content;
     if (!Array.isArray(content))
         return "";
     return content
@@ -104,15 +106,37 @@ function stringifyV2ToolContent(content) {
         .filter(Boolean)
         .join("\n");
 }
-function normalizeV2AssistantPart(part) {
+function extractV2OutputText(output, content) {
+    if (typeof output === "string")
+        return output;
+    if (output && typeof output === "object" && !Array.isArray(output)) {
+        const obj = output;
+        if (typeof obj.output === "string")
+            return obj.output;
+        if (typeof obj.content === "string")
+            return obj.content;
+        if (Array.isArray(obj.entries)) {
+            return `Read directory\n${obj.entries.filter((e) => typeof e === "string").join("\n")}`;
+        }
+        const nestedContent = stringifyV2ToolContent(obj.content);
+        if (nestedContent)
+            return nestedContent;
+    }
+    return stringifyV2ToolContent(content);
+}
+function extractShellCommandFromSyntheticText(text) {
+    const attr = /^<shell\b[^>]*\scommand="([^"]*)"/i.exec(text)?.[1];
+    return attr ?? "";
+}
+function normalizeV2AssistantParts(part) {
     if (!part || typeof part !== "object")
-        return null;
+        return [];
     const value = part;
     if ((value.type === "text" || value.type === "reasoning") && typeof value.text === "string") {
-        return { type: value.type, text: value.text };
+        return [{ type: value.type, text: value.text }];
     }
     if (value.type !== "tool" || !value.state || typeof value.state !== "object") {
-        return null;
+        return [];
     }
     const state = value.state;
     const normalizedState = {};
@@ -130,12 +154,10 @@ function normalizeV2AssistantPart(part) {
         normalizedState.exitCode = state.exitCode;
     if (state.raw !== undefined)
         normalizedState.raw = state.raw;
-    const output = typeof state.output === "string"
-        ? state.output
-        : stringifyV2ToolContent(state.content);
+    const output = extractV2OutputText(state.output, state.content);
     if (output)
         normalizedState.output = output;
-    return {
+    const primary = {
         type: "tool",
         tool: typeof value.name === "string" ? value.name : undefined,
         name: typeof value.name === "string" ? value.name : undefined,
@@ -143,6 +165,39 @@ function normalizeV2AssistantPart(part) {
             typeof value.callID === "string" ? value.callID : undefined,
         state: normalizedState,
     };
+    const toolCalls = normalizedState.metadata?.toolCalls;
+    if (value.name !== "execute" || !Array.isArray(toolCalls)) {
+        return [primary];
+    }
+    const nestedParts = [];
+    for (let i = 0; i < toolCalls.length; i++) {
+        const call = toolCalls[i];
+        if (!call || typeof call !== "object")
+            continue;
+        const rec = call;
+        const toolName = typeof rec.tool === "string" ? rec.tool : undefined;
+        const callStatus = typeof rec.status === "string" ? rec.status : "completed";
+        if (!toolName)
+            continue;
+        const callInput = rec.input && typeof rec.input === "object" && !Array.isArray(rec.input)
+            ? rec.input
+            : {};
+        nestedParts.push({
+            type: "tool",
+            tool: toolName,
+            name: toolName,
+            callID: primary.callID ? `${primary.callID}:codemode:${i}` : undefined,
+            state: {
+                status: callStatus,
+                input: callInput,
+                metadata: { codemode: true },
+                ...(callStatus === "completed" && (toolName === "shell" || toolName === "bash")
+                    ? { exitCode: 0 }
+                    : {}),
+            },
+        });
+    }
+    return [primary, ...nestedParts];
 }
 /**
  * Converts OpenCode v2 session.context() records into the stable internal
@@ -174,15 +229,40 @@ export function normalizeV2Messages(messages, sessionID) {
             continue;
         }
         if (type === "synthetic" && typeof msg.text === "string") {
+            const meta = msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
+                ? msg.metadata
+                : undefined;
+            if (meta?.source === "shell") {
+                const command = typeof msg.description === "string" && msg.description.trim().length > 0
+                    ? msg.description
+                    : extractShellCommandFromSyntheticText(msg.text);
+                const completedOk = meta.state === "completed" &&
+                    (meta.exit === 0 || meta.exit === undefined);
+                normalized.push({
+                    info: { id, role: "assistant" },
+                    parts: [{
+                            type: "tool",
+                            tool: "shell",
+                            name: "shell",
+                            callID: typeof meta.shellID === "string" ? meta.shellID : id,
+                            state: {
+                                status: completedOk ? "completed" : "error",
+                                input: { command },
+                                output: msg.text,
+                                metadata: meta,
+                                ...(meta.exit !== undefined ? { exitCode: meta.exit } : {}),
+                            },
+                        }],
+                });
+                continue;
+            }
             normalized.push({
                 info: { id, role: "user" },
                 parts: [{
                         type: "text",
                         text: msg.text,
                         synthetic: true,
-                        ...(msg.metadata && typeof msg.metadata === "object"
-                            ? { metadata: msg.metadata }
-                            : {}),
+                        ...(meta ? { metadata: meta } : {}),
                     }],
             });
             continue;
@@ -195,9 +275,7 @@ export function normalizeV2Messages(messages, sessionID) {
             continue;
         }
         if (type === "assistant" && Array.isArray(msg.content)) {
-            const parts = msg.content
-                .map(normalizeV2AssistantPart)
-                .filter((part) => part !== null);
+            const parts = msg.content.flatMap(normalizeV2AssistantParts);
             normalized.push({
                 info: {
                     id,
@@ -212,6 +290,7 @@ export function normalizeV2Messages(messages, sessionID) {
             const shellOutput = msg.output && typeof msg.output === "object"
                 ? msg.output.output
                 : undefined;
+            const isRunning = msg.status === "running";
             const exitedOk = msg.status === "exited" && (msg.exit === 0 || msg.exit === undefined);
             normalized.push({
                 info: { id, role: "assistant" },
@@ -219,10 +298,14 @@ export function normalizeV2Messages(messages, sessionID) {
                         type: "tool",
                         tool: "shell",
                         name: "shell",
-                        callID: id,
+                        callID: typeof msg.shellID === "string" ? msg.shellID : id,
                         state: {
-                            status: exitedOk ? "completed" : "error",
+                            status: isRunning ? "running" : exitedOk ? "completed" : "error",
                             input: { command: msg.command },
+                            metadata: {
+                                ...(typeof msg.status === "string" ? { status: msg.status } : {}),
+                                ...(typeof msg.shellID === "string" ? { shellID: msg.shellID } : {}),
+                            },
                             ...(typeof shellOutput === "string" ? { output: shellOutput } : {}),
                             ...(msg.exit !== undefined ? { exitCode: msg.exit } : {}),
                         },
@@ -479,6 +562,44 @@ async function finalizeSubagentHandoff(input) {
     }
     throw new Error("[opencode-guardian handoff] subagent finalization exceeded its bounded loop.");
 }
+function hasUnfinishedBackgroundTool(messages) {
+    const lastHumanIdx = messages.findLastIndex((msg) => msg.info.role === "user" &&
+        msg.parts.some((p) => p.type === "text" &&
+            typeof p.text === "string" &&
+            p.synthetic !== true &&
+            p.ignored !== true &&
+            p.text.trim().length > 0));
+    const turn = lastHumanIdx >= 0 ? messages.slice(lastHumanIdx) : messages;
+    const runningIDs = new Set();
+    const finishedIDs = new Set();
+    let anonymousRunning = 0;
+    for (const msg of turn) {
+        for (const part of msg.parts) {
+            if (part.type !== "tool" || !part.state)
+                continue;
+            const meta = part.state.metadata;
+            const shellID = typeof meta?.shellID === "string" ? meta.shellID : undefined;
+            const id = shellID ?? (typeof part.callID === "string" ? part.callID : undefined);
+            const isRunning = part.state.status === "running" || meta?.status === "running";
+            if (isRunning) {
+                if (id)
+                    runningIDs.add(id);
+                else
+                    anonymousRunning += 1;
+            }
+            else if (id && (part.state.status === "completed" || part.state.status === "error")) {
+                finishedIDs.add(id);
+            }
+        }
+    }
+    if (anonymousRunning > 0)
+        return true;
+    for (const id of runningIDs) {
+        if (!finishedIDs.has(id))
+            return true;
+    }
+    return false;
+}
 /**
  * Common handler to process session.idle events in OpenCode V2.
  */
@@ -489,6 +610,8 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             return;
         const messages = await fetchMessages();
         if (signal?.aborted)
+            return;
+        if (hasUnfinishedBackgroundTool(messages))
             return;
         stage = "engine-inspect";
         // Unknown topology is not permission to treat a session as root. Fail safe
@@ -715,6 +838,7 @@ const setup = async (context) => {
         sessionDirectories.delete(sessionID);
     };
     const verificationStore = new VerificationSnapshotStore();
+    const backgroundSessions = new Set();
     const contracts = new Map();
     const setSessionContract = (sessionID, contract) => {
         contracts.delete(sessionID);
@@ -1024,7 +1148,7 @@ const setup = async (context) => {
                         event.result = sanitizeToolResult(event.result, runtime.sanitizer);
                     }
                     const result = event.status === "completed" ? event.result : undefined;
-                    verificationStore.observe(event.sessionID, event.id, event.tool, input, result?.output ?? result?.content ?? "", result?.metadata ?? {}, observedDirectory, event.status);
+                    verificationStore.observe(event.sessionID, event.id, event.tool, input, extractV2OutputText(result?.output, result?.content), result?.metadata ?? {}, observedDirectory, event.status);
                 }
                 finally {
                     if (tracked) {
@@ -1122,6 +1246,7 @@ const setup = async (context) => {
                 }
                 idleQueue.forget(event.sessionID);
                 contracts.delete(event.sessionID);
+                backgroundSessions.delete(event.sessionID);
                 const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
                 const runtime = runtimeForDirectory(runtimeDirectory);
                 if (runtime.config.enabled === false) {
@@ -1197,6 +1322,28 @@ const setup = async (context) => {
             }
             registrations.push(...taskRegistrations);
             modelRequestProtectionReady = true;
+            try {
+                const expIdleReg = await context.session.hook("experimental.idle", (event) => {
+                    const bg = event.background;
+                    if (Array.isArray(bg) && bg.length > 0) {
+                        backgroundSessions.add(event.sessionID);
+                        if (backgroundSessions.size > 512) {
+                            const oldest = backgroundSessions.values().next().value;
+                            if (oldest !== undefined)
+                                backgroundSessions.delete(oldest);
+                        }
+                    }
+                    else {
+                        backgroundSessions.delete(event.sessionID);
+                    }
+                });
+                if (expIdleReg && typeof expIdleReg.dispose === "function") {
+                    registrations.push(expIdleReg);
+                }
+            }
+            catch {
+                // Optional v2.3.0+ experimental.idle hook; absent on older/minimal test hosts.
+            }
         }
         catch {
             // Never leave a partial task/security hook group installed.
@@ -1241,6 +1388,7 @@ const setup = async (context) => {
                             idleQueue.forget(deletedSessionID);
                             forgetSessionRuntime(deletedSessionID);
                             verificationStore.forget(deletedSessionID);
+                            backgroundSessions.delete(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
                             toastNotifier.clear?.(deletedSessionID);
@@ -1277,6 +1425,7 @@ const setup = async (context) => {
                                 rememberSessionDirectory(movedSessionID, movedDirectory);
                             }
                             verificationStore.forget(movedSessionID);
+                            backgroundSessions.delete(movedSessionID);
                             contracts.delete(movedSessionID);
                             foregroundHandoffs.delete(movedSessionID);
                             toastNotifier.clear?.(movedSessionID);
@@ -1330,6 +1479,9 @@ const setup = async (context) => {
                         const runtime = runtimeForDirectory(activeDirectory);
                         if (runtime.config.enabled === false || idleSignal.aborted)
                             return;
+                        if (backgroundSessions.has(sessionID)) {
+                            return;
+                        }
                         await handleSessionIdle(sessionID, activeDirectory, async () => {
                             const messages = await context.session.context({ sessionID });
                             const normalized = normalizeV2Messages(messages, sessionID);

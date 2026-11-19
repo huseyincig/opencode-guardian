@@ -268,6 +268,13 @@ export function sanitizeObject(data, options = {}) {
     let redactedCount = 0;
     try {
         function propertyValue(key, value) {
+            if (value === null ||
+                value === undefined ||
+                typeof value === 'boolean' ||
+                typeof value === 'number' ||
+                value === '') {
+                return value;
+            }
             if (typeof value === 'string' && options.safeValues?.includes(value)) {
                 return value;
             }

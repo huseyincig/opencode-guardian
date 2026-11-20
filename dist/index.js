@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { GuardEngine, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
@@ -12,6 +15,7 @@ import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardian
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
+import { acquireSessionLease, clearMeshIntervention, getBlockingSessionLease, isTrustedMeshMessage, recordMeshIntervention, registerMeshStateRpc, resolveMeshAgentProfile, } from "./bridge.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./degeneration.js";
@@ -48,6 +52,7 @@ export * from "./toast.js";
 export * from "./intervention.js";
 export * from "./intervention-rpc.js";
 export * from "./provenance.js";
+export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
 function sanitizeV2ToolError(error, options) {
     const fallback = () => {
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
@@ -216,11 +221,13 @@ export function normalizeV2Messages(messages, sessionID) {
         if (isTrustedGuardianMetadata(sessionID, msg.metadata, "visible"))
             continue;
         if (type === "user" && typeof msg.text === "string") {
+            const trustedMesh = isTrustedMeshMessage(msg, sessionID);
             normalized.push({
                 info: { id, role: "user" },
                 parts: [{
                         type: "text",
                         text: msg.text,
+                        ...(trustedMesh ? { synthetic: true } : {}),
                         ...(msg.metadata && typeof msg.metadata === "object"
                             ? { metadata: msg.metadata }
                             : {}),
@@ -236,8 +243,14 @@ export function normalizeV2Messages(messages, sessionID) {
                 const command = typeof msg.description === "string" && msg.description.trim().length > 0
                     ? msg.description
                     : extractShellCommandFromSyntheticText(msg.text);
-                const completedOk = meta.state === "completed" &&
+                const shellState = meta.state ?? meta.status;
+                const completedOk = shellState === "completed" &&
                     (meta.exit === 0 || meta.exit === undefined);
+                const mappedStatus = shellState === "running"
+                    ? "running"
+                    : completedOk
+                        ? "completed"
+                        : "error";
                 normalized.push({
                     info: { id, role: "assistant" },
                     parts: [{
@@ -246,7 +259,7 @@ export function normalizeV2Messages(messages, sessionID) {
                             name: "shell",
                             callID: typeof meta.shellID === "string" ? meta.shellID : id,
                             state: {
-                                status: completedOk ? "completed" : "error",
+                                status: mappedStatus,
                                 input: { command },
                                 output: msg.text,
                                 metadata: meta,
@@ -425,6 +438,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
         }, directory);
     }
     if (result.remediationStatus === "verified") {
+        clearMeshIntervention(sessionID);
         toastNotifier?.clear?.(sessionID);
         const verifiedRules = result.pendingRemediationRules?.length
             ? result.pendingRemediationRules
@@ -453,6 +467,9 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
             rules: failedRules,
             reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
         }, directory);
+    }
+    if (result.decision === "pass" && findings.length === 0) {
+        clearMeshIntervention(sessionID);
     }
     if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
         recordGuardianEvent({
@@ -520,10 +537,31 @@ async function finalizeSubagentHandoff(input) {
             if (agentCapability !== "write-allowed") {
                 return latestAssistantText(messages);
             }
+            if (getBlockingSessionLease(input.sessionID, "active_remediation", "opencode-guardian")) {
+                return latestAssistantText(messages);
+            }
             if (round === MAX_SUBAGENT_HANDOFF_ROUNDS - 1) {
                 result.rollback?.();
                 throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
             }
+            const releaseRemediationLease = acquireSessionLease({
+                sessionID: input.sessionID,
+                owner: "opencode-guardian",
+                kind: "active_remediation",
+                ttlMs: 45_000,
+                reason: "guardian-subagent-remediation",
+            });
+            recordMeshIntervention({
+                sessionID: input.sessionID,
+                directory: input.directory,
+                owner: "opencode-guardian",
+                kind: "post-remediation",
+                ruleIds: findings.map((item) => item.ruleId),
+                deterministic: true,
+                active: true,
+                updatedAt: Date.now(),
+                message: "guardian-subagent-remediation",
+            });
             try {
                 await input.sendAndWait(result.combinedRemediationPrompt);
                 remediated = true;
@@ -548,6 +586,9 @@ async function finalizeSubagentHandoff(input) {
                     reasons: [{ rule: "prompt-delivery-failed", code: "prompt-delivery-failed" }],
                 }, input.directory);
                 throw new Error("[opencode-guardian handoff] could not complete subagent remediation.");
+            }
+            finally {
+                releaseRemediationLease();
             }
             continue;
         }
@@ -608,6 +649,9 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
     try {
         if (signal?.aborted)
             return;
+        if (getBlockingSessionLease(sessionID, "active_remediation", "opencode-guardian")) {
+            return;
+        }
         const messages = await fetchMessages();
         if (signal?.aborted)
             return;
@@ -643,6 +687,23 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 return;
             }
             stage = "prompt-send";
+            recordMeshIntervention({
+                sessionID,
+                directory,
+                owner: "opencode-guardian",
+                kind: "post-remediation",
+                ruleIds: findings.map((item) => item.ruleId),
+                deterministic: false,
+                active: true,
+                updatedAt: Date.now(),
+            });
+            const releaseRemediationLease = acquireSessionLease({
+                sessionID,
+                owner: "opencode-guardian",
+                kind: "active_remediation",
+                ttlMs: 45_000,
+                reason: "guardian-remediation",
+            });
             try {
                 if (signal?.aborted) {
                     result.rollback?.();
@@ -661,6 +722,9 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             catch (promptError) {
                 result.rollback?.();
                 throw promptError;
+            }
+            finally {
+                releaseRemediationLease();
             }
         }
     }
@@ -696,6 +760,18 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
         ...(finding ? { rules: [finding] } : {}),
     }, directory);
     if (finding) {
+        if (sessionID) {
+            recordMeshIntervention({
+                sessionID,
+                directory: directory ?? "",
+                owner: "opencode-guardian",
+                kind: "preflight-blocked",
+                ruleIds: [finding],
+                deterministic: true,
+                active: true,
+                updatedAt: Date.now(),
+            });
+        }
         toastNotifier?.notify({
             kind: "preflight-blocked",
             ruleId: finding,
@@ -704,6 +780,87 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
         });
         throw new GuardianPreflightError(finding);
     }
+}
+function realpathLoose(targetPath) {
+    const resolved = path.resolve(targetPath);
+    try {
+        return fs.realpathSync(resolved);
+    }
+    catch {
+        return resolved;
+    }
+}
+function isSameOrSubdirectory(candidateDir, baseDir) {
+    const candidate = realpathLoose(candidateDir);
+    const base = realpathLoose(baseDir);
+    return candidate === base || candidate.startsWith(base + path.sep);
+}
+function isProjectLocalPluginInstall(dir) {
+    return (fs.existsSync(path.join(dir, ".opencode", "plugins", "opencode-guardian")) ||
+        fs.existsSync(path.join(dir, ".opencode", "plugin", "opencode-guardian")) ||
+        fs.existsSync(path.join(dir, ".opencode", "node_modules", "opencode-guardian")));
+}
+function globalOpenCodeConfigDir() {
+    if (process.env.OPENCODE_CONFIG_DIR && process.env.OPENCODE_CONFIG_DIR.trim()) {
+        return path.resolve(process.env.OPENCODE_CONFIG_DIR);
+    }
+    if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim()) {
+        return path.join(path.resolve(process.env.XDG_CONFIG_HOME), "opencode");
+    }
+    return path.join(os.homedir(), ".config", "opencode");
+}
+function openCodeConfigMentionsGuardian(dir) {
+    for (const name of ["opencode.json", "opencode.jsonc"]) {
+        const candidate = path.join(dir, name);
+        if (!fs.existsSync(candidate))
+            continue;
+        try {
+            const raw = fs.readFileSync(candidate, "utf8");
+            if (raw.includes("opencode-guardian") && !raw.includes("-opencode-guardian")) {
+                return true;
+            }
+        }
+        catch { }
+    }
+    return false;
+}
+function hasExplicitGuardianConfigOrInstall(dir) {
+    return (fs.existsSync(path.join(dir, "opencode-guardian.json")) ||
+        fs.existsSync(path.join(dir, ".opencode", "opencode-guardian.json")) ||
+        fs.existsSync(path.join(dir, "opencode-guard.json")) ||
+        fs.existsSync(path.join(dir, ".opencode", "opencode-guard.json")) ||
+        isProjectLocalPluginInstall(dir) ||
+        openCodeConfigMentionsGuardian(dir) ||
+        openCodeConfigMentionsGuardian(path.join(dir, ".opencode")));
+}
+function hasGlobalGuardianInstall() {
+    const globalDir = globalOpenCodeConfigDir();
+    return (fs.existsSync(path.join(globalDir, "opencode-guardian.json")) ||
+        fs.existsSync(path.join(globalDir, "opencode-guard.json")) ||
+        fs.existsSync(path.join(globalDir, "plugins", "opencode-guardian")) ||
+        fs.existsSync(path.join(globalDir, "plugin", "opencode-guardian")) ||
+        fs.existsSync(path.join(globalDir, "node_modules", "opencode-guardian")) ||
+        openCodeConfigMentionsGuardian(globalDir));
+}
+function hasLocalProjectMarker(dir) {
+    return (hasExplicitGuardianConfigOrInstall(dir) ||
+        fs.existsSync(path.join(dir, ".opencode")) ||
+        fs.existsSync(path.join(dir, ".git")));
+}
+function isDirectoryInGuardianScope(startupDirectory, targetDirectory) {
+    if (!targetDirectory || isSameOrSubdirectory(targetDirectory, startupDirectory)) {
+        return true;
+    }
+    if (hasExplicitGuardianConfigOrInstall(targetDirectory) || hasGlobalGuardianInstall()) {
+        return true;
+    }
+    if (isProjectLocalPluginInstall(startupDirectory)) {
+        return false;
+    }
+    if (hasLocalProjectMarker(startupDirectory) || hasLocalProjectMarker(targetDirectory)) {
+        return false;
+    }
+    return true;
 }
 const setup = async (context) => {
     // Transition builds may call setup() with a partial v2 context.
@@ -750,6 +907,7 @@ const setup = async (context) => {
             if (oldest === undefined)
                 break;
             provenanceSessions.delete(oldest);
+            forgetGuardianProvenance(oldest);
         }
         return createGuardianMessageMetadata(sessionID, kind, base);
     };
@@ -780,6 +938,19 @@ const setup = async (context) => {
     const runtimeForDirectory = (runtimeDirectory) => {
         const key = runtimeDirectory || directory;
         const cached = runtimeByDirectory.get(key);
+        if (cached && (!cached.config.enabled || (toolOutputProtectionReady && modelRequestProtectionReady) || !cached.sanitizer)) {
+            return cached;
+        }
+        if (!isDirectoryInGuardianScope(directory, key)) {
+            const disabledConfig = { ...mergedConfig, enabled: false };
+            const disabledRuntime = {
+                config: disabledConfig,
+                sanitizer: null,
+                engine: new GuardEngine(disabledConfig),
+            };
+            runtimeByDirectory.set(key, disabledRuntime);
+            return disabledRuntime;
+        }
         const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
         configureGuardianTelemetry(key, config.telemetry);
         const runtime = cached ?? {
@@ -858,6 +1029,15 @@ const setup = async (context) => {
         recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
     });
     if (typeof context.rpc?.register === "function") {
+        try {
+            const disposeMeshRpc = await registerMeshStateRpc({
+                rpcRegister: context.rpc.register.bind(context.rpc),
+                owner: "opencode-guardian",
+                directory,
+            });
+            registrations.push({ dispose: disposeMeshRpc });
+        }
+        catch { }
         try {
             const rpcRegistration = await context.rpc.register(GUARDIAN_INTERVENTION_RPC_DEFINITION, {
                 [GUARDIAN_INTERVENTION_RPC_METHOD]: async (input) => {
@@ -1088,6 +1268,18 @@ const setup = async (context) => {
                                     engine: childRuntime.engine,
                                     agentName: childAgent,
                                     resolveCapability: async () => {
+                                        const meshProfile = await resolveMeshAgentProfile(childID, childDirectory);
+                                        if (meshProfile && meshProfile.capability !== "unknown") {
+                                            const resolved = {
+                                                capability: meshProfile.capability,
+                                                evidence: {
+                                                    agentName: meshProfile.agentName ?? childAgent,
+                                                    reasons: [`mesh:${meshProfile.managedBy}`],
+                                                },
+                                            };
+                                            cacheAgentCapability(childID, resolved);
+                                            return resolved;
+                                        }
                                         const cached = getCachedAgentCapability(childID);
                                         if (cached)
                                             return cached;
@@ -1241,7 +1433,14 @@ const setup = async (context) => {
         try {
             const promptRegistration = await context.session.hook("prompt", async (event) => {
                 if (isTrustedGuardianMetadata(event.sessionID, event.metadata, "visible") ||
-                    isTrustedGuardianMetadata(event.sessionID, event.metadata, "remediation")) {
+                    isTrustedGuardianMetadata(event.sessionID, event.metadata, "remediation") ||
+                    isTrustedMeshMessage(event, event.sessionID, [
+                        "remediation",
+                        "visible",
+                        "handoff",
+                        "wake",
+                        "skill-injection",
+                    ])) {
                     return;
                 }
                 idleQueue.forget(event.sessionID);
@@ -1269,12 +1468,14 @@ const setup = async (context) => {
             }
             taskRegistrations.push(promptRegistration);
             const sanitizeV2ModelRequest = async (event) => {
+                const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
+                const runtime = runtimeForDirectory(runtimeDirectory);
+                if (runtime.config.enabled === false)
+                    return runtime;
                 if (Array.isArray(event.messages)) {
                     event.messages = event.messages.filter((message) => !isTrustedGuardianMetadata(event.sessionID, message.metadata, "visible"));
                 }
-                const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
-                const runtime = runtimeForDirectory(runtimeDirectory);
-                if (runtime.config.enabled === false || !runtime.sanitizer)
+                if (!runtime.sanitizer)
                     return runtime;
                 if (Array.isArray(event.messages)) {
                     event.messages = sanitizeMessages(event.messages, runtime.sanitizer);
@@ -1505,6 +1706,19 @@ const setup = async (context) => {
                             });
                         }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, sessionIsSubagent
                             ? async () => {
+                                const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
+                                if (meshProfile && meshProfile.capability !== "unknown") {
+                                    const resolved = {
+                                        capability: meshProfile.capability,
+                                        evidence: {
+                                            agentName: meshProfile.agentName,
+                                            reasons: [`mesh:${meshProfile.managedBy}`],
+                                        },
+                                    };
+                                    if (!idleSignal.aborted)
+                                        cacheAgentCapability(sessionID, resolved);
+                                    return resolved;
+                                }
                                 const cached = getCachedAgentCapability(sessionID);
                                 if (cached)
                                     return cached;
@@ -1576,7 +1790,7 @@ const setup = async (context) => {
             }
         }
     };
-    const unregisterGuardianCapability = registerGuardianCapability();
+    const unregisterGuardianCapability = registerGuardianCapability(directory);
     recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: strictPreflight ? "active" : "disabled" }, directory);
     if (events) {
         void eventLoop();

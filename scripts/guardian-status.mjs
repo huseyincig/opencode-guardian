@@ -3,7 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { readGuardianStatus, guardianEventPath } from "../dist/telemetry.js";
 
-const targetDir = process.argv[2] || (fs.existsSync(path.join(process.cwd(), ".opencode")) ? process.cwd() : undefined);
+const cwd = process.cwd();
+const targetDir =
+  process.argv[2] ||
+  (fs.existsSync(guardianEventPath(cwd)) ||
+  fs.existsSync(path.join(cwd, ".opencode")) ||
+  fs.existsSync(path.join(cwd, ".git"))
+    ? cwd
+    : undefined);
 const s = readGuardianStatus(targetDir);
 console.log(`Guardian | preflight at last start: ${s.preflight}`);
 console.log(`Inspections (tool + turn): ${s.inspected} | blocked tools (preflight): ${s.blocked}`);

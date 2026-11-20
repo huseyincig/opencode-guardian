@@ -225,7 +225,7 @@ function GuardianSidebar(props) {
     const pf = status().preflight;
     if (pf === "active") return "● active";
     if (pf === "disabled") return "○ disabled";
-    if (pf === "unavailable") return "▲ unavailable";
+    if (pf === "unavailable") return "! unavailable";
     return "—";
   };
   const preflightColor = () => {
@@ -238,25 +238,25 @@ function GuardianSidebar(props) {
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested":
-        return "▲ stream stop requested";
+        return "! stream stop";
       case "inspection-error":
-        return "▲ inspection error";
+        return "✕ inspection error";
       case "preflight-blocked":
-        return "● preflight blocked";
+        return "⊘ preflight blocked";
       case "post-remediation":
-        return "● remediation sent";
+        return "↻ remediation sent";
       case "remediation-verified":
-        return "● remediation verified";
+        return "✓ verified";
       case "remediation-failed":
-        return "▲ remediation failed";
+        return "✕ remediation failed";
       case "remediation-unverified":
-        return "▲ remediation unverified";
+        return "! unverified";
       case "statistics-reset":
-        return "○ statistics reset";
+        return "○ reset";
       case "verification-unavailable":
-        return "▲ verification unavailable";
+        return "! verification off";
       case "post-warning":
-        return "▲ warning";
+        return "! warning";
       case "preflight-allowed":
         return "● allowed";
       case "post-inspected":
@@ -292,45 +292,46 @@ function GuardianSidebar(props) {
   return (() => {
     var _el$9 = _$createElement("box"),
       _el$0 = _$createElement("box"),
-      _el$1 = _$createElement("box"),
-      _el$10 = _$createElement("text"),
+      _el$1 = _$createElement("text"),
+      _el$10 = _$createElement("box"),
       _el$11 = _$createElement("text"),
-      _el$12 = _$createElement("b"),
-      _el$14 = _$createElement("box"),
-      _el$15 = _$createElement("text");
+      _el$13 = _$createElement("text"),
+      _el$14 = _$createElement("text");
     _$insertNode(_el$9, _el$0);
     _$setProp(_el$9, "width", "100%");
     _$setProp(_el$9, "flexDirection", "column");
     _$setProp(_el$9, "gap", 0);
     _$insertNode(_el$0, _el$1);
+    _$insertNode(_el$0, _el$10);
+    _$insertNode(_el$0, _el$13);
     _$insertNode(_el$0, _el$14);
     _$setProp(_el$0, "width", "100%");
     _$setProp(_el$0, "flexDirection", "row");
-    _$setProp(_el$0, "justifyContent", "space-between");
-    _$setProp(_el$0, "alignItems", "center");
     _$setProp(_el$0, "onMouseDown", () => setOpen(value => !value));
-    _$insertNode(_el$1, _el$10);
-    _$insertNode(_el$1, _el$11);
-    _$setProp(_el$1, "flexDirection", "row");
-    _$setProp(_el$1, "alignItems", "center");
-    _$insert(_el$10, () => open() ? "▼ " : "▶ ");
-    _$insertNode(_el$11, _el$12);
-    _$insertNode(_el$12, _$createTextNode(`Guardian`));
-    _$insertNode(_el$14, _el$15);
-    _$setProp(_el$14, "flexDirection", "row");
-    _$setProp(_el$14, "alignItems", "center");
-    _$insert(_el$15, "v" + guardianVersion);
-    _$insert(_el$14, _$createComponent(Show, {
+    _$insert(_el$1, () => open() ? "▼ " : "▶ ");
+    _$insertNode(_el$10, _el$11);
+    _$setProp(_el$10, "paddingLeft", 1);
+    _$setProp(_el$10, "paddingRight", 1);
+    _$insertNode(_el$11, _$createTextNode(`guardian`));
+    _$insert(_el$13, " v" + guardianVersion);
+    _$setProp(_el$14, "flexShrink", 1);
+    _$setProp(_el$14, "truncate", true);
+    _$setProp(_el$14, "wrapMode", "none");
+    _$insert(_el$14, () => ` · ${statusLabel()}`);
+    _$insert(_el$0, _$createComponent(Show, {
       get when() {
         return hasUpdate();
       },
       get children() {
-        var _el$16 = _$createElement("text"),
-          _el$17 = _$createElement("b");
-        _$insertNode(_el$16, _el$17);
-        _$insertNode(_el$17, _$createTextNode(` (↑)`));
-        _$effect(_$p => _$setProp(_el$16, "fg", successColor(), _$p));
-        return _el$16;
+        var _el$15 = _$createElement("text");
+        _$setProp(_el$15, "flexShrink", 0);
+        _$setProp(_el$15, "wrapMode", "none");
+        _$insert(_el$15, (() => {
+          var _c$ = _$memo(() => !!latestVersion());
+          return () => _c$() ? ` (↑${latestVersion()})` : " (↑)";
+        })());
+        _$effect(_$p => _$setProp(_el$15, "fg", successColor(), _$p));
+        return _el$15;
       }
     }), null);
     _$insert(_el$9, _$createComponent(Show, {
@@ -338,7 +339,11 @@ function GuardianSidebar(props) {
         return _$memo(() => !!hasUpdate())() && latestVersion();
       },
       get children() {
-        return _$createComponent(StatRow, {
+        var _el$16 = _$createElement("box");
+        _$setProp(_el$16, "width", "100%");
+        _$setProp(_el$16, "flexDirection", "column");
+        _$setProp(_el$16, "paddingLeft", 1);
+        _$insert(_el$16, _$createComponent(StatRow, {
           label: "Update available",
           get value() {
             return `v${latestVersion()}`;
@@ -352,7 +357,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        });
+        }));
+        return _el$16;
       }
     }), null);
     _$insert(_el$9, _$createComponent(Show, {
@@ -360,7 +366,11 @@ function GuardianSidebar(props) {
         return !open();
       },
       get children() {
-        return [_$createComponent(StatRow, {
+        var _el$17 = _$createElement("box");
+        _$setProp(_el$17, "width", "100%");
+        _$setProp(_el$17, "flexDirection", "column");
+        _$setProp(_el$17, "paddingLeft", 1);
+        _$insert(_el$17, _$createComponent(StatRow, {
           label: "Status",
           get value() {
             return statusLabel();
@@ -374,7 +384,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$17, _$createComponent(StatRow, {
           label: "Interventions",
           get value() {
             return `${status().warnings}w · ${status().remediations}r`;
@@ -385,7 +396,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        })];
+        }), null);
+        return _el$17;
       }
     }), null);
     _$insert(_el$9, _$createComponent(Show, {
@@ -393,7 +405,11 @@ function GuardianSidebar(props) {
         return open();
       },
       get children() {
-        return [_$createComponent(StatRow, {
+        var _el$18 = _$createElement("box");
+        _$setProp(_el$18, "width", "100%");
+        _$setProp(_el$18, "flexDirection", "column");
+        _$setProp(_el$18, "paddingLeft", 1);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Mode",
           value: "Autonomous",
           get valueColor() {
@@ -405,7 +421,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Preflight",
           get value() {
             return preflightLabel();
@@ -419,7 +436,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Inspected",
           get value() {
             return status().inspected;
@@ -430,7 +448,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Tool Blocks",
           get value() {
             return status().blocked;
@@ -444,7 +463,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Warnings",
           get value() {
             return status().warnings;
@@ -458,7 +478,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(StatRow, {
+        }), null);
+        _$insert(_el$18, _$createComponent(StatRow, {
           label: "Remediations",
           get value() {
             return status().remediations;
@@ -472,7 +493,8 @@ function GuardianSidebar(props) {
           get text() {
             return props.colors.text;
           }
-        }), _$createComponent(Show, {
+        }), null);
+        _$insert(_el$18, _$createComponent(Show, {
           get when() {
             return status().errors > 0;
           },
@@ -493,7 +515,8 @@ function GuardianSidebar(props) {
               }
             });
           }
-        }), _$createComponent(Show, {
+        }), null);
+        _$insert(_el$18, _$createComponent(Show, {
           get when() {
             return status().truncated;
           },
@@ -520,21 +543,28 @@ function GuardianSidebar(props) {
             });
             return _el$19;
           }
-        })];
+        }), null);
+        return _el$18;
       }
     }), null);
     _$effect(_p$ => {
       var _v$8 = props.colors.muted,
-        _v$9 = props.colors.text,
-        _v$0 = props.colors.muted;
-      _v$8 !== _p$.e && (_p$.e = _$setProp(_el$10, "fg", _v$8, _p$.e));
-      _v$9 !== _p$.t && (_p$.t = _$setProp(_el$11, "fg", _v$9, _p$.t));
-      _v$0 !== _p$.a && (_p$.a = _$setProp(_el$15, "fg", _v$0, _p$.a));
+        _v$9 = props.colors.accent,
+        _v$0 = props.colors.background,
+        _v$1 = props.colors.muted,
+        _v$10 = statusColor();
+      _v$8 !== _p$.e && (_p$.e = _$setProp(_el$1, "fg", _v$8, _p$.e));
+      _v$9 !== _p$.t && (_p$.t = _$setProp(_el$10, "backgroundColor", _v$9, _p$.t));
+      _v$0 !== _p$.a && (_p$.a = _$setProp(_el$11, "fg", _v$0, _p$.a));
+      _v$1 !== _p$.o && (_p$.o = _$setProp(_el$13, "fg", _v$1, _p$.o));
+      _v$10 !== _p$.i && (_p$.i = _$setProp(_el$14, "fg", _v$10, _p$.i));
       return _p$;
     }, {
       e: undefined,
       t: undefined,
-      a: undefined
+      a: undefined,
+      o: undefined,
+      i: undefined
     });
     return _el$9;
   })();
@@ -575,6 +605,7 @@ const v2Plugin = {
     const colors = () => ({
       accent: context.theme?.status?.success?.base ?? context.theme?.text?.base ?? "green",
       onAccent: context.theme?.text?.action?.primary?.base ?? context.theme?.text?.base ?? "white",
+      background: context.theme?.background?.base ?? context.theme?.background?.panel ?? "black",
       text: context.theme?.text?.base ?? "white",
       muted: context.theme?.text?.muted ?? context.theme?.text?.base ?? "gray",
       success: context.theme?.status?.success?.base,

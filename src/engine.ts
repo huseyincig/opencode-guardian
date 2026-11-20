@@ -35,6 +35,11 @@ import {
 import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
 import type { AgentMutationCapability } from "./agent-capability.js";
 import { isTrustedGuardianMetadata } from "./provenance.js";
+import {
+  clearActiveMeshHandoff,
+  isTrustedMeshMessage,
+  setActiveMeshHandoff,
+} from "./bridge.js";
 
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 
@@ -315,19 +320,19 @@ function isSyntheticUserMessage(
   message: SessionMessage,
   sessionID?: string
 ): boolean {
-  return (
-    message.info.role === "user" &&
-    Boolean(
-      message.parts?.length && message.parts.every(
-        (part) =>
-          part.synthetic === true ||
-          (part as Record<string, unknown>).ignored === true ||
-          (part.metadata &&
-            typeof part.metadata === "object" &&
-            ((part.metadata as Record<string, unknown>)["opencode-guardian-visible"] === true ||
-             (part.metadata as Record<string, unknown>)["opencode-guardian-kind"] === "visible")) ||
-          isTrustedGuardianMetadata(sessionID, part.metadata)
-      )
+  if (message.info.role !== "user") return false;
+  if (isTrustedMeshMessage(message, sessionID)) return true;
+  return Boolean(
+    message.parts?.length && message.parts.every(
+      (part) =>
+        part.synthetic === true ||
+        (part as Record<string, unknown>).ignored === true ||
+        (part.metadata &&
+          typeof part.metadata === "object" &&
+          ((part.metadata as Record<string, unknown>)["opencode-guardian-visible"] === true ||
+           (part.metadata as Record<string, unknown>)["opencode-guardian-kind"] === "visible")) ||
+        isTrustedGuardianMetadata(sessionID, part.metadata) ||
+        isTrustedMeshMessage(part, sessionID)
     )
   );
 }
@@ -538,10 +543,11 @@ export class GuardEngine {
     const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
     if (activeHandoff?.status === "question_presented") {
       const hasUserReply = currentTurn.some((msg) =>
-        msg.info.role === "user" && !isGuardianRemediationMessage(msg, sessionID)
+        msg.info.role === "user" && !isSyntheticUserMessage(msg, sessionID)
       );
       if (hasUserReply) {
         this.sessionState.clearActiveHandoff(sessionID);
+        clearActiveMeshHandoff(sessionID);
       }
     } else if (activeHandoff?.status === "handed_off") {
       const askedQuestion = currentTurn.some((msg) =>
@@ -700,6 +706,7 @@ export class GuardEngine {
             autoSelect: handoff.autoSelect,
             status: "handed_off",
           });
+          setActiveMeshHandoff(sessionID, handoff);
         }
         let rollbackDone = false;
         return {
@@ -711,7 +718,10 @@ export class GuardEngine {
             rollbackDone = true;
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
-            if (handoff) this.sessionState.clearActiveHandoff(sessionID);
+            if (handoff) {
+              this.sessionState.clearActiveHandoff(sessionID);
+              clearActiveMeshHandoff(sessionID);
+            }
           },
         };
       }
@@ -805,6 +815,7 @@ export class GuardEngine {
           autoSelect: handoff.autoSelect,
           status: "handed_off",
         });
+        setActiveMeshHandoff(sessionID, handoff);
       }
       let rollbackDone = false;
       return {
@@ -822,7 +833,10 @@ export class GuardEngine {
             blockingRuleIds
           );
           this.sessionState.clearPendingRemediation(sessionID);
-          if (handoff) this.sessionState.clearActiveHandoff(sessionID);
+          if (handoff) {
+            this.sessionState.clearActiveHandoff(sessionID);
+            clearActiveMeshHandoff(sessionID);
+          }
         },
       };
     }

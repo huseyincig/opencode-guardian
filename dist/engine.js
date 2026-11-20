@@ -21,6 +21,7 @@ import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence, } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
 import { isTrustedGuardianMetadata } from "./provenance.js";
+import { clearActiveMeshHandoff, isTrustedMeshMessage, setActiveMeshHandoff, } from "./bridge.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 export const ANTI_DISTRACTION_DIRECTIVE = "CRITICAL: A quality or safety policy was triggered for your current turn.\n" +
     "- Do NOT read, explore, or modify Guardian plugin files, configuration, or audit logs.\n" +
@@ -291,14 +292,18 @@ export function loadConfig(directory) {
     return DEFAULT_CONFIG;
 }
 function isSyntheticUserMessage(message, sessionID) {
-    return (message.info.role === "user" &&
-        Boolean(message.parts?.length && message.parts.every((part) => part.synthetic === true ||
-            part.ignored === true ||
-            (part.metadata &&
-                typeof part.metadata === "object" &&
-                (part.metadata["opencode-guardian-visible"] === true ||
-                    part.metadata["opencode-guardian-kind"] === "visible")) ||
-            isTrustedGuardianMetadata(sessionID, part.metadata))));
+    if (message.info.role !== "user")
+        return false;
+    if (isTrustedMeshMessage(message, sessionID))
+        return true;
+    return Boolean(message.parts?.length && message.parts.every((part) => part.synthetic === true ||
+        part.ignored === true ||
+        (part.metadata &&
+            typeof part.metadata === "object" &&
+            (part.metadata["opencode-guardian-visible"] === true ||
+                part.metadata["opencode-guardian-kind"] === "visible")) ||
+        isTrustedGuardianMetadata(sessionID, part.metadata) ||
+        isTrustedMeshMessage(part, sessionID)));
 }
 function isGuardianRemediationMessage(message, sessionID) {
     if (message.info.role !== "user")
@@ -433,9 +438,10 @@ export class GuardEngine {
         }
         const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
         if (activeHandoff?.status === "question_presented") {
-            const hasUserReply = currentTurn.some((msg) => msg.info.role === "user" && !isGuardianRemediationMessage(msg, sessionID));
+            const hasUserReply = currentTurn.some((msg) => msg.info.role === "user" && !isSyntheticUserMessage(msg, sessionID));
             if (hasUserReply) {
                 this.sessionState.clearActiveHandoff(sessionID);
+                clearActiveMeshHandoff(sessionID);
             }
         }
         else if (activeHandoff?.status === "handed_off") {
@@ -572,6 +578,7 @@ export class GuardEngine {
                         autoSelect: handoff.autoSelect,
                         status: "handed_off",
                     });
+                    setActiveMeshHandoff(sessionID, handoff);
                 }
                 let rollbackDone = false;
                 return {
@@ -584,8 +591,10 @@ export class GuardEngine {
                         rollbackDone = true;
                         this.inspectedMessages.delete(sessionID);
                         this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
-                        if (handoff)
+                        if (handoff) {
                             this.sessionState.clearActiveHandoff(sessionID);
+                            clearActiveMeshHandoff(sessionID);
+                        }
                     },
                 };
             }
@@ -635,6 +644,7 @@ export class GuardEngine {
                     autoSelect: handoff.autoSelect,
                     status: "handed_off",
                 });
+                setActiveMeshHandoff(sessionID, handoff);
             }
             let rollbackDone = false;
             return {
@@ -648,8 +658,10 @@ export class GuardEngine {
                     this.inspectedMessages.delete(sessionID);
                     this.sessionState.rollbackRemediation(sessionID, turnKey, findingFingerprints, blockingRuleIds);
                     this.sessionState.clearPendingRemediation(sessionID);
-                    if (handoff)
+                    if (handoff) {
                         this.sessionState.clearActiveHandoff(sessionID);
+                        clearActiveMeshHandoff(sessionID);
+                    }
                 },
             };
         }

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.16.0 — 2026-11-20
+
+- **Universal OpenCode V2 Plugin Mesh Bridge (`src/bridge.ts` v2.2.0):**
+  - Added zero-dependency N-way interoperability across `opencode-guardian`, `opencode-hi`, `opencode-smart-questions`, and sibling OpenCode V2 plugins via `Symbol.for("opencode.mesh.v2")` and the shared `opencode-mesh.state` RPC contract (`registerMeshStateRpc`).
+  - **Cryptographic Provenance & Sanitizer Protection:** Stamped and verified session-scoped provenance tokens (`stampMeshMetadata`, `verifyMeshMetadata`, `isTrustedMeshMessage`) with legacy `opencode-guardian-provenance` fallback; exempted `metadata["opencode-mesh"].token` from key-name redaction in `sanitizeObject` while preserving secret-pattern scanning.
+  - **Coordinated Session Leases & Deterministic Interventions:** Wired `acquireSessionLease` / `getBlockingSessionLease` (`user_interaction`, `active_remediation`, `orchestration_dispatch`) and `recordMeshIntervention` / `clearMeshIntervention` across idle inspection and `finalizeSubagentHandoff` so sibling orchestrators never retry or model-switch deterministic policy blocks or time out subagents during active Guardian remediation.
+  - **Subagent Role Resolution & N-Way Handoffs:** Consulted `resolveMeshAgentProfile` in `handleSessionIdle` and `finalizeSubagentHandoff` to honor orchestrator-provided write/read-only capabilities; synchronized active handoffs with `setActiveMeshHandoff` / `clearActiveMeshHandoff` and accepted known mesh sources (`guardian`, `opencode-guardian`, `opencode-hi`, `opencode-smart-questions`, `opencode-trim`, `opencode-lazy-skill-engine`) in `parseOpenCodeHandoff`.
+  - **Trusted Mesh Prompt & Turn Filtering:** Updated the V2 `prompt` hook, `normalizeV2Messages`, and `GuardEngine` (`isSyntheticUserMessage` and `question_presented` reply checks) to treat trusted non-delegation mesh messages (`remediation`, `visible`, `handoff`, `wake`, `skill-injection`) as synthetic rather than new human turns.
+  - **Session & Lease Hygiene:** Released `remoteInteractionLeases` on `forgetMeshSession(sessionID)`, called `forgetGuardianProvenance(oldest)` on 512-session LRU eviction in `v2GuardianMetadata`, and preserved `"running"` status for synthetic `shell` messages with `metadata.state === "running"`.
+- **External Per-Project State Directory & Local-vs-Global Scope Isolation:**
+  - **Zero `.opencode/` Repository Pollution:** Updated `guardianStateDirectory(directory)` to store per-project audit logs under `~/.local/state/opencode-guardian/projects/<projectHash>/guardian-events.jsonl` (or `$OPENCODE_GUARDIAN_STATE_DIR` when explicitly overridden, and `os.tmpdir()/opencode-guardian-tests-<pid>/projects/<projectHash>/` with automatic process-exit cleanup under `NODE_TEST_CONTEXT`). Guardian never writes `guardian-events.jsonl` inside `<project>/.opencode/`, preventing untracked git files and read-only `.opencode/` sandbox lockouts in `opencode-hi`.
+  - **Local vs. Global Project Scope Isolation (`isDirectoryInGuardianScope`):** Scoped project-local Guardian installations (`.opencode/plugins/opencode-guardian`, `.opencode/node_modules/opencode-guardian`, or project-only config) strictly to their own workspace directory (and subdirectories) so a locally installed Guardian never intercepts streams, blocks tools, mutates model context, or writes logs for unrelated projects sharing the OpenCode background server. Global installations (`~/.config/opencode/opencode.json`, `~/.config/opencode/plugins/opencode-guardian`, or `~/.config/opencode/opencode-guardian.json`) automatically supervise all projects while honoring per-project overrides.
+- **Documentation & Verification:**
+  - Expanded `README.md` installation guide to cover Global, Project-Local, `.opencode/plugins` Wrapper/Symlink, Local Development (`file://`), and Remote CLI/TUI (`cli.json`) setups.
+  - Added `tests/mesh-audit-fixes.test.mjs` and `tests/project-scope-and-state-isolation.test.mjs` (**789 / 789** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 112 files).
+
 ## 0.15.2 — 2026-11-19
 
 - **OpenCode V2.3.1–V2.3.2 Runtime Compatibility:**

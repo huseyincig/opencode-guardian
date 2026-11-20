@@ -32,16 +32,47 @@ const SAFE_TOOLS = new Set([
     "str_replace_editor", "multiedit", "file_editor",
     "file_mutate", "file_write", "file_edit",
 ]);
+function projectStateKey(directory) {
+    let canonical = path.resolve(directory);
+    try {
+        canonical = fs.realpathSync(canonical);
+    }
+    catch {
+        // Directory may not exist yet in synthetic tests.
+    }
+    return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+}
+let testStateCleanupRegistered = false;
+function registerTestStateCleanup(testBase) {
+    if (testStateCleanupRegistered)
+        return;
+    testStateCleanupRegistered = true;
+    process.once("exit", () => {
+        try {
+            fs.rmSync(testBase, { recursive: true, force: true });
+        }
+        catch {
+            // Fail safe on process exit.
+        }
+    });
+}
 export function guardianStateDirectory(directory) {
     if (process.env.OPENCODE_GUARDIAN_STATE_DIR)
         return process.env.OPENCODE_GUARDIAN_STATE_DIR;
-    if (directory && typeof directory === "string" && directory.trim().length > 0) {
-        return path.join(directory, ".opencode");
+    // Isolate Node tests so synthetic checks never pollute live counters or project directories.
+    if (process.env.NODE_TEST_CONTEXT) {
+        const testBase = path.join(os.tmpdir(), `opencode-guardian-tests-${process.pid}`);
+        registerTestStateCleanup(testBase);
+        if (directory && typeof directory === "string" && directory.trim().length > 0) {
+            return path.join(testBase, "projects", projectStateKey(directory));
+        }
+        return testBase;
     }
-    // Isolate Node tests so synthetic checks never pollute live counters.
-    if (process.env.NODE_TEST_CONTEXT)
-        return path.join(os.tmpdir(), `opencode-guardian-tests-${process.pid}`);
-    return path.join(os.homedir(), ".local", "state", "opencode-guardian");
+    const globalBase = path.join(os.homedir(), ".local", "state", "opencode-guardian");
+    if (directory && typeof directory === "string" && directory.trim().length > 0) {
+        return path.join(globalBase, "projects", projectStateKey(directory));
+    }
+    return globalBase;
 }
 export function guardianEventPath(directory) {
     const dir = guardianStateDirectory(directory);
@@ -155,14 +186,13 @@ export function recordGuardianEvent(event, directoryArg) {
     }
     try {
         const dir = guardianStateDirectory(directoryArg);
-        const isProjectDirectory = Boolean(directoryArg && !process.env.OPENCODE_GUARDIAN_STATE_DIR);
         let stat = fs.lstatSync(dir, { throwIfNoEntry: false });
         if (!stat) {
             fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
             stat = fs.lstatSync(dir);
         }
         if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== "win32" &&
-            ((!isProjectDirectory && (stat.mode & 0o077) !== 0) ||
+            ((stat.mode & 0o077) !== 0 ||
                 (typeof process.getuid === "function" && stat.uid !== process.getuid())))) {
             verifiedStateDirs.delete(dir);
             throw new Error("Guardian state directory is not private to the current user");

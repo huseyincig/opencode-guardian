@@ -3,6 +3,7 @@
  * Enables decoupled, autonomous collaboration between OpenCode Guardian and Smart Questions.
  */
 import { createHash } from "node:crypto";
+import { registerMeshPeer } from "./bridge.js";
 export const OPENCODE_HANDOFF_HEADER = "[OPENCODE_HANDOFF:v1]";
 export const COORDINATION_SYMBOL = Symbol.for("opencode.coordination.v1");
 /**
@@ -38,7 +39,19 @@ export function parseOpenCodeHandoff(text) {
     const kind = map.get("kind");
     const autoSelect = map.get("auto_select");
     const handoffId = map.get("handoff_id");
-    if (source !== "guardian" || action !== "question_required" || !handoffId) {
+    const normalizedSource = source?.toLowerCase();
+    const ALLOWED_SOURCES = new Set([
+        "guardian",
+        "opencode-guardian",
+        "opencode-hi",
+        "opencode-smart-questions",
+        "opencode-trim",
+        "opencode-lazy-skill-engine",
+    ]);
+    if (!normalizedSource ||
+        !ALLOWED_SOURCES.has(normalizedSource) ||
+        action !== "question_required" ||
+        !handoffId) {
         return null;
     }
     if (kind !== "clarification" && kind !== "choice" && kind !== "approval") {
@@ -49,7 +62,7 @@ export function parseOpenCodeHandoff(text) {
     }
     return {
         version: "v1",
-        source: "guardian",
+        source: normalizedSource,
         action: "question_required",
         kind,
         autoSelect,
@@ -100,50 +113,17 @@ export function createHandoffForBlockingResults(results, sessionID, turnKey, seq
         handoffId,
     };
 }
-let guardianRegistrationCount = 0;
-let previousGuardianCapability;
 /**
  * Register Guardian capability in the global OpenCode coordination registry.
  * Returns an idempotent cleanup that restores the prior registration after the
  * last Guardian instance unloads.
  */
-export function registerGuardianCapability() {
-    const globalObj = globalThis;
-    const root = (globalObj[COORDINATION_SYMBOL] ??= {});
-    if (guardianRegistrationCount === 0) {
-        previousGuardianCapability = root.guardian
-            ? { ...root.guardian }
-            : undefined;
-    }
-    guardianRegistrationCount += 1;
-    root.guardian = {
-        version: 1,
-        supportsHandoff: true,
-    };
-    let disposed = false;
-    return () => {
-        if (disposed)
-            return;
-        disposed = true;
-        guardianRegistrationCount = Math.max(0, guardianRegistrationCount - 1);
-        if (guardianRegistrationCount > 0)
-            return;
-        const currentRoot = globalObj[COORDINATION_SYMBOL];
-        if (!currentRoot) {
-            previousGuardianCapability = undefined;
-            return;
-        }
-        if (previousGuardianCapability) {
-            currentRoot.guardian = previousGuardianCapability;
-        }
-        else {
-            delete currentRoot.guardian;
-        }
-        previousGuardianCapability = undefined;
-        if (!currentRoot.guardian && !currentRoot.smartQuestions) {
-            delete globalObj[COORDINATION_SYMBOL];
-        }
-    };
+export function registerGuardianCapability(directory) {
+    return registerMeshPeer({
+        id: "opencode-guardian",
+        directory,
+        capabilities: ["policy.gate", "context.prune"],
+    });
 }
 /**
  * Check if Smart Questions is registered in the in-process capability registry.

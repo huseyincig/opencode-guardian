@@ -14,7 +14,7 @@ import {noShortcutsRule} from '../dist/rules/no-shortcuts.js';
 import {isSourceReviewEvidence} from '../dist/task-contract.js';
 import {evaluatePreflight} from '../dist/preflight.js';
 import {extractToolCommand} from '../dist/tool-input.js';
-import {readGuardianStatus,readGuardianActivity} from '../dist/telemetry.js';
+import {guardianEventPath,readGuardianStatus,readGuardianActivity} from '../dist/telemetry.js';
 const part=(input,tool='apply_patch')=>({type:'tool',tool,state:{status:'completed',input,metadata:{exitCode:0},output:'ok'}});
 const msg=(role,parts,id='m')=>({info:{id,role},parts});
 const patch=(file,before,after)=>`--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-${before}\n+${after}\n`;
@@ -72,7 +72,7 @@ test('F13 secret in second patch file is attributed to the second path',async()=
  const result=await noSecretsRule.inspect(context(first+patch('src/second.js','a',`const token='sk-${'a'.repeat(40)}';`)));assert.equal(result.findings[0]?.filePath,'src/second.js');
 });
 test('F15 insecure audit-log modes are excluded from counters as well as activity',t=>{
- const directory=tmp(t);fs.mkdirSync(path.join(directory,'.opencode'));const file=path.join(directory,'.opencode','guardian-events.jsonl');fs.writeFileSync(file,JSON.stringify({kind:'preflight-blocked',at:'2026-10-14T12:00:00.000Z'})+'\n');fs.chmodSync(file,0o644);
+ const directory=tmp(t);const file=guardianEventPath(directory);fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});fs.writeFileSync(file,JSON.stringify({kind:'preflight-blocked',at:'2026-10-14T12:00:00.000Z'})+'\n');fs.chmodSync(file,0o644);
  if(process.platform!=='win32'){assert.equal(readGuardianStatus(directory).blocked,0);assert.deepEqual(readGuardianActivity(directory),[]);}
  fs.chmodSync(file,0o600);assert.equal(readGuardianStatus(directory).blocked,1);
 });

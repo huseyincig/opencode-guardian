@@ -28,6 +28,7 @@ type SidebarColor = string | RGBA;
 type SidebarColors = {
   accent: SidebarColor;
   onAccent: SidebarColor;
+  background: SidebarColor;
   text: SidebarColor;
   muted: SidebarColor;
   success?: SidebarColor;
@@ -228,7 +229,7 @@ function GuardianSidebar(props: {
     const pf = status().preflight;
     if (pf === "active") return "● active";
     if (pf === "disabled") return "○ disabled";
-    if (pf === "unavailable") return "▲ unavailable";
+    if (pf === "unavailable") return "! unavailable";
     return "—";
   };
 
@@ -242,16 +243,16 @@ function GuardianSidebar(props: {
   const statusLabel = () => {
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
-      case "stream-interrupt-requested": return "▲ stream stop requested";
-      case "inspection-error": return "▲ inspection error";
-      case "preflight-blocked": return "● preflight blocked";
-      case "post-remediation": return "● remediation sent";
-      case "remediation-verified": return "● remediation verified";
-      case "remediation-failed": return "▲ remediation failed";
-      case "remediation-unverified": return "▲ remediation unverified";
-      case "statistics-reset": return "○ statistics reset";
-      case "verification-unavailable": return "▲ verification unavailable";
-      case "post-warning": return "▲ warning";
+      case "stream-interrupt-requested": return "! stream stop";
+      case "inspection-error": return "✕ inspection error";
+      case "preflight-blocked": return "⊘ preflight blocked";
+      case "post-remediation": return "↻ remediation sent";
+      case "remediation-verified": return "✓ verified";
+      case "remediation-failed": return "✕ remediation failed";
+      case "remediation-unverified": return "! unverified";
+      case "statistics-reset": return "○ reset";
+      case "verification-unavailable": return "! verification off";
+      case "post-warning": return "! warning";
       case "preflight-allowed": return "● allowed";
       case "post-inspected": return "● inspected";
       case "runtime-started": return "● Active";
@@ -282,102 +283,109 @@ function GuardianSidebar(props: {
       <box
         width="100%"
         flexDirection="row"
-        justifyContent="space-between"
-        alignItems="center"
         onMouseDown={() => setOpen((value) => !value)}
       >
-        <box flexDirection="row" alignItems="center">
-          <text fg={props.colors.muted}>{() => open() ? "▼ " : "▶ "}</text>
-          <text fg={props.colors.text}><b>Guardian</b></text>
+        <text fg={props.colors.muted}>{() => open() ? "▼ " : "▶ "}</text>
+        <box backgroundColor={props.colors.accent} paddingLeft={1} paddingRight={1}>
+          <text fg={props.colors.background}>guardian</text>
         </box>
-        <box flexDirection="row" alignItems="center">
-          <text fg={props.colors.muted}>{"v" + guardianVersion}</text>
-          <Show when={hasUpdate()}>
-            <text fg={successColor()}><b> (↑)</b></text>
-          </Show>
-        </box>
+        <text fg={props.colors.muted}>{" v" + guardianVersion}</text>
+        <text fg={statusColor()} flexShrink={1} truncate wrapMode="none">
+          {` · ${statusLabel()}`}
+        </text>
+        <Show when={hasUpdate()}>
+          <text fg={successColor()} flexShrink={0} wrapMode="none">
+            {latestVersion() ? ` (↑${latestVersion()})` : " (↑)"}
+          </text>
+        </Show>
       </box>
       <Show when={hasUpdate() && latestVersion()}>
-        <StatRow
-          label="Update available"
-          value={`v${latestVersion()}`}
-          valueColor={successColor()}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-      </Show>
-      <Show when={!open()}>
-        <StatRow
-          label="Status"
-          value={statusLabel()}
-          valueColor={statusColor()}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Interventions"
-          value={`${status().warnings}w · ${status().remediations}r`}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-      </Show>
-      <Show when={open()}>
-        <StatRow
-          label="Mode"
-          value="Autonomous"
-          valueColor={props.colors.accent}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Preflight"
-          value={preflightLabel()}
-          valueColor={preflightColor()}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Inspected"
-          value={status().inspected}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Tool Blocks"
-          value={status().blocked}
-          valueColor={status().blocked > 0 ? errorColor() : props.colors.muted}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Warnings"
-          value={status().warnings}
-          valueColor={status().warnings > 0 ? warningColor() : props.colors.muted}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <StatRow
-          label="Remediations"
-          value={status().remediations}
-          valueColor={status().remediations > 0 ? props.colors.accent : props.colors.muted}
-          muted={props.colors.muted}
-          text={props.colors.text}
-        />
-        <Show when={status().errors > 0}>
+        <box width="100%" flexDirection="column" paddingLeft={1}>
           <StatRow
-            label="Errors"
-            value={status().errors}
-            valueColor={errorColor()}
+            label="Update available"
+            value={`v${latestVersion()}`}
+            valueColor={successColor()}
             muted={props.colors.muted}
             text={props.colors.text}
           />
-        </Show>
-        <Show when={status().truncated}>
-          <box width="100%" flexDirection="row" justifyContent="space-between">
-            <text fg={props.colors.muted}>Log</text>
-            <text fg={props.colors.muted}>recent window</text>
-          </box>
-        </Show>
+        </box>
+      </Show>
+      <Show when={!open()}>
+        <box width="100%" flexDirection="column" paddingLeft={1}>
+          <StatRow
+            label="Status"
+            value={statusLabel()}
+            valueColor={statusColor()}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Interventions"
+            value={`${status().warnings}w · ${status().remediations}r`}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+        </box>
+      </Show>
+      <Show when={open()}>
+        <box width="100%" flexDirection="column" paddingLeft={1}>
+          <StatRow
+            label="Mode"
+            value="Autonomous"
+            valueColor={props.colors.accent}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Preflight"
+            value={preflightLabel()}
+            valueColor={preflightColor()}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Inspected"
+            value={status().inspected}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Tool Blocks"
+            value={status().blocked}
+            valueColor={status().blocked > 0 ? errorColor() : props.colors.muted}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Warnings"
+            value={status().warnings}
+            valueColor={status().warnings > 0 ? warningColor() : props.colors.muted}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <StatRow
+            label="Remediations"
+            value={status().remediations}
+            valueColor={status().remediations > 0 ? props.colors.accent : props.colors.muted}
+            muted={props.colors.muted}
+            text={props.colors.text}
+          />
+          <Show when={status().errors > 0}>
+            <StatRow
+              label="Errors"
+              value={status().errors}
+              valueColor={errorColor()}
+              muted={props.colors.muted}
+              text={props.colors.text}
+            />
+          </Show>
+          <Show when={status().truncated}>
+            <box width="100%" flexDirection="row" justifyContent="space-between">
+              <text fg={props.colors.muted}>Log</text>
+              <text fg={props.colors.muted}>recent window</text>
+            </box>
+          </Show>
+        </box>
       </Show>
     </box>
   );
@@ -406,6 +414,12 @@ const v2Plugin: Plugin.Definition = {
     const colors = (): SidebarColors => ({
       accent: context.theme?.status?.success?.base ?? context.theme?.text?.base ?? "green",
       onAccent: context.theme?.text?.action?.primary?.base ?? context.theme?.text?.base ?? "white",
+      background:
+        (context.theme as { background?: { base?: SidebarColor; panel?: SidebarColor } } | undefined)
+          ?.background?.base ??
+        (context.theme as { background?: { base?: SidebarColor; panel?: SidebarColor } } | undefined)
+          ?.background?.panel ??
+        "black",
       text: context.theme?.text?.base ?? "white",
       muted: context.theme?.text?.muted ?? context.theme?.text?.base ?? "gray",
       success: context.theme?.status?.success?.base,

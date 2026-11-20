@@ -4,7 +4,7 @@ export type HandoffKind = "clarification" | "choice" | "approval";
 export type HandoffAutoSelect = "allowed" | "forbidden";
 export interface OpenCodeHandoff {
     version: "v1";
-    source: "guardian";
+    source: string;
     action: "question_required";
     kind: HandoffKind;
     autoSelect: HandoffAutoSelect;
@@ -40,7 +40,7 @@ export declare function createHandoffForBlockingResults(results: readonly RuleRe
  * Returns an idempotent cleanup that restores the prior registration after the
  * last Guardian instance unloads.
  */
-export declare function registerGuardianCapability(): () => void;
+export declare function registerGuardianCapability(directory?: string): () => void;
 /**
  * Check if Smart Questions is registered in the in-process capability registry.
  */

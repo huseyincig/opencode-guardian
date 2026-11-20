@@ -4,6 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import type { RuleResult } from "./types.js";
+import { registerMeshPeer } from "./bridge.js";
 
 export const OPENCODE_HANDOFF_HEADER = "[OPENCODE_HANDOFF:v1]";
 
@@ -12,7 +13,7 @@ export type HandoffAutoSelect = "allowed" | "forbidden";
 
 export interface OpenCodeHandoff {
   version: "v1";
-  source: "guardian";
+  source: string;
   action: "question_required";
   kind: HandoffKind;
   autoSelect: HandoffAutoSelect;
@@ -71,7 +72,21 @@ export function parseOpenCodeHandoff(text: string): OpenCodeHandoff | null {
   const autoSelect = map.get("auto_select") as HandoffAutoSelect | undefined;
   const handoffId = map.get("handoff_id");
 
-  if (source !== "guardian" || action !== "question_required" || !handoffId) {
+  const normalizedSource = source?.toLowerCase();
+  const ALLOWED_SOURCES = new Set([
+    "guardian",
+    "opencode-guardian",
+    "opencode-hi",
+    "opencode-smart-questions",
+    "opencode-trim",
+    "opencode-lazy-skill-engine",
+  ]);
+  if (
+    !normalizedSource ||
+    !ALLOWED_SOURCES.has(normalizedSource) ||
+    action !== "question_required" ||
+    !handoffId
+  ) {
     return null;
   }
   if (kind !== "clarification" && kind !== "choice" && kind !== "approval") {
@@ -83,7 +98,7 @@ export function parseOpenCodeHandoff(text: string): OpenCodeHandoff | null {
 
   return {
     version: "v1",
-    source: "guardian",
+    source: normalizedSource,
     action: "question_required",
     kind,
     autoSelect,
@@ -143,56 +158,17 @@ export function createHandoffForBlockingResults(
   };
 }
 
-type GuardianCapability = NonNullable<OpenCodeCoordinationRegistry["guardian"]>;
-
-let guardianRegistrationCount = 0;
-let previousGuardianCapability: GuardianCapability | undefined;
-
 /**
  * Register Guardian capability in the global OpenCode coordination registry.
  * Returns an idempotent cleanup that restores the prior registration after the
  * last Guardian instance unloads.
  */
-export function registerGuardianCapability(): () => void {
-  const globalObj = globalThis as unknown as {
-    [COORDINATION_SYMBOL]?: OpenCodeCoordinationRegistry;
-  };
-  const root = (globalObj[COORDINATION_SYMBOL] ??= {});
-
-  if (guardianRegistrationCount === 0) {
-    previousGuardianCapability = root.guardian
-      ? { ...root.guardian }
-      : undefined;
-  }
-  guardianRegistrationCount += 1;
-  root.guardian = {
-    version: 1,
-    supportsHandoff: true,
-  };
-
-  let disposed = false;
-  return () => {
-    if (disposed) return;
-    disposed = true;
-    guardianRegistrationCount = Math.max(0, guardianRegistrationCount - 1);
-    if (guardianRegistrationCount > 0) return;
-
-    const currentRoot = globalObj[COORDINATION_SYMBOL];
-    if (!currentRoot) {
-      previousGuardianCapability = undefined;
-      return;
-    }
-    if (previousGuardianCapability) {
-      currentRoot.guardian = previousGuardianCapability;
-    } else {
-      delete currentRoot.guardian;
-    }
-    previousGuardianCapability = undefined;
-
-    if (!currentRoot.guardian && !currentRoot.smartQuestions) {
-      delete globalObj[COORDINATION_SYMBOL];
-    }
-  };
+export function registerGuardianCapability(directory?: string): () => void {
+  return registerMeshPeer({
+    id: "opencode-guardian",
+    directory,
+    capabilities: ["policy.gate", "context.prune"],
+  });
 }
 
 /**

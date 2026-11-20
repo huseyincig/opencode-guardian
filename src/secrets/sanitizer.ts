@@ -322,7 +322,7 @@ export function sanitizeObject<T>(
   let redactedCount = 0;
 
   try {
-    function propertyValue(key: string, value: unknown): unknown {
+    function propertyValue(key: string, value: unknown, insideMeshEnvelope = false): unknown {
       if (
         value === null ||
         value === undefined ||
@@ -335,15 +335,18 @@ export function sanitizeObject<T>(
       if (typeof value === 'string' && options.safeValues?.includes(value)) {
         return value;
       }
-      if (isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
+      if (
+        !(insideMeshEnvelope && key === 'token') &&
+        isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)
+      ) {
         redactedCount++;
         findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
         return replacement;
       }
-      return recurse(value);
+      return recurse(value, key === 'opencode-mesh');
     }
 
-    function recurse(val: unknown): unknown {
+    function recurse(val: unknown, insideMeshEnvelope = false): unknown {
       if (val === null || val === undefined) return val;
       // Retained callbacks (notably toJSON) could reintroduce raw data later,
       // when the host serializes a result that has already been sanitized.
@@ -388,7 +391,7 @@ export function sanitizeObject<T>(
           proto && proto !== Object.prototype ? Object.create(proto) : {};
         for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
           Object.defineProperty(output, k, {
-            value: propertyValue(k, v), enumerable: true, writable: true, configurable: true,
+            value: propertyValue(k, v, insideMeshEnvelope), enumerable: true, writable: true, configurable: true,
           });
         }
         return output;

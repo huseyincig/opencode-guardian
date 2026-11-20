@@ -153,7 +153,7 @@ test("telemetry refuses a pre-existing publicly traversable state directory", (t
   assert.equal(fs.existsSync(guardianEventPath()), false);
 });
 
-test("telemetry records events in project .opencode directory with 0600 file mode and permits 0755 directory", (t) => {
+test("telemetry records project-scoped events in isolated state directory with 0600 file mode without polluting project .opencode", (t) => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-project-test-"));
   t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
 
@@ -168,7 +168,7 @@ test("telemetry records events in project .opencode directory with 0600 file mod
   recordGuardianEvent({ kind: "post-warning", rules: ["test-rule"] }, projectDir);
 
   const eventFile = guardianEventPath(projectDir);
-  assert.equal(eventFile, path.join(projectDir, ".opencode", "guardian-events.jsonl"));
+  assert.equal(fs.existsSync(path.join(projectDir, ".opencode", "guardian-events.jsonl")), false);
   assert.equal(fs.existsSync(eventFile), true);
   if (process.platform !== "win32") {
     assert.equal(fs.statSync(eventFile).mode & 0o777, 0o600);

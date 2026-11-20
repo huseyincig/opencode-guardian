@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Guardian, { readGuardianStatus, recordGuardianEvent } from "../dist/index.js";
+import Guardian, { guardianEventPath, readGuardianStatus, recordGuardianEvent } from "../dist/index.js";
 import cleanupMergedBranches from "../scripts/cleanup-merged-branches.cjs";
 
 const name = "huseyincig/opencode-guardian";
@@ -184,7 +184,7 @@ test("V2 session fetch failures are reported without exposing raw exception in c
   } finally {
     console.error = old;
   }
-  const contents = fs.readFileSync(path.join(directory, ".opencode", "guardian-events.jsonl"), "utf8");
+  const contents = fs.readFileSync(guardianEventPath(directory), "utf8");
   assert.equal(captured.length, 0);
   assert.equal(contents.includes(marker), false);
   assert.equal(readGuardianStatus(directory).errors, 1);

@@ -281,3 +281,149 @@ test("Issue #3 (V2): session.moved dispatches toast clear for same-process liste
 
   assert.equal(clearedScopes.some((s) => s.sessionID === sessionID), true);
 });
+
+test("Issue #3 (V2): post-turn GUARDIAN WARNING auto-expires after duration without requiring /guardian reset", async (t) => {
+  clearToastListeners();
+  const prevTtl = process.env.OPENCODE_GUARDIAN_INTERVENTION_TTL_MS;
+  process.env.OPENCODE_GUARDIAN_INTERVENTION_TTL_MS = "120";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-warning-ttl-"));
+  t.after(() => {
+    if (prevTtl === undefined) delete process.env.OPENCODE_GUARDIAN_INTERVENTION_TTL_MS;
+    else process.env.OPENCODE_GUARDIAN_INTERVENTION_TTL_MS = prevTtl;
+    clearToastListeners();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const stream = createAsyncEventStream();
+  let rpcHandlers = null;
+  const clearedScopes = [];
+  registerToastClearListener((scope) => {
+    clearedScopes.push(scope);
+  }, { directory: dir });
+
+  const sessionID = "ses-warning-ttl";
+  const dispose = await Guardian.setup({
+    location: { directory: dir },
+    options: {
+      enabled: true,
+      secrets: { enabled: false },
+      rules: {
+        "discipline/no-apology": "warn",
+      },
+    },
+    event: { subscribe: () => stream.iterable },
+    rpc: {
+      register: async (def, handlers) => {
+        if (def.id === GUARDIAN_INTERVENTION_RPC_DEFINITION.id) {
+          rpcHandlers = handlers;
+        }
+        return { dispose() {} };
+      },
+    },
+    session: {
+      get: async () => ({ id: sessionID, location: { directory: dir } }),
+      context: async () => [
+        { id: "u1", type: "user", text: "Explain the function" },
+        {
+          id: "a1",
+          type: "assistant",
+          content: [
+            { type: "text", text: "I deeply apologize, I am terribly sorry, my apologies for the confusion." },
+          ],
+        },
+      ],
+      synthetic: async () => {},
+      hook: async () => ({ dispose() {} }),
+    },
+    tool: {
+      hook: async () => ({ dispose() {} }),
+    },
+  });
+  t.after(async () => {
+    stream.close();
+    await dispose?.();
+  });
+
+  stream.push({ type: "session.idle", data: { sessionID } });
+  await sleep(40);
+
+  // Immediately after idle, the warning snapshot is active
+  const activeSnap = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID });
+  assert.equal(activeSnap.active, true);
+  assert.equal(activeSnap.variant, "warning");
+
+  // After TTL (120ms) elapses with NO new prompt and NO /guardian reset, it must auto-clear
+  await sleep(140);
+  const expiredSnap = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID });
+  assert.equal(expiredSnap.active, false, "GUARDIAN WARNING must auto-expire after duration");
+  assert.equal(clearedScopes.some((s) => s.sessionID === sessionID), true);
+});
+
+test("Issue #3 (V2): new user prompt immediately clears previous turn warning before Turn 2 completes", async (t) => {
+  clearToastListeners();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-prompt-clear-"));
+  t.after(() => {
+    clearToastListeners();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const stream = createAsyncEventStream();
+  let rpcHandlers = null;
+  let promptHook = null;
+  const sessionID = "ses-prompt-immediate-clear";
+
+  const dispose = await Guardian.setup({
+    location: { directory: dir },
+    options: {
+      enabled: true,
+      secrets: { enabled: false },
+      rules: {
+        "discipline/no-apology": "warn",
+      },
+    },
+    event: { subscribe: () => stream.iterable },
+    rpc: {
+      register: async (def, handlers) => {
+        if (def.id === GUARDIAN_INTERVENTION_RPC_DEFINITION.id) {
+          rpcHandlers = handlers;
+        }
+        return { dispose() {} };
+      },
+    },
+    session: {
+      get: async () => ({ id: sessionID, location: { directory: dir } }),
+      context: async () => [
+        { id: "u1", type: "user", text: "Explain the function" },
+        {
+          id: "a1",
+          type: "assistant",
+          content: [
+            { type: "text", text: "I deeply apologize, I am terribly sorry, my apologies for the confusion." },
+          ],
+        },
+      ],
+      synthetic: async () => {},
+      hook: async (name, cb) => {
+        if (name === "prompt") promptHook = cb;
+        return { dispose() {} };
+      },
+    },
+    tool: {
+      hook: async () => ({ dispose() {} }),
+    },
+  });
+  t.after(async () => {
+    stream.close();
+    await dispose?.();
+  });
+
+  stream.push({ type: "session.idle", data: { sessionID } });
+  await sleep(40);
+  assert.equal((await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID })).active, true);
+
+  // User submits a new prompt -> warning must clear IMMEDIATELY without waiting for Turn 2 idle
+  await promptHook({ sessionID, messageID: "u2", prompt: { text: "Next task" }, metadata: {} });
+  const afterPrompt = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID });
+  assert.equal(afterPrompt.active, false, "new user prompt must clear stale warning immediately");
+});
+

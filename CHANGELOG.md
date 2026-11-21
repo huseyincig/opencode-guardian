@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.1 — 2026-11-22
+
+- **TUI Conversation Intervention Banner (`session.composer.top`) Lifecycle & Dismissal Fix:**
+  - **TTL Auto-Expiry (`payload.duration`):** Server-side `interventionSnapshots` (`src/index.ts`) and TUI-side `storeIntervention` (`src/tui.tsx`) now automatically expire and clear intervention banners after `payload.duration` (`4000ms` for warnings, `5000ms` for errors/blocks, configurable in tests via `OPENCODE_GUARDIAN_INTERVENTION_TTL_MS`). The 500ms TUI RPC polling loop (`guardian.interventions.current`) checks `Date.now() >= entry.expiresAt` so expired banners are never resurrected.
+  - **Immediate Clear on New User Prompt:** Submitting a new human prompt (`session.hook("prompt")` → `noteHumanPrompt(sessionID)`) immediately clears any previous turn's lingering intervention banner (`base.clear?.(sessionID)`) without waiting for `/guardian reset` or clean-turn idle completion.
+  - **Click-to-Dismiss (`onMouseDown`):** Added `onDismiss` / `onMouseDown` support to `<GuardianConversationIntervention>` in `src/tui.tsx` so clicking the bottom conversation banner immediately clears both local TUI state and the server snapshot via `guardian.interventions.clear` RPC.
+- **Local vs. Global Project Scope Precedence (`isDirectoryInGuardianScope`):**
+  - Evaluated `isProjectLocalPluginInstall(startupDirectory)` before `hasGlobalGuardianInstall()` so a project-local Guardian instance never supervises foreign projects even on a host machine that also has a global `~/.config/opencode` configuration.
+- **Verification:**
+  - Added TDD regression tests in `tests/issue3-intervention-clear.test.mjs` and isolated `OPENCODE_CONFIG_DIR` in `tests/project-scope-and-state-isolation.test.mjs` (**791 / 791** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 112 files).
+
 ## 0.16.0 — 2026-11-20
 
 - **Universal OpenCode V2 Plugin Mesh Bridge (`src/bridge.ts` v2.2.0):**

@@ -66,9 +66,13 @@ test("project scope isolation: local Guardian in projectA never interferes with 
   fs.mkdirSync(path.join(projectB, ".opencode", "plugins", "opencode-hi"), { recursive: true });
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
+  const origConfigDir = process.env.OPENCODE_CONFIG_DIR;
   const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+  process.env.OPENCODE_CONFIG_DIR = path.join(root, "isolated-global-config");
   delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
   t.after(() => {
+    if (origConfigDir !== undefined) process.env.OPENCODE_CONFIG_DIR = origConfigDir;
+    else delete process.env.OPENCODE_CONFIG_DIR;
     if (origStateDir !== undefined) process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
     else delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
   });

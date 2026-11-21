@@ -90,13 +90,18 @@ export function sanitizeToastRuleId(raw: unknown): string {
   return "guardian/policy";
 }
 
+function resolveToastDuration(defaultMs: number): number {
+  const envVal = Number(process.env.OPENCODE_GUARDIAN_INTERVENTION_TTL_MS);
+  return Number.isFinite(envVal) && envVal > 0 ? Math.floor(envVal) : defaultMs;
+}
+
 export function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload {
   switch (input.kind) {
     case "stream-interrupt-requested": return {
       title: "Guardian — Repetition detected",
       message: "Repetitive generation detected. A stream interruption was requested.",
       variant: "warning",
-      duration: 5000,
+      duration: resolveToastDuration(5000),
     };
     case "preflight-blocked": {
       const safeRule = sanitizeToastRuleId(input.ruleId ?? input.ruleIds?.[0] ?? "preflight");
@@ -111,7 +116,7 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         title: "Guardian — Blocked",
         message,
         variant: "error",
-        duration: 5000,
+        duration: resolveToastDuration(5000),
       };
     }
     case "remediation": {
@@ -130,7 +135,7 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         title: "Guardian — Remediation",
         message: `Blocked: ${ruleText}\nAgent was asked to correct the issue.`,
         variant: "error",
-        duration: 5000,
+        duration: resolveToastDuration(5000),
       };
     }
     case "warning": {
@@ -149,7 +154,7 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         title: "Guardian — Warning",
         message: `Advisory finding: ${ruleText}.`,
         variant: "warning",
-        duration: 4000,
+        duration: resolveToastDuration(4000),
       };
     }
   }

@@ -56,6 +56,7 @@ function StatRow(props: {
 function GuardianConversationIntervention(props: {
   payload: GuardianToastPayload | undefined;
   colors: SidebarColors;
+  onDismiss?: () => void;
 }) {
   const accent = () =>
     props.payload?.variant === "warning"
@@ -76,6 +77,7 @@ function GuardianConversationIntervention(props: {
         borderColor={accent()}
         paddingLeft={1}
         marginBottom={1}
+        onMouseDown={() => props.onDismiss?.()}
       >
         <text fg={accent()}><b>{label()}</b></text>
         <text fg={props.colors.text}>{props.payload?.message ?? ""}</text>
@@ -430,13 +432,32 @@ const v2Plugin: Plugin.Definition = {
     const [interventions, setInterventions] = createSignal<Record<string, GuardianToastPayload>>({});
     const [sidebarVersion, setSidebarVersion] = createSignal(0);
     const rpcInFlight = new Set<string>();
+    const interventionTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let rpcGeneration = 0;
     let disposed = false;
+
+    const clearInterventionTimer = (sessionID: string): void => {
+      const existing = interventionTimers.get(sessionID);
+      if (existing !== undefined) {
+        clearTimeout(existing);
+        interventionTimers.delete(sessionID);
+      }
+    };
 
     const storeIntervention = (
       sessionID: string,
       payload: GuardianToastPayload | undefined
     ): void => {
+      clearInterventionTimer(sessionID);
+      if (payload && !disposed) {
+        const ttlMs = payload.duration > 0 ? payload.duration : 5000;
+        const timer = setTimeout(() => {
+          interventionTimers.delete(sessionID);
+          storeIntervention(sessionID, undefined);
+        }, ttlMs);
+        (timer as { unref?: () => void }).unref?.();
+        interventionTimers.set(sessionID, timer);
+      }
       setInterventions((current) => {
         const next = { ...current };
         if (payload) next[sessionID] = payload;
@@ -445,6 +466,7 @@ const v2Plugin: Plugin.Definition = {
         while (Object.keys(next).length > 32) {
           const oldest = Object.keys(next)[0];
           if (!oldest) break;
+          clearInterventionTimer(oldest);
           delete next[oldest];
         }
         return next;
@@ -620,6 +642,19 @@ const v2Plugin: Plugin.Definition = {
         <GuardianConversationIntervention
           payload={props.sessionID && context.data?.session?.get?.(props.sessionID) ? interventions()[props.sessionID] : undefined}
           colors={colors()}
+          onDismiss={() => {
+            if (!props.sessionID) return;
+            rpcGeneration += 1;
+            storeIntervention(props.sessionID, undefined);
+            dispatchGuardianToastClear({ directory, sessionID: props.sessionID });
+            if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
+              const sessionLocation = context.data?.session?.get?.(props.sessionID)?.location ?? context.location;
+              void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD](
+                { sessionID: props.sessionID },
+                sessionLocation ? { location: sessionLocation } : undefined
+              ).catch(() => {});
+            }
+          }}
         />
       ),
     });
@@ -644,6 +679,10 @@ const v2Plugin: Plugin.Definition = {
       disposed = true;
       rpcGeneration += 1;
       rpcInFlight.clear();
+      for (const timer of interventionTimers.values()) {
+        clearTimeout(timer);
+      }
+      interventionTimers.clear();
       updateNoticeController.abort();
       if (rpcPoll) clearInterval(rpcPoll);
       try { unregisterToast?.(); } catch {}

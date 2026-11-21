@@ -70,6 +70,7 @@ function GuardianConversationIntervention(props) {
       _$setProp(_el$5, "border", ["left"]);
       _$setProp(_el$5, "paddingLeft", 1);
       _$setProp(_el$5, "marginBottom", 1);
+      _$setProp(_el$5, "onMouseDown", () => props.onDismiss?.());
       _$insertNode(_el$6, _el$7);
       _$insert(_el$7, label);
       _$insert(_el$8, () => props.payload?.message ?? "");
@@ -615,9 +616,27 @@ const v2Plugin = {
     const [interventions, setInterventions] = createSignal({});
     const [sidebarVersion, setSidebarVersion] = createSignal(0);
     const rpcInFlight = new Set();
+    const interventionTimers = new Map();
     let rpcGeneration = 0;
     let disposed = false;
+    const clearInterventionTimer = sessionID => {
+      const existing = interventionTimers.get(sessionID);
+      if (existing !== undefined) {
+        clearTimeout(existing);
+        interventionTimers.delete(sessionID);
+      }
+    };
     const storeIntervention = (sessionID, payload) => {
+      clearInterventionTimer(sessionID);
+      if (payload && !disposed) {
+        const ttlMs = payload.duration > 0 ? payload.duration : 5000;
+        const timer = setTimeout(() => {
+          interventionTimers.delete(sessionID);
+          storeIntervention(sessionID, undefined);
+        }, ttlMs);
+        timer.unref?.();
+        interventionTimers.set(sessionID, timer);
+      }
       setInterventions(current => {
         const next = {
           ...current
@@ -626,6 +645,7 @@ const v2Plugin = {
         while (Object.keys(next).length > 32) {
           const oldest = Object.keys(next)[0];
           if (!oldest) break;
+          clearInterventionTimer(oldest);
           delete next[oldest];
         }
         return next;
@@ -786,6 +806,23 @@ const v2Plugin = {
         },
         get colors() {
           return colors();
+        },
+        onDismiss: () => {
+          if (!props.sessionID) return;
+          rpcGeneration += 1;
+          storeIntervention(props.sessionID, undefined);
+          dispatchGuardianToastClear({
+            directory,
+            sessionID: props.sessionID
+          });
+          if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
+            const sessionLocation = context.data?.session?.get?.(props.sessionID)?.location ?? context.location;
+            void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]({
+              sessionID: props.sessionID
+            }, sessionLocation ? {
+              location: sessionLocation
+            } : undefined).catch(() => {});
+          }
         }
       })
     });
@@ -813,6 +850,10 @@ const v2Plugin = {
       disposed = true;
       rpcGeneration += 1;
       rpcInFlight.clear();
+      for (const timer of interventionTimers.values()) {
+        clearTimeout(timer);
+      }
+      interventionTimers.clear();
       updateNoticeController.abort();
       if (rpcPoll) clearInterval(rpcPoll);
       try {

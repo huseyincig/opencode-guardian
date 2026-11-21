@@ -368,9 +368,9 @@ function createTrackedToastNotifier(base) {
     const remainingCleanTurns = new Map();
     const tracker = {
         noteHumanPrompt(sessionID) {
-            const remaining = remainingCleanTurns.get(sessionID);
-            if (remaining !== undefined && remaining > 1) {
-                remainingCleanTurns.set(sessionID, 1);
+            if (remainingCleanTurns.has(sessionID)) {
+                remainingCleanTurns.delete(sessionID);
+                base.clear?.(sessionID);
             }
         },
         recordOutcome(sessionID, result, findingsCount, toastNotifier) {
@@ -851,11 +851,14 @@ function isDirectoryInGuardianScope(startupDirectory, targetDirectory) {
     if (!targetDirectory || isSameOrSubdirectory(targetDirectory, startupDirectory)) {
         return true;
     }
-    if (hasExplicitGuardianConfigOrInstall(targetDirectory) || hasGlobalGuardianInstall()) {
+    if (hasExplicitGuardianConfigOrInstall(targetDirectory)) {
         return true;
     }
     if (isProjectLocalPluginInstall(startupDirectory)) {
         return false;
+    }
+    if (hasGlobalGuardianInstall()) {
+        return true;
     }
     if (hasLocalProjectMarker(startupDirectory) || hasLocalProjectMarker(targetDirectory)) {
         return false;
@@ -1024,6 +1027,15 @@ const setup = async (context) => {
     const foregroundHandoffs = new Map();
     const registrations = [];
     const interventionSnapshots = new Map();
+    const interventionExpiryTimers = new Map();
+    const clearInterventionSnapshot = (sessionID) => {
+        const existingTimer = interventionExpiryTimers.get(sessionID);
+        if (existingTimer !== undefined) {
+            clearTimeout(existingTimer);
+            interventionExpiryTimers.delete(sessionID);
+        }
+        interventionSnapshots.delete(sessionID);
+    };
     const toastNotifiersByDirectory = new Map();
     const idleQueue = createIdleQueue(controller.signal, () => {
         recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
@@ -1044,10 +1056,14 @@ const setup = async (context) => {
                     const sessionID = readGuardianInterventionSessionID(input);
                     if (!sessionID)
                         return inactiveGuardianIntervention();
-                    const payload = interventionSnapshots.get(sessionID);
-                    return payload
-                        ? activeGuardianIntervention(payload)
-                        : inactiveGuardianIntervention();
+                    const entry = interventionSnapshots.get(sessionID);
+                    if (!entry)
+                        return inactiveGuardianIntervention();
+                    if (Date.now() >= entry.expiresAt) {
+                        toastNotifier.clear?.(sessionID);
+                        return inactiveGuardianIntervention();
+                    }
+                    return activeGuardianIntervention(entry.payload);
                 },
                 [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input, ...rest) => {
                     const sessionID = readGuardianInterventionSessionID(input);
@@ -1100,12 +1116,25 @@ const setup = async (context) => {
             if (typeof input.sessionID === "string" &&
                 input.sessionID.length > 0) {
                 try {
-                    interventionSnapshots.set(input.sessionID, formatGuardianToast(input));
+                    const sid = input.sessionID;
+                    clearInterventionSnapshot(sid);
+                    const payload = formatGuardianToast(input);
+                    const ttlMs = payload.duration > 0 ? payload.duration : 5000;
+                    interventionSnapshots.set(sid, {
+                        payload,
+                        expiresAt: Date.now() + ttlMs,
+                    });
+                    const timer = setTimeout(() => {
+                        interventionExpiryTimers.delete(sid);
+                        toastNotifier.clear?.(sid);
+                    }, ttlMs);
+                    timer.unref?.();
+                    interventionExpiryTimers.set(sid, timer);
                     while (interventionSnapshots.size > 64) {
                         const oldest = interventionSnapshots.keys().next().value;
                         if (typeof oldest !== "string")
                             break;
-                        interventionSnapshots.delete(oldest);
+                        clearInterventionSnapshot(oldest);
                     }
                 }
                 catch { }
@@ -1116,7 +1145,7 @@ const setup = async (context) => {
             baseToastForDirectory(runtimeDirectory).notify(input);
         },
         clear(sessionID) {
-            interventionSnapshots.delete(sessionID);
+            clearInterventionSnapshot(sessionID);
             const runtimeDirectory = sessionDirectories.get(sessionID) ?? directory;
             baseToastForDirectory(runtimeDirectory).clear?.(sessionID);
         },
@@ -1593,7 +1622,7 @@ const setup = async (context) => {
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
                             toastNotifier.clear?.(deletedSessionID);
-                            interventionSnapshots.delete(deletedSessionID);
+                            clearInterventionSnapshot(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
                             forgetGuardianProvenance(deletedSessionID);
                             provenanceSessions.delete(deletedSessionID);
@@ -1630,7 +1659,7 @@ const setup = async (context) => {
                             contracts.delete(movedSessionID);
                             foregroundHandoffs.delete(movedSessionID);
                             toastNotifier.clear?.(movedSessionID);
-                            interventionSnapshots.delete(movedSessionID);
+                            clearInterventionSnapshot(movedSessionID);
                             clearAgentCapability(movedSessionID);
                             forgetGuardianProvenance(movedSessionID);
                             provenanceSessions.delete(movedSessionID);
@@ -1812,6 +1841,10 @@ const setup = async (context) => {
         contracts.clear();
         verificationStore.clear();
         foregroundHandoffs.clear();
+        for (const timer of interventionExpiryTimers.values()) {
+            clearTimeout(timer);
+        }
+        interventionExpiryTimers.clear();
         interventionSnapshots.clear();
         for (const sessionID of sessionDirectories.keys()) {
             clearAgentCapability(sessionID);

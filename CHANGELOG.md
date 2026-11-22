@@ -19,7 +19,7 @@
   - Handled circular references, preserved `Error` subclasses and `Date` instances, protected valid mesh tokens, and redacted forged mesh tokens in JSON strings in `sanitizeObject` / `sanitizeMessages`.
   - Fixed edit-resolution false positives (`unresolved generic failure`), checked every stage of multi-stage destructive command authorization, avoided `'no changes to public API'` false positives under research-only constraints, reported all multi-file secrets, added Go `t.SkipNow()` detection and file-scoped deletion authorization in `testing/no-cheat`, checked subsequent matches in `no-evasion`, and resolved default severity for option-only rule overrides in `guardianCommandReport("rules")`.
 - **Verification:**
-  - Added 12 deep-debug regression tests in `tests/superpowers-deep-debug.test.mjs` and 4 mesh audit tests in `tests/mesh-audit-fixes.test.mjs` (**806 / 806** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 113 files).
+  - Added 12 deep-debug regression tests in `tests/v0162-deep-debug.test.mjs` and 4 mesh audit tests in `tests/mesh-audit-fixes.test.mjs` (**806 / 806** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 113 files).
 
 ## 0.16.1 — 2026-11-22
 

@@ -282,3 +282,34 @@ test("global installation: Guardian installed in global ~/.config/opencode prote
   assert.equal(readGuardianStatus(projectB).blocked, 1);
 });
 
+test("guardianStateDirectory respects absolute XDG_STATE_HOME when OPENCODE_GUARDIAN_STATE_DIR and NODE_TEST_CONTEXT are unset", (t) => {
+  const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+  const origNodeTest = process.env.NODE_TEST_CONTEXT;
+  const origXdgState = process.env.XDG_STATE_HOME;
+  t.after(() => {
+    if (origStateDir !== undefined) process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+    else delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    if (origNodeTest !== undefined) process.env.NODE_TEST_CONTEXT = origNodeTest;
+    else delete process.env.NODE_TEST_CONTEXT;
+    if (origXdgState !== undefined) process.env.XDG_STATE_HOME = origXdgState;
+    else delete process.env.XDG_STATE_HOME;
+  });
+
+  delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+  delete process.env.NODE_TEST_CONTEXT;
+  const xdgRoot = path.join(os.tmpdir(), "guardian-xdg-state-test");
+  process.env.XDG_STATE_HOME = xdgRoot;
+
+  const projectDir = path.join(os.tmpdir(), "guardian-xdg-project");
+  const resolved = guardianStateDirectory(projectDir);
+  assert.equal(resolved.startsWith(path.join(xdgRoot, "opencode-guardian", "projects") + path.sep), true);
+
+  // Relative XDG_STATE_HOME is ignored per XDG Base Directory Specification
+  process.env.XDG_STATE_HOME = "relative/state/path";
+  const fallback = guardianStateDirectory(projectDir);
+  assert.equal(
+    fallback.startsWith(path.join(os.homedir(), ".local", "state", "opencode-guardian", "projects") + path.sep),
+    true
+  );
+});
+

@@ -68,7 +68,9 @@ export function guardianStateDirectory(directory) {
         }
         return testBase;
     }
-    const globalBase = path.join(os.homedir(), ".local", "state", "opencode-guardian");
+    const xdgState = process.env.XDG_STATE_HOME?.trim();
+    const stateRoot = xdgState && path.isAbsolute(xdgState) ? xdgState : path.join(os.homedir(), ".local", "state");
+    const globalBase = path.join(stateRoot, "opencode-guardian");
     if (directory && typeof directory === "string" && directory.trim().length > 0) {
         return path.join(globalBase, "projects", projectStateKey(directory));
     }

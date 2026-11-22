@@ -617,8 +617,19 @@ const v2Plugin = {
     const [sidebarVersion, setSidebarVersion] = createSignal(0);
     const rpcInFlight = new Set();
     const interventionTimers = new Map();
+    const dismissedInterventionSignatures = new Map();
     let rpcGeneration = 0;
     let disposed = false;
+    const payloadSignature = payload => `${payload.variant}\0${payload.title}\0${payload.message}`;
+    const rememberDismissedSignature = (sessionID, sig) => {
+      dismissedInterventionSignatures.delete(sessionID);
+      dismissedInterventionSignatures.set(sessionID, sig);
+      while (dismissedInterventionSignatures.size > 64) {
+        const oldest = dismissedInterventionSignatures.keys().next().value;
+        if (!oldest) break;
+        dismissedInterventionSignatures.delete(oldest);
+      }
+    };
     const clearInterventionTimer = sessionID => {
       const existing = interventionTimers.get(sessionID);
       if (existing !== undefined) {
@@ -626,12 +637,35 @@ const v2Plugin = {
         interventionTimers.delete(sessionID);
       }
     };
-    const storeIntervention = (sessionID, payload) => {
+    const storeIntervention = (sessionID, payload, options) => {
+      const existingPayload = interventions()[sessionID];
+      if (payload) {
+        const sig = payloadSignature(payload);
+        if (options?.fromPoll && dismissedInterventionSignatures.get(sessionID) === sig) {
+          return;
+        }
+        if (!options?.fromPoll && dismissedInterventionSignatures.get(sessionID) === sig) {
+          dismissedInterventionSignatures.delete(sessionID);
+        }
+        if (options?.fromPoll && existingPayload && payloadSignature(existingPayload) === sig && interventionTimers.has(sessionID)) {
+          return;
+        }
+      } else {
+        if (options?.markDismissed && existingPayload) {
+          rememberDismissedSignature(sessionID, payloadSignature(existingPayload));
+        }
+        if (!existingPayload) {
+          clearInterventionTimer(sessionID);
+          return;
+        }
+      }
       clearInterventionTimer(sessionID);
       if (payload && !disposed) {
         const ttlMs = payload.duration > 0 ? payload.duration : 5000;
+        const sig = payloadSignature(payload);
         const timer = setTimeout(() => {
           interventionTimers.delete(sessionID);
+          rememberDismissedSignature(sessionID, sig);
           storeIntervention(sessionID, undefined);
         }, ttlMs);
         timer.unref?.();
@@ -650,36 +684,52 @@ const v2Plugin = {
         }
         return next;
       });
+      if (payload) {
+        setSidebarVersion(v => v + 1);
+      }
     };
     const interventionRpc = typeof context.client?.rpc === "function" ? context.client.rpc(GUARDIAN_INTERVENTION_RPC_DEFINITION) : undefined;
+    const INTERVENTION_RPC_TIMEOUT_MS = 1500;
     const refreshIntervention = async sessionID => {
       if (!interventionRpc || disposed || rpcInFlight.has(sessionID)) return;
       rpcInFlight.add(sessionID);
       const generation = rpcGeneration;
       const sessionLocation = context.data?.session?.get?.(sessionID)?.location ?? context.location;
       const requestedDirectory = sessionLocation?.directory;
+      let timeoutTimer;
       try {
-        const raw = await interventionRpc[GUARDIAN_INTERVENTION_RPC_METHOD]({
+        const rpcCall = Promise.resolve().then(() => interventionRpc[GUARDIAN_INTERVENTION_RPC_METHOD]({
           sessionID
         }, sessionLocation ? {
           location: sessionLocation
-        } : undefined);
-        if (disposed || generation !== rpcGeneration) return;
+        } : undefined));
+        rpcCall.catch(() => {});
+        const raw = await Promise.race([rpcCall, new Promise(resolve => {
+          timeoutTimer = setTimeout(() => resolve(undefined), INTERVENTION_RPC_TIMEOUT_MS);
+          timeoutTimer.unref?.();
+        })]);
+        if (raw === undefined || disposed || generation !== rpcGeneration) return;
         const currentSession = context.data?.session?.get?.(sessionID);
         if (!currentSession) return;
         const currentDirectory = currentSession.location?.directory ?? context.location?.directory;
         if (currentDirectory !== requestedDirectory) return;
         const snapshot = parseGuardianInterventionSnapshot(raw);
         if (!snapshot) return;
+        if (!snapshot.active) {
+          dismissedInterventionSignatures.delete(sessionID);
+        }
         storeIntervention(sessionID, snapshot.active ? {
           title: snapshot.title,
           message: snapshot.message,
           variant: snapshot.variant,
           duration: snapshot.duration
-        } : undefined);
+        } : undefined, {
+          fromPoll: true
+        });
       } catch {
         // Same-process toast bridge remains available when RPC is unavailable.
       } finally {
+        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
         rpcInFlight.delete(sessionID);
       }
     };
@@ -688,24 +738,19 @@ const v2Plugin = {
       setSidebarVersion(v => v + 1);
       const route = context.ui?.router?.current?.();
       if (route?.type === "session") {
-        storeIntervention(route.sessionID, undefined);
+        storeIntervention(route.sessionID, undefined, {
+          markDismissed: true
+        });
         dispatchGuardianToastClear({
           directory: targetDirectory,
           sessionID: route.sessionID
         });
-        if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {
-          const sessionLocation = context.data?.session?.get?.(route.sessionID)?.location ?? context.location;
-          void interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]({
-            sessionID: route.sessionID
-          }, sessionLocation ? {
-            location: sessionLocation
-          } : undefined).catch(() => {});
-        }
-        return;
       }
       for (const sessionID of Object.keys(interventions())) {
         if (v2SessionDirectory(context, sessionID, directory) === targetDirectory) {
-          storeIntervention(sessionID, undefined);
+          storeIntervention(sessionID, undefined, {
+            markDismissed: true
+          });
         }
       }
       dispatchGuardianToastClear({
@@ -735,7 +780,7 @@ const v2Plugin = {
     }
     const ownsInterventionScope = scope => {
       if (!scope.sessionID) {
-        return scope.directory === undefined || scope.directory === directory;
+        return true;
       }
       const session = context.data?.session?.get?.(scope.sessionID);
       if (!session) {
@@ -771,25 +816,38 @@ const v2Plugin = {
       rpcGeneration += 1;
       setSidebarVersion(v => v + 1);
       if (scope.sessionID) {
-        storeIntervention(scope.sessionID, undefined);
+        storeIntervention(scope.sessionID, undefined, {
+          markDismissed: true
+        });
       } else {
         const targetDir = scope.directory ?? directory;
         for (const sessionID of Object.keys(interventions())) {
           if (v2SessionDirectory(context, sessionID, directory) === targetDir) {
-            storeIntervention(sessionID, undefined);
+            storeIntervention(sessionID, undefined, {
+              markDismissed: true
+            });
           }
         }
       }
     });
+    const extractTuiEventSessionID = event => {
+      const ev = event;
+      return ev?.data?.sessionID ?? ev?.data?.info?.id ?? ev?.data?.id ?? ev?.properties?.sessionID ?? ev?.properties?.info?.id ?? ev?.properties?.id ?? ev?.sessionID;
+    };
     const unregisterSessionDelete = typeof context.data?.on === "function" ? context.data.on("session.deleted", event => {
-      rpcGeneration += 1;
-      storeIntervention(event.data.sessionID, undefined);
-      rpcInFlight.delete(event.data.sessionID);
-    }) : undefined;
-    const unregisterSessionMoved = typeof context.data?.on === "function" ? context.data.on("session.moved", event => {
-      const sid = event.data?.sessionID;
+      const sid = extractTuiEventSessionID(event);
       rpcGeneration += 1;
       if (sid) {
+        dismissedInterventionSignatures.delete(sid);
+        storeIntervention(sid, undefined);
+        rpcInFlight.delete(sid);
+      }
+    }) : undefined;
+    const unregisterSessionMoved = typeof context.data?.on === "function" ? context.data.on("session.moved", event => {
+      const sid = extractTuiEventSessionID(event);
+      rpcGeneration += 1;
+      if (sid) {
+        dismissedInterventionSignatures.delete(sid);
         storeIntervention(sid, undefined);
         rpcInFlight.delete(sid);
       }
@@ -810,9 +868,12 @@ const v2Plugin = {
         onDismiss: () => {
           if (!props.sessionID) return;
           rpcGeneration += 1;
-          storeIntervention(props.sessionID, undefined);
+          const sessionDir = v2SessionDirectory(context, props.sessionID, directory);
+          storeIntervention(props.sessionID, undefined, {
+            markDismissed: true
+          });
           dispatchGuardianToastClear({
-            directory,
+            directory: sessionDir,
             sessionID: props.sessionID
           });
           if (interventionRpc && typeof interventionRpc[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD] === "function") {

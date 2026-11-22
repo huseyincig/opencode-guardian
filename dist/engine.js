@@ -21,7 +21,7 @@ import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence, } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
 import { isTrustedGuardianMetadata } from "./provenance.js";
-import { clearActiveMeshHandoff, isTrustedMeshMessage, setActiveMeshHandoff, } from "./bridge.js";
+import { clearActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, isTrustedMeshMessage, setActiveMeshHandoff, } from "./bridge.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
 export const ANTI_DISTRACTION_DIRECTIVE = "CRITICAL: A quality or safety policy was triggered for your current turn.\n" +
     "- Do NOT read, explore, or modify Guardian plugin files, configuration, or audit logs.\n" +
@@ -336,6 +336,17 @@ function isNativeQuestionTool(toolRaw) {
     const baseName = name.includes(".") ? (name.split(".").pop() ?? name) : name;
     return NATIVE_QUESTION_TOOLS.has(name) || NATIVE_QUESTION_TOOLS.has(baseName);
 }
+function messageHasNativeQuestionTool(msg) {
+    return (msg.info.role === "assistant" &&
+        Boolean(msg.parts?.some((part) => {
+            const toolRaw = typeof part.tool === "string"
+                ? part.tool
+                : typeof part.name === "string"
+                    ? part.name
+                    : "";
+            return isNativeQuestionTool(toolRaw);
+        })));
+}
 export function extractCurrentTurn(messages, sessionID) {
     const lastUserMessage = messages.findLast((message) => message.info.role === "user" &&
         (!isSyntheticUserMessage(message, sessionID) || isGuardianRemediationMessage(message, sessionID)));
@@ -436,35 +447,43 @@ export class GuardEngine {
         if (!firstCurrentMessage) {
             return { decision: "pass", results: [] };
         }
+        const lastGuardianIndex = currentTurn.findLastIndex((m) => isGuardianRemediationMessage(m, sessionID));
         const activeHandoff = !isSubagent ? this.sessionState.getActiveHandoff(sessionID) : undefined;
         if (activeHandoff?.status === "question_presented") {
-            const hasUserReply = currentTurn.some((msg) => msg.info.role === "user" && !isSyntheticUserMessage(msg, sessionID));
+            const lastQuestionIndex = messages.findLastIndex(messageHasNativeQuestionTool);
+            const hasUserReply = (turnKey !== "no-human-user" && turnKey !== activeHandoff.turnKey) ||
+                (lastQuestionIndex >= 0 &&
+                    messages
+                        .slice(lastQuestionIndex + 1)
+                        .some((msg) => msg.info.role === "user" && !isSyntheticUserMessage(msg, sessionID)));
             if (hasUserReply) {
                 this.sessionState.clearActiveHandoff(sessionID);
-                clearActiveMeshHandoff(sessionID);
+                consumeActiveMeshHandoff(sessionID);
+            }
+            else {
+                return { decision: "pass", results: [] };
             }
         }
         else if (activeHandoff?.status === "handed_off") {
-            const askedQuestion = currentTurn.some((msg) => msg.info.role === "assistant" &&
-                msg.parts?.some((part) => {
-                    const toolRaw = typeof part.tool === "string"
-                        ? part.tool
-                        : typeof part.name === "string"
-                            ? part.name
-                            : "";
-                    return isNativeQuestionTool(toolRaw);
-                }));
-            if (askedQuestion) {
+            const postRemediationSlice = currentTurn.slice(lastGuardianIndex + 1);
+            const askedQuestion = postRemediationSlice.some(messageHasNativeQuestionTool);
+            const isMatchingHandoffTurn = turnKey === activeHandoff.turnKey ||
+                Boolean(firstCurrentMessage.parts?.some((part) => part.type === "text" &&
+                    typeof part.text === "string" &&
+                    part.text.trimStart().startsWith(REMEDIATION_MARKER) &&
+                    part.text.includes(`handoff_id=${activeHandoff.handoffId}`)));
+            if (isMatchingHandoffTurn && askedQuestion) {
                 this.sessionState.setActiveHandoff(sessionID, {
                     ...activeHandoff,
                     status: "question_presented",
                 });
                 return { decision: "pass", results: [] };
             }
+            this.sessionState.clearActiveHandoff(sessionID);
+            invalidateActiveMeshHandoff(sessionID);
         }
         const contract = extractTaskContract(currentTurn);
         const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
-        const lastGuardianIndex = currentTurn.findLastIndex((m) => isGuardianRemediationMessage(m, sessionID));
         const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
             ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
             : currentTurn;
@@ -673,7 +692,7 @@ export class GuardEngine {
                 .map((record) => record.filePath).filter((file) => !!file));
             const hasProgress = successfulFresh.some((record) => ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind));
             const pendingFindingSet = new Set(pendingFindingKeys);
-            const originalFindingsRemain = results.some((result) => pendingRules.includes(result.ruleId) &&
+            let originalFindingsRemain = results.some((result) => pendingRules.includes(result.ruleId) &&
                 result.findings.some((finding) => pendingFindingSet.has(findingIdentity(result.ruleId, finding))));
             let verified = pendingRules.length > 0 && hasProgress && !originalFindingsRemain;
             if (verified && pendingRules.includes("security/no-secrets")) {
@@ -695,8 +714,14 @@ export class GuardEngine {
                             path.isAbsolute(realRelative))
                             return false;
                         const info = fs.lstatSync(full);
-                        return info.isFile() && info.size <= 2 * 1024 * 1024 &&
-                            findAllSecretsInCode(fs.readFileSync(full, "utf8"), rel).length === 0;
+                        if (!info.isFile() || info.size > 2 * 1024 * 1024)
+                            return false;
+                        const remainingSecrets = findAllSecretsInCode(fs.readFileSync(full, "utf8"), rel);
+                        if (remainingSecrets.length > 0) {
+                            originalFindingsRemain = true;
+                            return false;
+                        }
+                        return true;
                     }
                     catch {
                         return false;
@@ -759,6 +784,7 @@ export class GuardEngine {
                         });
                         const originalSourceFindingRemains = checked.findings.some((finding) => pendingFindingSet.has(findingIdentity(ruleID, finding)));
                         if (originalSourceFindingRemains) {
+                            originalFindingsRemain = true;
                             verified = false;
                             break;
                         }

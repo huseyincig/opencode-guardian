@@ -36,7 +36,7 @@ export const instructionFidelityRule = {
             .map((part) => part.text ?? "")
             .join("\n") ?? "";
         const prose = sanitizeProseForInspection(assistant);
-        const observableWork = context.evidence?.records.some((record) => record.status === "success" &&
+        const observableWork = evidence.records.some((record) => record.status === "success" &&
             [
                 "file-mutation",
                 "install",

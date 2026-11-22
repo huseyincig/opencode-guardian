@@ -2,7 +2,7 @@ import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } fro
 import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
-import { extractStructuredEditTexts, quoteProcessArgument } from "./tool-input.js";
+import { extractStructuredEditTexts, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
 import { findTruncationPlaceholder } from "./edit-integrity.js";
 
 export type PreflightFinding =
@@ -83,11 +83,19 @@ function evaluateProcessStartPreflight(input: unknown): PreflightFinding | undef
   const shells = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish",
     "powershell", "pwsh", "cmd"]);
   if (shells.has(executable)) {
+    const isPowerShell = executable === "powershell" || executable === "pwsh";
     const option = args.findIndex((arg) =>
-      /^-[a-z]*c[a-z]*$/i.test(arg) || /^(?:\/c|-command|-encodedcommand|-enc)$/i.test(arg));
+      /^-[a-z]*c[a-z]*$/i.test(arg) ||
+      /^(?:\/c|-command|-encodedcommand|-enc)$/i.test(arg) ||
+      (isPowerShell && /^(?:-ec|-e)$/i.test(arg)));
     const shellOption = args[option];
-    if (option < 0 || shellOption === undefined || args.length <= option + 1 ||
-        /^(?:-encodedcommand|-enc)$/i.test(shellOption)) {
+    if (
+      option < 0 ||
+      shellOption === undefined ||
+      args.length <= option + 1 ||
+      /^(?:-encodedcommand|-enc)$/i.test(shellOption) ||
+      (isPowerShell && /^(?:-ec|-e)$/i.test(shellOption))
+    ) {
       return "uninspectable-shell-input";
     }
     const script = ["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(executable)
@@ -149,20 +157,35 @@ export function evaluateFileMutationPreflight(
     }
   }
 
+  let hasValidPatchStructure = false;
   if (typeof patchRaw === "string") {
-    const addedLines = extractAddedLines(patchRaw);
-    if (addedLines) {
-      const patchPaths = Array.from(
-        patchRaw.matchAll(/\+\+\+\s+(?:b\/)?([^\s\t\n]+)/g),
-        (match) => match[1]
-      ).filter((value): value is string => Boolean(value && value !== "/dev/null"));
-      const uniquePatchPaths = [...new Set(patchPaths)];
-      const patchFilePath =
-        uniquePatchPaths.length === 1 ? uniquePatchPaths[0] : undefined;
-      textsToCheck.push({
-        text: addedLines,
-        ...(patchFilePath ? { filePath: patchFilePath } : {}),
-      });
+    const sections = splitFilePatches(patchRaw);
+    if (
+      sections.length > 0 &&
+      /(?:^|\n)(?:@@|\+\+\+|---|\*\*\*\s+(?:Begin|Update|Add|Delete|Move)\s+(?:Patch|File))/m.test(patchRaw)
+    ) {
+      hasValidPatchStructure = true;
+    }
+    if (sections.length > 0) {
+      for (const section of sections) {
+        const sectionAdded = extractAddedLines(section.patch);
+        if (sectionAdded) {
+          const sectionPath =
+            section.filePath ?? (typeof targetFile === "string" ? targetFile : undefined);
+          textsToCheck.push({
+            text: sectionAdded,
+            ...(sectionPath ? { filePath: sectionPath } : {}),
+          });
+        }
+      }
+    } else {
+      const addedLines = extractAddedLines(patchRaw);
+      if (addedLines) {
+        textsToCheck.push({
+          text: addedLines,
+          ...(typeof targetFile === "string" ? { filePath: targetFile } : {}),
+        });
+      }
     }
   }
 
@@ -184,6 +207,7 @@ export function evaluateFileMutationPreflight(
   const action = typeof args.action === "string" ? args.action.toLowerCase() : "";
   if (
     !["move", "copy", "delete", "remove"].includes(action) &&
+    !hasValidPatchStructure &&
     textsToCheck.length === 0
   ) {
     return "uninspectable-file-input";

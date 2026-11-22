@@ -129,7 +129,10 @@ export const noEvasionRule = {
                 }
                 // Preserve file mentions inside inline code while still excluding quoted
                 // examples and code blocks from claims.
-                const cleanText = sanitizeProseForInspection(part.text.slice(0, 64_000).replace(/`([^`\n]+)`/g, (span, value) => claimPaths(value).includes(value) ? value : span));
+                const cleanText = sanitizeProseForInspection(part.text.slice(0, 64_000).replace(/`([^`\n]+)`/g, (span, value) => {
+                    const extracted = claimPaths(value);
+                    return extracted.length === 1 && value.replace(/^\.\//, "") === extracted[0] ? extracted[0] : span;
+                }));
                 if (!cleanText)
                     continue;
                 const lowerText = cleanText.toLowerCase();
@@ -153,7 +156,8 @@ export const noEvasionRule = {
                             ? paths.every((path) => context.evidence?.records.some((record) => baselineCovers(record, path)))
                             : hasSuccessfulEvidence(context.evidence, "baseline");
                         if (canBeSupportedByBaseline(pattern) && supported) {
-                            break;
+                            searchFrom = matchIdx + lowerPattern.length;
+                            continue;
                         }
                         seenPatterns.add(lowerPattern);
                         const snippet = extractSnippet(cleanText, matchIdx, pattern.length);

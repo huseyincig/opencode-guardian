@@ -13,6 +13,8 @@ export function latestHumanInstruction(context) {
 /** Strip examples/comments while preserving literal inline command targets. */
 export function authorizationText(text) {
     return text.slice(0, 64_000)
+        .replace(/<lazy_bound_skill\b[\s\S]*?<\/lazy_bound_skill>/gi, " ")
+        .replace(/<lazy_skill_suggestions\b[\s\S]*?<\/lazy_skill_suggestions>/gi, " ")
         .replace(/```[\s\S]*?```/g, " ")
         .replace(/^\s*(?:>|#|\/\/)[^\n]*$/gm, " ")
         .replace(/(?:^|[ \t])(?:#|\/\/)[^\n]*$/gm, " ")
@@ -34,7 +36,7 @@ export function hasResearchOnlyConstraint(instruction) {
         if (/\b(?:do\s+not|don't|never)\s+(?:limit|restrict)\b/.test(clause) ||
             /(?:sınırlı\s+kalma|sınırlama)/u.test(clause))
             return false;
-        return /\b(?:(?:research|analysis|analy[sz]e|inspect|investigate)\s+only|only\s+(?:research|analy[sz]e|inspect|investigate)|no\s+(?:edits|changes)|(?:do\s+not|don't|never)\s+(?:edit|modify|change)\s+(?:(?:any|the)\s+)?files|(?:do\s+not|don't|never)\s+make\s+changes\s+to\s+(?:(?:any|the)\s+)?files)\b/.test(clause) ||
+        return /\b(?:(?:research|analysis|analy[sz]e|inspect|investigate)\s+only|only\s+(?:research|analy[sz]e|inspect|investigate)|no\s+(?:edits|changes)(?!\s+(?:to|in|for|are|were|broke|break|affect|needed|necessary)\b)|(?:do\s+not|don't|never)\s+(?:edit|modify|change)\s+(?:(?:any|the)\s+)?files|(?:do\s+not|don't|never)\s+make\s+changes\s+to\s+(?:(?:any|the)\s+)?files)\b/.test(clause) ||
             /(?:^|\s)(?:sadece|yalnızca)\s+(?:araştır(?:ma\s+yap)?|incele(?:me\s+yap)?|analiz\s+et)(?:\s|$)/u.test(clause) ||
             /(?:dosyaları|dosyalarda|dosya)\s+(?:değiştirme|düzenleme|değişiklik\s+yapma)(?:\s|$)/u.test(clause);
     });

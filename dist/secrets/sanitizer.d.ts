@@ -6,7 +6,7 @@ export declare function sanitizeString(text: string, options?: SanitizerOptions)
 /**
  * Recursively sanitizes JavaScript objects, arrays, and Error instances.
  */
-export declare function sanitizeObject<T>(data: T, options?: SanitizerOptions): SanitizeResult<T>;
+export declare function sanitizeObject<T>(data: T, options?: SanitizerOptions, rootInsideMeshEnvelope?: boolean): SanitizeResult<T>;
 /**
  * Universal Tool Result Sanitizer.
  * Safely transforms any tool result shape (string, { output, metadata }, { stdout, stderr }, MCP content)

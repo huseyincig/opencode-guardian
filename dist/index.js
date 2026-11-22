@@ -15,7 +15,7 @@ import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardian
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
-import { acquireSessionLease, clearMeshIntervention, getBlockingSessionLease, isTrustedMeshMessage, recordMeshIntervention, registerMeshStateRpc, resolveMeshAgentProfile, } from "./bridge.js";
+import { acquireSessionLease, clearMeshIntervention, getBlockingSessionLease, getLatestMeshIntervention, invalidateActiveMeshHandoff, isTrustedMeshMessage, recordMeshIntervention, registerMeshStateRpc, resolveMeshAgentProfile, } from "./bridge.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./degeneration.js";
@@ -52,7 +52,7 @@ export * from "./toast.js";
 export * from "./intervention.js";
 export * from "./intervention-rpc.js";
 export * from "./provenance.js";
-export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
+export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, setActiveMeshHandoff, getActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, clearActiveMeshHandoff, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
 function sanitizeV2ToolError(error, options) {
     const fallback = () => {
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
@@ -68,8 +68,14 @@ function sanitizeV2ToolError(error, options) {
         if (!error || typeof error !== "object") {
             return sanitizeToolResult(error, options);
         }
+        if (error instanceof Error) {
+            return sanitizeObject(error, options).sanitized;
+        }
         const source = error;
         const snapshot = { ...source };
+        for (const key of Object.getOwnPropertyNames(source)) {
+            snapshot[key] = source[key];
+        }
         if (typeof source.message === "string")
             snapshot.message = source.message;
         if (typeof source.stack === "string")
@@ -187,18 +193,44 @@ function normalizeV2AssistantParts(part) {
         const callInput = rec.input && typeof rec.input === "object" && !Array.isArray(rec.input)
             ? rec.input
             : {};
+        const recMeta = rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
+            ? rec.metadata
+            : {};
+        const callOutput = extractV2OutputText(rec.output, rec.content);
+        const callID = typeof rec.id === "string" && rec.id.length > 0
+            ? rec.id
+            : typeof rec.callID === "string" && rec.callID.length > 0
+                ? rec.callID
+                : primary.callID
+                    ? `${primary.callID}:codemode:${i}`
+                    : undefined;
+        const explicitExitCode = typeof rec.exitCode === "number" && Number.isFinite(rec.exitCode)
+            ? rec.exitCode
+            : typeof recMeta.exit === "number" && Number.isFinite(recMeta.exit)
+                ? recMeta.exit
+                : undefined;
+        const isBackgroundOrOutputExit = recMeta.status === "running" ||
+            recMeta.state === "running" ||
+            /(?:^|\n)Exit code:\s*\d+/i.test(callOutput) ||
+            /(?:^|\n)Command moved to the background\b/i.test(callOutput);
         nestedParts.push({
             type: "tool",
             tool: toolName,
             name: toolName,
-            callID: primary.callID ? `${primary.callID}:codemode:${i}` : undefined,
+            callID,
             state: {
                 status: callStatus,
                 input: callInput,
-                metadata: { codemode: true },
-                ...(callStatus === "completed" && (toolName === "shell" || toolName === "bash")
-                    ? { exitCode: 0 }
-                    : {}),
+                metadata: { ...recMeta, codemode: true },
+                ...(callOutput ? { output: callOutput } : {}),
+                ...(rec.error !== undefined ? { error: rec.error } : {}),
+                ...(explicitExitCode !== undefined
+                    ? { exitCode: explicitExitCode }
+                    : callStatus === "completed" &&
+                        (toolName === "shell" || toolName === "bash") &&
+                        !isBackgroundOrOutputExit
+                        ? { exitCode: 0 }
+                        : {}),
             },
         });
     }
@@ -240,9 +272,14 @@ export function normalizeV2Messages(messages, sessionID) {
                 ? msg.metadata
                 : undefined;
             if (meta?.source === "shell") {
-                const command = typeof msg.description === "string" && msg.description.trim().length > 0
-                    ? msg.description
-                    : extractShellCommandFromSyntheticText(msg.text);
+                const extractedCmd = extractShellCommandFromSyntheticText(msg.text);
+                const command = typeof meta.command === "string" && meta.command.trim().length > 0
+                    ? meta.command
+                    : extractedCmd.length > 0
+                        ? extractedCmd
+                        : typeof msg.description === "string" && msg.description.trim().length > 0
+                            ? msg.description
+                            : "";
                 const shellState = meta.state ?? meta.status;
                 const completedOk = shellState === "completed" &&
                     (meta.exit === 0 || meta.exit === undefined);
@@ -336,10 +373,67 @@ export function normalizeV2Messages(messages, sessionID) {
     return normalized;
 }
 const MAX_SUBAGENT_HANDOFF_ROUNDS = 6;
-function markForegroundHandoff(handoffs, sessionID, callID) {
-    const active = handoffs.get(sessionID) ?? new Set();
-    active.add(callID);
+const FOREGROUND_HANDOFF_TTL_MS = 5 * 60_000;
+const activeRemediationLeases = new Map();
+function setRemediationLeaseForSession(sessionID, release) {
+    const existing = activeRemediationLeases.get(sessionID);
+    if (existing && existing !== release) {
+        activeRemediationLeases.delete(sessionID);
+        try {
+            existing();
+        }
+        catch { }
+    }
+    activeRemediationLeases.delete(sessionID);
+    activeRemediationLeases.set(sessionID, release);
+    while (activeRemediationLeases.size > 512) {
+        const oldest = activeRemediationLeases.keys().next().value;
+        if (oldest === undefined)
+            break;
+        const oldRelease = activeRemediationLeases.get(oldest);
+        activeRemediationLeases.delete(oldest);
+        try {
+            oldRelease?.();
+        }
+        catch { }
+    }
+}
+function releaseRemediationLeaseForSession(sessionID) {
+    const release = activeRemediationLeases.get(sessionID);
+    if (!release)
+        return;
+    activeRemediationLeases.delete(sessionID);
+    try {
+        release();
+    }
+    catch { }
+}
+function pruneExpiredForegroundHandoffs(handoffs, sessionID, now = Date.now()) {
+    const active = handoffs.get(sessionID);
+    if (!active)
+        return undefined;
+    for (const [callID, timestamp] of active.entries()) {
+        if (now - timestamp > FOREGROUND_HANDOFF_TTL_MS) {
+            active.delete(callID);
+        }
+    }
+    if (active.size === 0) {
+        handoffs.delete(sessionID);
+        return undefined;
+    }
+    return active;
+}
+function markForegroundHandoff(handoffs, sessionID, callID, now = Date.now()) {
+    const active = pruneExpiredForegroundHandoffs(handoffs, sessionID, now) ?? new Map();
+    active.set(callID, now);
+    handoffs.delete(sessionID);
     handoffs.set(sessionID, active);
+    while (handoffs.size > 512) {
+        const oldest = handoffs.keys().next().value;
+        if (oldest === undefined)
+            break;
+        handoffs.delete(oldest);
+    }
 }
 function clearForegroundHandoff(handoffs, sessionID, callID) {
     const active = handoffs.get(sessionID);
@@ -349,8 +443,11 @@ function clearForegroundHandoff(handoffs, sessionID, callID) {
     if (active.size === 0)
         handoffs.delete(sessionID);
 }
-function hasForegroundHandoff(handoffs, sessionID) {
-    return Boolean(sessionID && handoffs.get(sessionID)?.size);
+function hasForegroundHandoff(handoffs, sessionID, now = Date.now()) {
+    if (!sessionID)
+        return false;
+    const active = pruneExpiredForegroundHandoffs(handoffs, sessionID, now);
+    return Boolean(active && active.size > 0);
 }
 function latestAssistantText(messages) {
     const assistant = messages.findLast((message) => message.info.role === "assistant");
@@ -375,7 +472,9 @@ function createTrackedToastNotifier(base) {
         },
         recordOutcome(sessionID, result, findingsCount, toastNotifier) {
             if (result.remediationStatus === "verified") {
-                remainingCleanTurns.delete(sessionID);
+                if (findingsCount === 0) {
+                    remainingCleanTurns.delete(sessionID);
+                }
                 return;
             }
             if (findingsCount > 0 ||
@@ -468,7 +567,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
             reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
         }, directory);
     }
-    if (result.decision === "pass" && findings.length === 0) {
+    if (result.results.length > 0 && result.decision === "pass" && result.remediationStatus !== "failed") {
         clearMeshIntervention(sessionID);
     }
     if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
@@ -579,6 +678,7 @@ async function finalizeSubagentHandoff(input) {
             }
             catch {
                 result.rollback?.();
+                clearMeshIntervention(input.sessionID);
                 recordGuardianEvent({
                     kind: "inspection-error",
                     session: sessionFingerprint(input.sessionID),
@@ -593,14 +693,17 @@ async function finalizeSubagentHandoff(input) {
             continue;
         }
         if (result.remediationStatus === "failed") {
+            clearMeshIntervention(input.sessionID);
             throw new Error("[opencode-guardian handoff] unresolved Guardian findings; subagent result withheld.");
         }
         const latest = latestAssistantText(messages);
         if (remediated && !latest) {
+            clearMeshIntervention(input.sessionID);
             throw new Error("[opencode-guardian handoff] remediated subagent produced no final text result.");
         }
         return latest;
     }
+    clearMeshIntervention(input.sessionID);
     throw new Error("[opencode-guardian handoff] subagent finalization exceeded its bounded loop.");
 }
 function hasUnfinishedBackgroundTool(messages) {
@@ -619,9 +722,15 @@ function hasUnfinishedBackgroundTool(messages) {
             if (part.type !== "tool" || !part.state)
                 continue;
             const meta = part.state.metadata;
+            const outputText = typeof part.state.output === "string" ? part.state.output : "";
             const shellID = typeof meta?.shellID === "string" ? meta.shellID : undefined;
             const id = shellID ?? (typeof part.callID === "string" ? part.callID : undefined);
-            const isRunning = part.state.status === "running" || meta?.status === "running";
+            const isMovedToBackground = /(?:^|\n)Command moved to the background\b/i.test(outputText) ||
+                /(?:^|\n)The command did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText);
+            const isRunning = part.state.status === "running" ||
+                meta?.status === "running" ||
+                meta?.state === "running" ||
+                isMovedToBackground;
             if (isRunning) {
                 if (id)
                     runningIDs.add(id);
@@ -684,6 +793,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
         const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
             if (effectiveIsSubagent && agentCapability !== "write-allowed") {
+                releaseRemediationLeaseForSession(sessionID);
                 return;
             }
             stage = "prompt-send";
@@ -697,6 +807,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 active: true,
                 updatedAt: Date.now(),
             });
+            releaseRemediationLeaseForSession(sessionID);
             const releaseRemediationLease = acquireSessionLease({
                 sessionID,
                 owner: "opencode-guardian",
@@ -706,12 +817,17 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             });
             try {
                 if (signal?.aborted) {
+                    releaseRemediationLease();
                     result.rollback?.();
+                    clearMeshIntervention(sessionID);
                     return;
                 }
                 await sendPrompt(result.combinedRemediationPrompt);
-                if (signal?.aborted)
+                if (signal?.aborted) {
+                    releaseRemediationLease();
                     return;
+                }
+                setRemediationLeaseForSession(sessionID, releaseRemediationLease);
                 recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
                 toastNotifier?.notify({
                     kind: "remediation",
@@ -720,15 +836,18 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 });
             }
             catch (promptError) {
+                releaseRemediationLease();
                 result.rollback?.();
+                clearMeshIntervention(sessionID);
                 throw promptError;
             }
-            finally {
-                releaseRemediationLease();
-            }
+        }
+        else if (result.results.length > 0) {
+            releaseRemediationLeaseForSession(sessionID);
         }
     }
     catch {
+        releaseRemediationLeaseForSession(sessionID);
         if (signal?.aborted)
             return;
         const errorCode = stage === "message-fetch"
@@ -779,6 +898,9 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
             ...(sessionID ? { sessionID } : {}),
         });
         throw new GuardianPreflightError(finding);
+    }
+    if (sessionID && getLatestMeshIntervention(sessionID)?.kind === "preflight-blocked") {
+        clearMeshIntervention(sessionID);
     }
 }
 function realpathLoose(targetPath) {
@@ -1059,15 +1181,20 @@ const setup = async (context) => {
                     const entry = interventionSnapshots.get(sessionID);
                     if (!entry)
                         return inactiveGuardianIntervention();
-                    if (Date.now() >= entry.expiresAt) {
+                    const now = Date.now();
+                    if (now >= entry.expiresAt) {
                         toastNotifier.clear?.(sessionID);
                         return inactiveGuardianIntervention();
                     }
-                    return activeGuardianIntervention(entry.payload);
+                    return activeGuardianIntervention({
+                        ...entry.payload,
+                        duration: Math.max(1, entry.expiresAt - now),
+                    });
                 },
                 [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input, ...rest) => {
                     const sessionID = readGuardianInterventionSessionID(input);
                     if (sessionID) {
+                        clearMeshIntervention(sessionID);
                         toastNotifier.clear?.(sessionID);
                         return { cleared: true };
                     }
@@ -1080,7 +1207,13 @@ const setup = async (context) => {
                         const sessionDir = sessionDirectories.get(activeSessionID) ??
                             await resolveSessionDirectory(activeSessionID);
                         if (sessionDir === targetDirectory) {
+                            clearMeshIntervention(activeSessionID);
                             toastNotifier.clear?.(activeSessionID);
+                        }
+                    }
+                    for (const [knownSessionID, knownDir] of sessionDirectories.entries()) {
+                        if (knownDir === targetDirectory) {
+                            clearMeshIntervention(knownSessionID);
                         }
                     }
                     dispatchGuardianToastClear({ directory: targetDirectory });
@@ -1147,7 +1280,10 @@ const setup = async (context) => {
         clear(sessionID) {
             clearInterventionSnapshot(sessionID);
             const runtimeDirectory = sessionDirectories.get(sessionID) ?? directory;
-            baseToastForDirectory(runtimeDirectory).clear?.(sessionID);
+            try {
+                baseToastForDirectory(runtimeDirectory).clear?.(sessionID);
+            }
+            catch { }
         },
     });
     const streamWatcher = new StreamLoopWatcher({
@@ -1247,7 +1383,7 @@ const setup = async (context) => {
                 const tracked = canFinalizeSubagent &&
                     event.tool === "subagent" &&
                     input.background !== true &&
-                    Boolean(foregroundHandoffs.get(event.sessionID)?.has(event.id));
+                    Boolean(pruneExpiredForegroundHandoffs(foregroundHandoffs, event.sessionID)?.has(event.id));
                 try {
                     const observedDirectory = await resolveSessionDirectory(event.sessionID);
                     const runtime = runtimeForDirectory(observedDirectory);
@@ -1258,6 +1394,11 @@ const setup = async (context) => {
                     }
                     if (controller.signal.aborted)
                         return;
+                    if (event.status === "completed" &&
+                        event.sessionID &&
+                        getLatestMeshIntervention(event.sessionID)?.kind === "preflight-blocked") {
+                        clearMeshIntervention(event.sessionID);
+                    }
                     if (tracked && event.status === "completed") {
                         const current = event.result;
                         const structured = current.output && typeof current.output === "object" && !Array.isArray(current.output)
@@ -1288,7 +1429,12 @@ const setup = async (context) => {
                                 ? child.location.directory
                                 : observedDirectory);
                             const childRuntime = runtimeForDirectory(childDirectory);
-                            const childAgent = typeof input.agent === "string" ? input.agent : undefined;
+                            const rawChildAgent = child.agent;
+                            const childAgent = typeof input.agent === "string" && input.agent.trim().length > 0
+                                ? input.agent
+                                : typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
+                                    ? rawChildAgent.trim()
+                                    : undefined;
                             const revised = childRuntime.config.enabled === false
                                 ? undefined
                                 : await finalizeSubagentHandoff({
@@ -1321,7 +1467,9 @@ const setup = async (context) => {
                                             catch { }
                                         }
                                         const p = await resolveV2AgentCapability(context, childID, resolvedName, undefined, childDirectory);
-                                        cacheAgentCapability(childID, p);
+                                        if (p.capability !== "unknown") {
+                                            cacheAgentCapability(childID, p);
+                                        }
                                         return p;
                                     },
                                     fetchMessages: async () => normalizeV2Messages(await context.session.context({ sessionID: childID }), childID),
@@ -1344,15 +1492,20 @@ const setup = async (context) => {
                                     toastNotifier,
                                 });
                             if (revised !== undefined) {
+                                const existingText = extractV2OutputText(current.output, current.content).replace(/\r?\n?<\/subagent>\s*$/i, "");
+                                const trailingOutcomeLine = /(?:^|\r?\n)(\[TASK OUTCOME\][^\r\n]*)\s*$/.exec(existingText)?.[1];
+                                const finalRevised = trailingOutcomeLine && !revised.includes(trailingOutcomeLine)
+                                    ? `${revised}\n${trailingOutcomeLine}`
+                                    : revised;
                                 event.result = {
                                     ...event.result,
                                     output: {
                                         ...structured,
                                         sessionID: childID,
                                         status: "completed",
-                                        output: revised,
+                                        output: finalRevised,
                                     },
-                                    content: `<subagent sessionID="${childID}" state="completed">\n${revised}\n</subagent>`,
+                                    content: `<subagent sessionID="${childID}" state="completed">\n${finalRevised}\n</subagent>`,
                                     metadata: {
                                         ...current.metadata,
                                         sessionID: childID,
@@ -1411,13 +1564,21 @@ const setup = async (context) => {
                 if (controller.signal.aborted)
                     return;
                 const eventRecord = event;
-                const sid = typeof eventRecord.sessionID === "string" ? eventRecord.sessionID : undefined;
+                const sid = typeof eventRecord.sessionID === "string" && eventRecord.sessionID.trim().length > 0
+                    ? eventRecord.sessionID
+                    : typeof eventRecord.env?.OPENCODE_SESSION_ID === "string" &&
+                        eventRecord.env.OPENCODE_SESSION_ID.trim().length > 0
+                        ? eventRecord.env.OPENCODE_SESSION_ID
+                        : undefined;
+                const candidateCwd = typeof eventRecord.cwd === "string" && eventRecord.cwd.trim().length > 0
+                    ? eventRecord.cwd
+                    : undefined;
                 const runtimeDirectory = sid
                     ? await resolveSessionDirectory(sid)
                     : (typeof eventRecord.location?.directory === "string" && eventRecord.location.directory.trim()
                         ? eventRecord.location.directory
-                        : typeof eventRecord.cwd === "string" && eventRecord.cwd.trim()
-                            ? eventRecord.cwd
+                        : candidateCwd && isDirectoryInGuardianScope(directory, candidateCwd)
+                            ? candidateCwd
                             : directory);
                 if (controller.signal.aborted)
                     return;
@@ -1463,28 +1624,26 @@ const setup = async (context) => {
             const promptRegistration = await context.session.hook("prompt", async (event) => {
                 if (isTrustedGuardianMetadata(event.sessionID, event.metadata, "visible") ||
                     isTrustedGuardianMetadata(event.sessionID, event.metadata, "remediation") ||
-                    isTrustedMeshMessage(event, event.sessionID, [
-                        "remediation",
-                        "visible",
-                        "handoff",
-                        "wake",
-                        "skill-injection",
-                    ])) {
+                    isTrustedMeshMessage(event, event.sessionID)) {
                     return;
                 }
                 idleQueue.forget(event.sessionID);
+                releaseRemediationLeaseForSession(event.sessionID);
+                invalidateActiveMeshHandoff(event.sessionID);
+                clearMeshIntervention(event.sessionID);
+                foregroundHandoffs.delete(event.sessionID);
                 contracts.delete(event.sessionID);
                 backgroundSessions.delete(event.sessionID);
+                toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
+                verificationStore.beginTurn(event.sessionID);
                 const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
                 const runtime = runtimeForDirectory(runtimeDirectory);
                 if (runtime.config.enabled === false) {
                     return;
                 }
-                toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
                 const text = typeof event.prompt?.text === "string" ? event.prompt.text : "";
                 if (!text)
                     return;
-                verificationStore.beginTurn(event.sessionID);
                 const contract = extractTaskContract([{
                         info: { id: event.messageID, role: "user" },
                         parts: [{ type: "text", text }],
@@ -1555,7 +1714,16 @@ const setup = async (context) => {
             try {
                 const expIdleReg = await context.session.hook("experimental.idle", (event) => {
                     const bg = event.background;
-                    if (Array.isArray(bg) && bg.length > 0) {
+                    const ownBg = Array.isArray(bg)
+                        ? bg.filter((job) => {
+                            if (!job || typeof job !== "object")
+                                return true;
+                            const jobSid = job.sessionID;
+                            return typeof jobSid !== "string" || jobSid.length === 0 || jobSid === event.sessionID;
+                        })
+                        : [];
+                    if (ownBg.length > 0) {
+                        backgroundSessions.delete(event.sessionID);
                         backgroundSessions.add(event.sessionID);
                         if (backgroundSessions.size > 512) {
                             const oldest = backgroundSessions.values().next().value;
@@ -1602,55 +1770,81 @@ const setup = async (context) => {
             try {
                 for await (const event of activeEvents) {
                     const eventData = event;
+                    const eventPayload = eventData.data ?? eventData.properties;
+                    const extractEventSessionID = () => eventData.data?.sessionID ??
+                        eventData.data?.info?.id ??
+                        eventData.data?.id ??
+                        eventData.properties?.sessionID ??
+                        eventData.properties?.info?.id ??
+                        eventData.properties?.id ??
+                        eventData.sessionID;
                     streamWatcher.dispatch(event);
                     if (eventData.type === "session.created" || eventData.type === "session.forked") {
-                        const createdSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
+                        const createdSessionID = extractEventSessionID();
                         if (createdSessionID) {
-                            const createdDirectory = eventData.data?.location?.directory ?? eventData.location?.directory;
+                            const createdDirectory = eventPayload?.location?.directory ?? eventData.location?.directory;
                             if (typeof createdDirectory === "string" && createdDirectory.trim()) {
                                 rememberSessionDirectory(createdSessionID, createdDirectory);
                             }
                         }
                     }
                     if (eventData.type === "session.deleted") {
-                        const deletedSessionID = eventData.data?.sessionID ?? eventData.data?.info?.id;
+                        const deletedSessionID = extractEventSessionID();
                         if (deletedSessionID) {
                             idleQueue.forget(deletedSessionID);
+                            streamWatcher.forget(deletedSessionID);
+                            releaseRemediationLeaseForSession(deletedSessionID);
+                            toastNotifier.clear?.(deletedSessionID);
+                            clearInterventionSnapshot(deletedSessionID);
                             forgetSessionRuntime(deletedSessionID);
                             verificationStore.forget(deletedSessionID);
                             backgroundSessions.delete(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
-                            toastNotifier.clear?.(deletedSessionID);
-                            clearInterventionSnapshot(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
                             forgetGuardianProvenance(deletedSessionID);
                             provenanceSessions.delete(deletedSessionID);
                         }
                         continue;
                     }
+                    if (eventData.type === "session.execution.failed" ||
+                        eventData.type === "session.execution.interrupted") {
+                        const failedSessionID = extractEventSessionID();
+                        if (failedSessionID) {
+                            idleQueue.forget(failedSessionID);
+                            backgroundSessions.delete(failedSessionID);
+                            releaseRemediationLeaseForSession(failedSessionID);
+                        }
+                        continue;
+                    }
                     if (eventData.type === "session.permissions") {
-                        const permissionSessionID = eventData.data?.sessionID;
+                        const permissionSessionID = extractEventSessionID();
                         if (permissionSessionID) {
                             clearAgentCapability(permissionSessionID);
-                            if (Array.isArray(eventData.data?.permissions)) {
-                                cacheV2SessionPermissions(permissionSessionID, eventData.data.permissions);
+                            const perms = eventData.data?.permissions ?? eventData.properties?.permissions;
+                            if (Array.isArray(perms)) {
+                                cacheV2SessionPermissions(permissionSessionID, perms);
                             }
                         }
                         continue;
                     }
                     if (eventData.type === "session.agent.selected") {
-                        if (eventData.data?.sessionID) {
-                            clearAgentCapability(eventData.data.sessionID);
+                        const selectedSessionID = extractEventSessionID();
+                        if (selectedSessionID) {
+                            clearAgentCapability(selectedSessionID);
                         }
                         continue;
                     }
                     if (eventData.type === "session.moved") {
-                        const movedSessionID = eventData.data?.sessionID;
+                        const movedSessionID = extractEventSessionID();
                         if (movedSessionID) {
                             idleQueue.forget(movedSessionID);
+                            streamWatcher.forget(movedSessionID);
+                            releaseRemediationLeaseForSession(movedSessionID);
+                            toastNotifier.clear?.(movedSessionID);
+                            clearInterventionSnapshot(movedSessionID);
                             forgetSessionRuntime(movedSessionID);
-                            const movedDirectory = eventData.data?.location?.directory ?? eventData.location?.directory;
+                            const movedDirectory = eventPayload?.location?.directory ?? eventData.location?.directory;
                             if (typeof movedDirectory === "string" && movedDirectory.trim()) {
                                 rememberSessionDirectory(movedSessionID, movedDirectory);
                             }
@@ -1658,8 +1852,6 @@ const setup = async (context) => {
                             backgroundSessions.delete(movedSessionID);
                             contracts.delete(movedSessionID);
                             foregroundHandoffs.delete(movedSessionID);
-                            toastNotifier.clear?.(movedSessionID);
-                            clearInterventionSnapshot(movedSessionID);
                             clearAgentCapability(movedSessionID);
                             forgetGuardianProvenance(movedSessionID);
                             provenanceSessions.delete(movedSessionID);
@@ -1678,16 +1870,19 @@ const setup = async (context) => {
                     }
                     const idleEvent = eventData.type === "session.idle" ||
                         (eventData.type === "session.status" &&
-                            eventData.data?.status?.type === "idle");
+                            (eventData.data?.status?.type ?? eventData.properties?.status?.type) === "idle");
                     if (!idleEvent)
                         continue;
-                    const sessionID = eventData.data?.sessionID;
+                    const sessionID = extractEventSessionID();
                     if (!sessionID)
                         continue;
+                    foregroundHandoffs.delete(sessionID);
                     idleQueue.enqueue(sessionID, async (idleSignal) => {
+                        foregroundHandoffs.delete(sessionID);
                         let activeDirectory = await resolveSessionDirectory(sessionID);
                         let sessionIsSubagent;
                         let sessionParentID;
+                        let sessionAgentName;
                         try {
                             if (typeof context.session.get === "function") {
                                 const session = await context.session.get({ sessionID });
@@ -1698,6 +1893,10 @@ const setup = async (context) => {
                                         : undefined;
                                 const isForkedSession = Boolean(session.fork && typeof session.fork === "object");
                                 sessionIsSubagent = Boolean(sessionParentID) && !isForkedSession;
+                                const rawAgent = session.agent;
+                                if (typeof rawAgent === "string" && rawAgent.trim().length > 0) {
+                                    sessionAgentName = rawAgent.trim();
+                                }
                             }
                         }
                         catch {
@@ -1712,9 +1911,11 @@ const setup = async (context) => {
                         if (backgroundSessions.has(sessionID)) {
                             return;
                         }
+                        let fetchedNormalizedMessages;
                         await handleSessionIdle(sessionID, activeDirectory, async () => {
                             const messages = await context.session.context({ sessionID });
                             const normalized = normalizeV2Messages(messages, sessionID);
+                            fetchedNormalizedMessages = normalized;
                             const contract = extractTaskContract(normalized);
                             if (contract)
                                 setSessionContract(sessionID, contract);
@@ -1733,14 +1934,14 @@ const setup = async (context) => {
                                 delivery: "queue",
                                 resume: true,
                             });
-                        }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, sessionIsSubagent
+                        }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, (sessionIsSubagent ?? true)
                             ? async () => {
                                 const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
                                 if (meshProfile && meshProfile.capability !== "unknown") {
                                     const resolved = {
                                         capability: meshProfile.capability,
                                         evidence: {
-                                            agentName: meshProfile.agentName,
+                                            agentName: meshProfile.agentName ?? sessionAgentName,
                                             reasons: [`mesh:${meshProfile.managedBy}`],
                                         },
                                     };
@@ -1751,16 +1952,19 @@ const setup = async (context) => {
                                 const cached = getCachedAgentCapability(sessionID);
                                 if (cached)
                                     return cached;
-                                let agentName;
-                                try {
-                                    const msgs = await context.session.context({ sessionID });
-                                    const normalized = normalizeV2Messages(msgs, sessionID);
-                                    agentName = extractAgentNameFromMessages(normalized);
+                                let agentName = sessionAgentName;
+                                if (!agentName) {
+                                    try {
+                                        const normalized = fetchedNormalizedMessages ??
+                                            normalizeV2Messages(await context.session.context({ sessionID }), sessionID);
+                                        agentName = extractAgentNameFromMessages(normalized);
+                                    }
+                                    catch { }
                                 }
-                                catch { }
                                 const p = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
-                                if (!idleSignal.aborted)
+                                if (!idleSignal.aborted && p.capability !== "unknown") {
                                     cacheAgentCapability(sessionID, p);
+                                }
                                 return p;
                             }
                             : undefined, toastNotifier);
@@ -1838,6 +2042,9 @@ const setup = async (context) => {
         controller.abort();
         streamWatcher.clear();
         await streamWatcher.drain();
+        for (const sessionID of Array.from(activeRemediationLeases.keys())) {
+            releaseRemediationLeaseForSession(sessionID);
+        }
         contracts.clear();
         verificationStore.clear();
         foregroundHandoffs.clear();

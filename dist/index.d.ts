@@ -36,7 +36,7 @@ export * from "./toast.js";
 export * from "./intervention.js";
 export * from "./intervention-rpc.js";
 export * from "./provenance.js";
-export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
+export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, setActiveMeshHandoff, getActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, clearActiveMeshHandoff, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
 /**
  * Converts OpenCode v2 session.context() records into the stable internal
  * message shape consumed by the rules and engine.

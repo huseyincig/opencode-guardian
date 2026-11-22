@@ -47,7 +47,7 @@ export const TEST_CHEAT_PATTERNS: { regex: RegExp; name: string; alwaysBlock?: b
     name: "@unittest.skip decorator (Python)",
   },
   {
-    regex: /\bt\.Skip(?:f|now)?\s*\(/,
+    regex: /\bt\.Skip(?:f|Now|now)?\s*\(/,
     name: "t.Skip() call (Go)",
   },
   {
@@ -356,7 +356,9 @@ export const noCheatRule: GuardRule = {
       if (!authorizedTestModification) return false;
       // A prohibition ("do not skip") is never an authorization to skip.
       if (isTestBypassProhibited(userInstruction)) return false;
-      const namedFile = / in ([\w./-]+\.(?:test|spec)\.[a-z]+)/iu.exec(finding.description)?.[1];
+      const namedFile =
+        finding.filePath ??
+        / in ([\w./-]+\.(?:test|spec)\.[a-z]+)/iu.exec(finding.description)?.[1];
       const requestedFiles = userInstruction.match(/[\w./-]+\.(?:test|spec)\.[a-z]+/giu) ?? [];
       if (namedFile && requestedFiles.length &&
           !requestedFiles.some((requested) => namedFile.toLowerCase().endsWith(requested.toLowerCase()))) return false;

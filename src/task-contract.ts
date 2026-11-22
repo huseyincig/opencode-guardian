@@ -5,6 +5,7 @@ import {
   isExploratoryPrompt,
   sanitizeUserInstruction,
 } from "./locale-intents.js";
+import { isTrustedMeshMessage } from "./bridge.js";
 export { isExploratoryPrompt } from "./locale-intents.js";
 
 /** Explicit user requirements only. No LLM classification or inferred goals. */
@@ -20,13 +21,15 @@ export interface TaskContract {
 }
 
 function userText(message: SessionMessage): string {
+  if (isTrustedMeshMessage(message)) return "";
   return message.parts
     .filter(
       (part) =>
         part.type === "text" &&
         typeof part.text === "string" &&
         part.synthetic !== true &&
-        part.ignored !== true
+        part.ignored !== true &&
+        !isTrustedMeshMessage(part)
     )
     .map((part) => part.text ?? "")
     .join("\n");

@@ -69,6 +69,20 @@ const DEPS_CACHE = new Map<
   { timestamp: number; deps: Set<string> | null; manifestPath: string; revision: string; files: string[] }
 >();
 const CACHE_TTL_MS = 5000;
+const MAX_DEPS_CACHE_ENTRIES = 128;
+
+function setDepsCache(
+  key: string,
+  value: { timestamp: number; deps: Set<string> | null; manifestPath: string; revision: string; files: string[] }
+): void {
+  if (DEPS_CACHE.has(key)) DEPS_CACHE.delete(key);
+  DEPS_CACHE.set(key, value);
+  while (DEPS_CACHE.size > MAX_DEPS_CACHE_ENTRIES) {
+    const oldest = DEPS_CACHE.keys().next().value;
+    if (oldest === undefined) break;
+    DEPS_CACHE.delete(oldest);
+  }
+}
 
 /** Cache only while the actual manifest files have not changed. */
 function filesRevision(files: string[]): string {
@@ -159,7 +173,7 @@ function loadNodeDependencies(directory: string, productionOnly = false): Set<st
     const pkg = JSON.parse(fs.readFileSync(manifest.path, "utf8"));
     const result = pkg && typeof pkg === "object" && !Array.isArray(pkg)
       ? dependenciesFromPackage(pkg as Record<string, unknown>, productionOnly) : null;
-    DEPS_CACHE.set(cacheKey, { timestamp: now, deps: result, manifestPath: manifest.path, revision, files });
+    setDepsCache(cacheKey, { timestamp: now, deps: result, manifestPath: manifest.path, revision, files });
     return result;
   } catch {
     DEPS_CACHE.delete(cacheKey);
@@ -371,7 +385,7 @@ function loadPythonDependencies(
       )) deps.add(dep);
     }
     files.push(...seen);
-    DEPS_CACHE.set(cacheKey, {
+    setDepsCache(cacheKey, {
       timestamp: now, deps, manifestPath: manifest.path,
       revision: filesRevision(files), files,
     });

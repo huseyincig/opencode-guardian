@@ -48,7 +48,15 @@ export function splitShellStages(command: string): string[][] {
         pushStage();
         continue;
       }
-      if (ch === ";" || ch === "\n" || ch === "&" || (ch === "|" && command[i + 1] === "|")) {
+      const isRedirectionAmpersand =
+        ch === "&" &&
+        (command[i - 1] === ">" ||
+          command[i - 1] === "<" ||
+          (command[i + 1] === ">" && command[i - 1] !== "&"));
+      if (
+        !isRedirectionAmpersand &&
+        (ch === ";" || ch === "\n" || ch === "&" || (ch === "|" && command[i + 1] === "|"))
+      ) {
         pushPipeline();
         if ((ch === "&" || ch === "|") && command[i + 1] === ch) i++;
         continue;
@@ -68,6 +76,8 @@ export function shellCommandVariants(command: string): string[] {
       .replace(/\\([A-Za-z])/g, "$1")
       // A literal IFS expansion can separate shell arguments.
       .replace(/\$\{IFS\}|\$IFS(?=[^A-Za-z0-9_]|$)/g, " ")
+      // Strip inline file-descriptor duplication/redirections so e.g. 'git 2>&1 reset --hard' matches.
+      .replace(/(?:^|\s)(?:\d*>&\d+|\d*<&\d+)(?=\s|$)/g, " ")
       // Only resolve a known literal command name, not arbitrary substitutions.
       .replace(/\$\(\s*(?:echo|printf(?:\s+%s)?)\s+(?:(["'])rm\1|rm)\s*\)/gi, "rm");
     // A literal backtick substitution in command position supplies the
@@ -225,7 +235,7 @@ export function hasFindDeletion(command: string): boolean {
 export function isOpaqueShellExecution(command: string): boolean {
   if (
     splitShellStages(command).flat().some((stage) =>
-      /^\s*(?:powershell|pwsh)(?:\.exe)?\b[\s\S]*?\s-(?:encodedcommand|enc)\b/i.test(stage)
+      /^\s*(?:powershell|pwsh)(?:\.exe)?\b[\s\S]*?\s-(?:encodedcommand|enc|ec|e)\b/i.test(stage)
     )
   ) {
     return true;

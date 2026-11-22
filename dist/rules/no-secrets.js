@@ -4,7 +4,7 @@ export const SECRET_PATTERNS = [
     // Clone regex instances so write scans cannot alter output redaction state.
     ...KNOWN_CREDENTIAL_PATTERNS.map(({ name, regex }) => ({ name, regex: new RegExp(regex.source, regex.flags) })),
     { regex: /-----BEGIN\s+(?:RSA\s+|OPENSSH\s+|EC\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----/, name: "Private Key Header (PEM/SSH)" },
-    { regex: /\b(?:postgres|mysql|mongodb(?:\+srv)?):\/\/[^:\s'"]+:([^@\s'"]+)@[a-zA-Z0-9.-]+(?::[0-9]+)?\/[a-zA-Z0-9_.-]+/, name: "Database Connection String with Password" },
+    { regex: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?|mssql):\/\/[^:\s'"]*:(?!\/\/)([^@\s'"]+)@[a-zA-Z0-9.-]+(?::[0-9]+)?(?:\/[a-zA-Z0-9_.-]*)?/, name: "Database Connection String with Password" },
     { regex: /\b(?:_authToken|npmAuthToken)\s*=\s*["']?([A-Za-z0-9._~-]{20,})["']?/i, name: "npm Registry Auth Token" },
     { regex: /\bAuthorization\s*[:=]\s*["']?Bearer\s+([A-Za-z0-9._~-]{24,})["']?/i, name: "Bearer Authorization Token" },
 ];
@@ -86,8 +86,14 @@ export const noSecretsRule = {
     description: "Detects hardcoded secrets, API keys, credentials, and connection strings in code modifications.",
     inspect: (context) => {
         const findings = [];
-        const seen = new Set();
+        const seenByFile = new Map();
         const checkCode = (code, filePath, source = "file") => {
+            const scopeKey = filePath ?? source;
+            let seen = seenByFile.get(scopeKey);
+            if (!seen) {
+                seen = new Set();
+                seenByFile.set(scopeKey, seen);
+            }
             const detected = findAllSecretsInCode(code, filePath, seen);
             for (const item of detected) {
                 findings.push({

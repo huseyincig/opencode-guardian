@@ -1,10 +1,7 @@
-import { Rpc } from "@opencode/plugin/rpc";
 export const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
 export const GUARDIAN_INTERVENTION_RPC_METHOD = "latest";
 export const GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD = "clear";
-const defineRpc = typeof Rpc?.define === "function"
-    ? Rpc.define
-    : (definition) => definition;
+const defineRpc = (definition) => definition;
 export const GUARDIAN_INTERVENTION_RPC_DEFINITION = defineRpc({
     id: GUARDIAN_INTERVENTION_RPC_ID,
     methods: {

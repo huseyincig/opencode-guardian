@@ -1,10 +1,10 @@
 # OpenCode V2 Acceptance Result
 
-## v0.16.1 Live OpenCode v2.3.2 + Bun 1.4.4 Host Acceptance
+## v0.16.2 Live OpenCode v2.3.2 + Bun 1.4.4 Host Acceptance
 
 > **Verification Date:** 22 November 2026  
 > **Host Environment:** OpenCode `v2.3.2` (`/usr/local/bin/opencode`), Node `v26.13.1`, Bun `1.4.4`, Linux x86_64  
-> **Plugin Under Test:** `opencode-guardian@0.16.1` (Pure OpenCode V2)  
+> **Plugin Under Test:** `opencode-guardian@0.16.2` (Pure OpenCode V2)  
 > **Acceptance Script:** [`sandbox/v2-live-acceptance.mjs`](../sandbox/v2-live-acceptance.mjs)  
 > **Result:** **10 / 10 CHECKS PASS — ZERO DEFECTS**
 

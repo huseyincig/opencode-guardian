@@ -41,7 +41,7 @@ export const instructionFidelityRule: GuardRule = {
       .join("\n") ?? "";
     const prose = sanitizeProseForInspection(assistant);
 
-    const observableWork = context.evidence?.records.some(
+    const observableWork = evidence.records.some(
       (record) =>
         record.status === "success" &&
         [

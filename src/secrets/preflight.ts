@@ -1,9 +1,10 @@
 import type { PreflightAssessment } from './types.js';
+import { splitShellStages } from '../shell-risk.js';
 
 const HIGH_RISK_COMMAND_PATTERNS: { category: 'docker-env' | 'printenv' | 'systemctl-env' | 'docker-inspect'; regex: RegExp; advisory: string }[] = [
   {
     category: 'docker-env',
-    regex: /\bdocker(?:\.exe)?\s+exec\b.*?\s+(?:env|printenv)\b/i,
+    regex: /^\s*(?:sudo\s+)?docker(?:\.exe)?\s+exec\b.*?\s+(?:env|printenv)\b/i,
     advisory: 'Broad container environment dump detected (docker exec ... env).',
   },
   {
@@ -13,12 +14,12 @@ const HIGH_RISK_COMMAND_PATTERNS: { category: 'docker-env' | 'printenv' | 'syste
   },
   {
     category: 'docker-inspect',
-    regex: /\bdocker(?:\.exe)?\s+inspect\b/i,
+    regex: /^\s*(?:sudo\s+)?docker(?:\.exe)?\s+inspect\b/i,
     advisory: 'Docker inspect command may dump container environment variables.',
   },
   {
     category: 'systemctl-env',
-    regex: /\bsystemctl\s+show\b.*?\b(?:Environment|EnvironmentFiles)\b/i,
+    regex: /^\s*(?:sudo\s+)?systemctl\s+show\b.*?\b(?:Environment|EnvironmentFiles)\b/i,
     advisory: 'Systemctl service environment dump detected.',
   },
 ];
@@ -32,14 +33,18 @@ export function assessCommandPreflight(command: unknown): PreflightAssessment {
   }
 
   const trimmed = command.trim();
-  for (const item of HIGH_RISK_COMMAND_PATTERNS) {
-    if (item.regex.test(trimmed)) {
-      return {
-        isHighRiskEnvDump: true,
-        command: trimmed,
-        category: item.category,
-        advisory: item.advisory,
-      };
+  const stages = splitShellStages(trimmed).flat();
+  const candidates = stages.length > 0 ? stages : [trimmed];
+  for (const stage of candidates) {
+    for (const item of HIGH_RISK_COMMAND_PATTERNS) {
+      if (item.regex.test(stage)) {
+        return {
+          isHighRiskEnvDump: true,
+          command: trimmed,
+          category: item.category,
+          advisory: item.advisory,
+        };
+      }
     }
   }
 

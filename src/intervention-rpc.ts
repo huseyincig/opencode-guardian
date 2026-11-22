@@ -1,14 +1,11 @@
-import { Rpc } from "@opencode/plugin/rpc";
+import type { Rpc } from "@opencode/plugin/rpc";
 import type { GuardianToastPayload } from "./toast.js";
 
 export const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
 export const GUARDIAN_INTERVENTION_RPC_METHOD = "latest";
 export const GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD = "clear";
 
-const defineRpc =
-  typeof Rpc?.define === "function"
-    ? Rpc.define
-    : <T extends Rpc.Definition>(definition: T): T => definition;
+const defineRpc = <T extends Rpc.Definition>(definition: T): T => definition;
 
 export const GUARDIAN_INTERVENTION_RPC_DEFINITION = defineRpc({
   id: GUARDIAN_INTERVENTION_RPC_ID,

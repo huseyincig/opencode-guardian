@@ -1,11 +1,15 @@
 import { deniedVerification, extractAdvisoryTaskSignals, isExploratoryPrompt, sanitizeUserInstruction, } from "./locale-intents.js";
+import { isTrustedMeshMessage } from "./bridge.js";
 export { isExploratoryPrompt } from "./locale-intents.js";
 function userText(message) {
+    if (isTrustedMeshMessage(message))
+        return "";
     return message.parts
         .filter((part) => part.type === "text" &&
         typeof part.text === "string" &&
         part.synthetic !== true &&
-        part.ignored !== true)
+        part.ignored !== true &&
+        !isTrustedMeshMessage(part))
         .map((part) => part.text ?? "")
         .join("\n");
 }

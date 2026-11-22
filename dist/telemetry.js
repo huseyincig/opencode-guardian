@@ -296,7 +296,8 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
                 let source = buffer.toString("utf8", 0, read);
                 if (start > 0) {
                     result.truncated = true;
-                    source = source.slice(source.indexOf("\n") + 1);
+                    const nl = source.indexOf("\n");
+                    source = nl >= 0 ? source.slice(nl + 1) : "";
                 }
                 buffers.unshift(source);
                 maxBytes -= read;
@@ -384,8 +385,10 @@ export function readGuardianActivity(directory, limit = 12) {
             const buffer = Buffer.alloc(stat.size - start);
             const size = fs.readSync(fd, buffer, 0, buffer.length, start);
             let raw = buffer.toString("utf8", 0, size);
-            if (start > 0)
-                raw = raw.slice(raw.indexOf("\n") + 1);
+            if (start > 0) {
+                const nl = raw.indexOf("\n");
+                raw = nl >= 0 ? raw.slice(nl + 1) : "";
+            }
             for (const line of raw.split("\n")) {
                 if (!line)
                     continue;

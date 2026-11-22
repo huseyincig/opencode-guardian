@@ -1,6 +1,6 @@
 {
   "name": "opencode-guardian",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Autonomous quality, discipline, and runtime security guardian plugin for OpenCode V2 AI agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,11 +42,13 @@
     "opencode",
     "opencode-plugin",
     "opencode-guardian",
+    "ai-agents",
     "guardian",
     "guard",
     "linter",
     "code-quality",
     "safety",
+    "security",
     "guardrails"
   ],
   "author": "Hüseyin Hadi Çığ",

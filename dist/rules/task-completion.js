@@ -127,13 +127,22 @@ export const taskCompletionRule = {
             const resolvesFailure = (failure, later) => {
                 if (later.sequence <= failure.sequence || later.status !== "success")
                     return false;
-                if (later.kind !== failure.kind)
-                    return false;
                 if (failure.kind === "file-mutation") {
-                    return Boolean(failure.filePath &&
+                    return Boolean(later.kind === "file-mutation" &&
+                        failure.filePath &&
                         later.filePath &&
                         failure.filePath === later.filePath);
                 }
+                if (failure.kind === "generic" && !failure.command) {
+                    const siblingMutations = evidence.fileMutations.filter((m) => m.sequence === failure.sequence && m.filePath);
+                    if (siblingMutations.length > 0) {
+                        return siblingMutations.every((m) => evidence.fileMutations.some((succ) => succ.sequence > failure.sequence &&
+                            succ.status === "success" &&
+                            succ.filePath === m.filePath));
+                    }
+                }
+                if (later.kind !== failure.kind)
+                    return false;
                 if (failure.command || later.command) {
                     return Boolean(failure.command &&
                         later.command &&

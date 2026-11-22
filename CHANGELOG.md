@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.16.2 — 2026-11-22
+
+- **TUI Banner Lifecycle & Polling Precision (`src/tui.tsx`):**
+  - Preserved local TTL expiration and click-to-dismiss state across 500ms `guardian.interventions.current` RPC polling so expired or dismissed banners are never resurrected or have their TTL reset.
+- **V2 Mesh, Idle & Remediation Lifecycle Hardening (`src/index.ts`, `src/bridge.ts`, `src/engine.ts`):**
+  - Prevented paired V2 idle events (`session.status: idle` + `session.idle`) from clearing active remediation leases or mesh interventions, keeping `active_remediation` leases active across the remediation turn and releasing them on pass, new human prompt, failure, or teardown.
+  - Ensured `remediationStatus: "verified"` followed by a new post-warning on the same turn still clears cleanly on the next human prompt.
+  - Kept `question_presented` handoffs waiting for a real user reply without falling through to re-block, consumed the handoff on user reply, and ignored trusted mesh messages during `question_presented`.
+  - Filtered lazy skill tags and trusted mesh messages out of task contract extraction and destructive command authorization.
+  - Cleared preflight-blocked interventions on allowed follow-up tools or RPC clear, preserved `[TASK OUTCOME]` in subagent `execute.after`, and avoided caching unknown agent capabilities.
+- **V2 Hooks, Shell Creation & Code Mode Visibility (`src/index.ts`):**
+  - Updated `shell.hook("create.before")` to resolve `env.OPENCODE_SESSION_ID` and prevent scope bypass via `cwd: "/tmp"`.
+  - Ignored descendant-owned background jobs in `experimental.idle`, detected `v2.3.1` timed-out-to-background shells in `hasUnfinishedBackgroundTool`, preserved `callID`, `output`, `error`, and non-zero `exitCode` in Code Mode `execute` nested `toolCalls`, and preferred `meta.command` over `description` for synthetic shell normalization.
+- **Preflight, Sanitizer & Rule Precision:**
+  - Fixed `splitShellStages` so `2>&1` redirections are not split, and blocked `git 2>&1 reset --hard`, PowerShell `-ec`, and multi-stage `true && printenv` in `evaluatePreflight`.
+  - Allowed deletion-only patches and respected per-file markdown exemptions in `apply_patch` preflight; prevented Rust lifetimes from masking stubs or truncation.
+  - Handled circular references, preserved `Error` subclasses and `Date` instances, protected valid mesh tokens, and redacted forged mesh tokens in JSON strings in `sanitizeObject` / `sanitizeMessages`.
+  - Fixed edit-resolution false positives (`unresolved generic failure`), checked every stage of multi-stage destructive command authorization, avoided `'no changes to public API'` false positives under research-only constraints, reported all multi-file secrets, added Go `t.SkipNow()` detection and file-scoped deletion authorization in `testing/no-cheat`, checked subsequent matches in `no-evasion`, and resolved default severity for option-only rule overrides in `guardianCommandReport("rules")`.
+- **Verification:**
+  - Added 12 deep-debug regression tests in `tests/superpowers-deep-debug.test.mjs` and 4 mesh audit tests in `tests/mesh-audit-fixes.test.mjs` (**806 / 806** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 113 files).
+
 ## 0.16.1 — 2026-11-22
 
 - **TUI Conversation Intervention Banner (`session.composer.top`) Lifecycle & Dismissal Fix:**

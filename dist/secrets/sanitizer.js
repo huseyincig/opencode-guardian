@@ -53,7 +53,11 @@ function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findi
         const key = envMatch[2] ?? '';
         const eq = envMatch[3] ?? '';
         const rawVal = envMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys, safeKeyNames) && !safeValues?.has(stripQuotes(rawVal))) {
+        const unquotedEnvVal = stripQuotes(rawVal);
+        if (unquotedEnvVal.trim().length > 0 &&
+            unquotedEnvVal !== replacement &&
+            isSensitiveKey(key, customKeys, safeKeyNames) &&
+            !safeValues?.has(unquotedEnvVal)) {
             findings.push({ kind: 'key-value', category: 'env-assignment', keyName: key });
             // Preserve quotes if present
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
@@ -71,7 +75,11 @@ function sanitizeKeyValueLine(line, replacement, customKeys, safeKeyNames, findi
         const key = yamlMatch[2] ?? '';
         const colon = yamlMatch[3] ?? '';
         const rawVal = yamlMatch[4] ?? '';
-        if (isSensitiveKey(key, customKeys, safeKeyNames) && !safeValues?.has(stripQuotes(rawVal))) {
+        const unquotedYamlVal = stripQuotes(rawVal);
+        if (unquotedYamlVal.trim().length > 0 &&
+            unquotedYamlVal !== replacement &&
+            isSensitiveKey(key, customKeys, safeKeyNames) &&
+            !safeValues?.has(unquotedYamlVal)) {
             findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: key });
             if ((rawVal.startsWith('"') && rawVal.endsWith('"')) ||
                 (rawVal.startsWith("'") && rawVal.endsWith("'"))) {
@@ -121,7 +129,16 @@ export function sanitizeString(text, options = {}) {
         let result = text;
         // Credential context is meaningful even when a query value has no known
         // token format and is not registered as a runtime literal.
-        result = result.replace(/([?&])([^=&#\s]+)=([^&#\s]*)/g, (match, lead, key) => {
+        result = result.replace(/([?&])([^=&#\s]+)=([^&#\s]*)/g, (match, lead, key, val) => {
+            if (!val || val === replacement)
+                return match;
+            let decodedVal = val;
+            try {
+                decodedVal = decodeURIComponent(val.replace(/\+/g, " "));
+            }
+            catch { }
+            if (safeValueSet?.has(val) || safeValueSet?.has(decodedVal))
+                return match;
             let decoded;
             try {
                 decoded = decodeURIComponent(key.replace(/\+/g, " "));
@@ -259,13 +276,15 @@ export function sanitizeString(text, options = {}) {
         };
     }
 }
+const UUID_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * Recursively sanitizes JavaScript objects, arrays, and Error instances.
  */
-export function sanitizeObject(data, options = {}) {
+export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = false) {
     const replacement = options.replacement ?? DEFAULT_REPLACEMENT;
     const findings = [];
     let redactedCount = 0;
+    const seenObjects = new WeakMap();
     try {
         function propertyValue(key, value, insideMeshEnvelope = false) {
             if (value === null ||
@@ -275,10 +294,14 @@ export function sanitizeObject(data, options = {}) {
                 value === '') {
                 return value;
             }
-            if (typeof value === 'string' && options.safeValues?.includes(value)) {
+            if (typeof value === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(value)) {
                 return value;
             }
-            if (!(insideMeshEnvelope && key === 'token') &&
+            const isValidMeshUuidToken = insideMeshEnvelope &&
+                key === 'token' &&
+                typeof value === 'string' &&
+                UUID_TOKEN_REGEX.test(value);
+            if (!isValidMeshUuidToken &&
                 isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
                 redactedCount++;
                 findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
@@ -301,8 +324,27 @@ export function sanitizeObject(data, options = {}) {
                 }
                 return res.sanitized;
             }
+            if (typeof val === 'object') {
+                if (seenObjects.has(val)) {
+                    return seenObjects.get(val);
+                }
+            }
+            if (val instanceof Date) {
+                return new Date(val.getTime());
+            }
+            if (val instanceof RegExp) {
+                return new RegExp(val.source, val.flags);
+            }
             if (val instanceof Error) {
                 const output = new Error();
+                const errProto = Object.getPrototypeOf(val);
+                if (errProto && errProto !== Error.prototype) {
+                    try {
+                        Object.setPrototypeOf(output, errProto);
+                    }
+                    catch { }
+                }
+                seenObjects.set(val, output);
                 // Error.cause and AggregateError.errors are non-enumerable. Inspect
                 // every own property, including provider metadata, at the same boundary.
                 for (const key of new Set(['name', ...Object.getOwnPropertyNames(val)])) {
@@ -320,11 +362,21 @@ export function sanitizeObject(data, options = {}) {
                 return val;
             }
             if (Array.isArray(val)) {
-                return val.map((item) => recurse(item));
+                const arrOut = [];
+                seenObjects.set(val, arrOut);
+                for (const item of val) {
+                    arrOut.push(recurse(item));
+                }
+                return arrOut;
             }
             if (typeof val === 'object') {
                 const proto = Object.getPrototypeOf(val);
-                const output = proto && proto !== Object.prototype ? Object.create(proto) : {};
+                const output = proto === null
+                    ? Object.create(null)
+                    : proto !== Object.prototype
+                        ? Object.create(proto)
+                        : {};
+                seenObjects.set(val, output);
                 for (const [k, v] of Object.entries(val)) {
                     Object.defineProperty(output, k, {
                         value: propertyValue(k, v, insideMeshEnvelope), enumerable: true, writable: true, configurable: true,
@@ -334,7 +386,7 @@ export function sanitizeObject(data, options = {}) {
             }
             return val;
         }
-        const sanitized = recurse(data);
+        const sanitized = recurse(data, rootInsideMeshEnvelope);
         return { sanitized, redactedCount, findings };
     }
     catch (err) {
@@ -428,11 +480,11 @@ export function sanitizeMessages(messages, options = {}) {
                 for (const [k, v] of Object.entries(msgObj)) {
                     if (k === 'parts')
                         continue;
-                    const sanitizedVal = typeof v === 'string' && options.safeValues?.includes(v)
+                    const sanitizedVal = typeof v === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(v)
                         ? v
                         : isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
                             ? (options.replacement ?? DEFAULT_REPLACEMENT)
-                            : sanitizeObject(v, options).sanitized;
+                            : sanitizeObject(v, options, k === 'opencode-mesh').sanitized;
                     Object.defineProperty(clonedMsg, k, {
                         value: sanitizedVal,
                         enumerable: true,

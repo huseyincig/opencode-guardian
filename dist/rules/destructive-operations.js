@@ -427,7 +427,14 @@ export const destructiveOperationsRule = {
                 const simpleRemoval = isSimpleFileRemoval(command);
                 if (!destructive && !opaque && !simpleRemoval)
                     continue;
-                if ((destructive || simpleRemoval) && !opaque && explicitlyAuthorized(request, command))
+                const stages = splitShellStages(command).flat();
+                const destructiveStages = stages.filter((stage) => isDestructiveCommand(stage) || isSimpleFileRemoval(stage));
+                const allStagesAuthorized = (destructive || simpleRemoval) &&
+                    !opaque &&
+                    explicitlyAuthorized(request, command) &&
+                    (destructiveStages.length <= 1 ||
+                        destructiveStages.every((stage) => explicitlyAuthorized(request, stage)));
+                if (allStagesAuthorized)
                     continue;
                 findings.push({
                     ruleId: "safety/destructive-operations",

@@ -14,6 +14,7 @@ export function maskCodeLiterals(source, keepComments = false, filePath) {
         }
     };
     const javascript = /\.[cm]?[jt]sx?$/i.test(filePath ?? "");
+    const rust = /\.rs$/i.test(filePath ?? "");
     let i = 0;
     const quoted = (quote) => {
         const triple = quote !== "`" && source.slice(i, i + 3) === quote.repeat(3);
@@ -36,6 +37,10 @@ export function maskCodeLiterals(source, keepComments = false, filePath) {
         let braces = 0;
         while (i < source.length) {
             const ch = source[i];
+            if (ch === "'" && rust && /^'[A-Za-z_][A-Za-z0-9_]*(?!')/.test(source.slice(i))) {
+                i++;
+                continue;
+            }
             if (ch === "'" || ch === '"') {
                 quoted(ch);
                 continue;

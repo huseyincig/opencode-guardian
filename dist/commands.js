@@ -92,8 +92,10 @@ export async function guardianCommandReport(command, directory, installedVersion
                 title: "Guardian: Rules",
                 message: Object.keys(BUILTIN_RULES).map((id) => {
                     const entry = config.rules?.[id] ?? DEFAULT_CONFIG.rules?.[id];
+                    const defaultEntry = DEFAULT_CONFIG.rules?.[id];
+                    const defaultSeverity = typeof defaultEntry === "string" ? defaultEntry : defaultEntry?.severity;
                     const severity = typeof entry === "string" ? entry :
-                        entry?.severity ?? "built-in default";
+                        entry?.severity ?? defaultSeverity ?? "built-in default";
                     return id + ": " + severity;
                 }).join("\n"),
             };

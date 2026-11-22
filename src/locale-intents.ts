@@ -165,6 +165,8 @@ const LOCALES: readonly LocaleSignals[] = [
 /** Examples, code and quoted commands do not create new task duties. */
 export function sanitizeUserInstruction(text: string): string {
   return text
+    .replace(/<lazy_bound_skill\b[\s\S]*?<\/lazy_bound_skill>/gi, " ")
+    .replace(/<lazy_skill_suggestions\b[\s\S]*?<\/lazy_skill_suggestions>/gi, " ")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/\x60[^\x60\n]+\x60/g, " ")
     .replace(/^\s*>[^\n]*$/gm, " ")

@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { checkGuardianUpdate } from "./version-notice.js";
-import { guardianEventPath, readGuardianActivity, readGuardianStatus, resetGuardianStatistics } from "./telemetry.js";
+import { guardianEventPath, readGuardianActivity, readGuardianStatus, resetGuardianStatistics, resolveTelemetrySettings } from "./telemetry.js";
 export const GUARDIAN_COMMANDS = [
     { id: "status", title: "Guardian: Status", description: "Project statistics and remediation outcomes" },
     { id: "activity", title: "Guardian: Activity", description: "Recent redacted security and quality events" },
@@ -25,12 +25,18 @@ export async function guardianCommandReport(command, directory, installedVersion
             }
             const popular = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
                 .map(([rule, count]) => rule + " (" + count + ")").join(", ");
+            const telem = resolveTelemetrySettings(directory);
+            const modeDesc = telem.level === "violations"
+                ? "violations (clean turns omit disk I/O)"
+                : telem.level;
             return {
                 title: "Guardian: Project Status",
                 message: [
                     "Preflight (last start): " + status.preflight,
+                    "Telemetry mode: " + modeDesc,
                     "Inspections (tool + turn): " + status.inspected,
                     "Blocked tools (preflight): " + status.blocked,
+                    "Secret redactions (in-memory): " + (status.redacted ?? 0),
                     "Warnings: " + status.warnings,
                     "Remediation requests: " + status.remediations,
                     "Verified / failed / unverified: " +
@@ -108,12 +114,20 @@ export async function guardianCommandReport(command, directory, installedVersion
             catch {
                 return { title: "Guardian: Configuration", message: "Configuration is invalid. No raw file contents will be displayed." };
             }
+            const preflightMode = config.preflight?.enabled === true
+                ? (config.preflight?.mode ?? "strict")
+                : "disabled";
+            const protectionMode = config.preflight?.enabled === true
+                ? (config.preflight?.mode === "critical" ? "Autonomous (Critical Preflight)" : "Autonomous (Strict)")
+                : "Autonomous (Standard)";
             return {
                 title: "Guardian: Configuration",
                 message: [
                     "Guardian: " + option(config.enabled !== false),
                     "Strict preflight: " + option(config.preflight?.enabled === true),
-                    "Protection mode: " + (config.preflight?.enabled === true ? "Autonomous (Strict)" : "Autonomous (Standard)"),
+                    "Preflight mode: " + preflightMode,
+                    "Protection mode: " + protectionMode,
+                    "Project config overrides: " + (config.allowProjectOverrides === false ? "locked" : "allowed"),
                     "Custom shell tool entries: " + (config.preflight?.shellTools?.length ?? 0),
                     "Remediation budget: " + (config.remediationBudget ?? 1),
                     "Iteration budget: " + (config.iterationBudget ?? 3),

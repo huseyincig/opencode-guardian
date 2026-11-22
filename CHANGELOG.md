@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.0 — 2026-11-23
+
+- **Frictionless `"critical"` vs `"strict"` Preflight Protection Modes (`src/preflight.ts`, `src/types.ts`, `src/index.ts`, `src/commands.ts`):**
+  - Added `preflight.mode?: "critical" | "strict"` (`"strict"` remains the default when `preflight.enabled: true` for backward compatibility).
+  - **`"critical"` Mode (`{ "preflight": { "enabled": true, "mode": "critical" } }`):** Blocks catastrophic destructive shell operations (`rm -rf`, `git reset --hard`, `git push --force`, `git clean -f`, `mkfs`, fork bombs, `DROP DATABASE`, `terraform destroy`, `kubectl delete ns`, `docker system prune -a`, `npm unpublish`, `gh repo delete`, `find -delete`), opaque decoded shell execution (`base64 -d | sh`, `powershell -enc`), dynamic command names, hardcoded secrets and truncation placeholders in file writes, and hallucinated/malformed npm packages — while allowing everyday developer actions (`rm <single-file>`, `printenv`/`env`/`docker inspect`, and short/WIP git commit messages).
+- **Global-to-Project Config Hierarchy & Untrusted Repo Downgrade Protection (`src/engine.ts`, `src/types.ts`, `src/commands.ts`):**
+  - Updated `loadConfig(directory)` to read and merge both the global configuration (`~/.config/opencode/opencode-guardian.json`, `$OPENCODE_CONFIG_DIR`, or `$XDG_CONFIG_HOME/opencode`) and the project configuration (`<project>/opencode-guardian.json` or `.opencode/opencode-guardian.json`) so project configs inherit global settings.
+  - Added `allowProjectOverrides?: boolean` to `GuardConfig`: when `"allowProjectOverrides": false` is set in the global configuration, untrusted project repositories cannot disable Guardian (`enabled: false`), disable `preflight.enabled`, downgrade `preflight.mode` from `"strict"` to `"critical"`, disable `secrets.enabled`, reduce remediation/iteration budgets, or weaken rule severities (`error` → `warn`/`off`, `warn` → `off`).
+- **In-Memory Live Telemetry Counters & `violations` Mode Transparency (`src/telemetry.ts`, `src/commands.ts`, `scripts/guardian-status.mjs`, `src/index.ts`):**
+  - Tracked per-project in-memory inspection (`inspectedSkippedDisk`) and secret redaction (`recordGuardianRedaction` / `status.redacted`) counters even when `telemetry.level === "violations"` skips disk writes for benign `preflight-allowed` and `post-inspected` events.
+  - Updated `/guardian-status` and `opencode-guardian-status` to display `Telemetry mode: violations (clean turns omit disk I/O)` and `Secret redactions (in-memory)`.
+- **Verification:**
+  - Added 3 comprehensive feature suites in `tests/v0162-deep-debug.test.mjs` (**810 / 810** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 113 files).
+
 ## 0.16.3 — 2026-11-22
 
 - **XDG State Directory Compliance (`src/telemetry.ts`):**

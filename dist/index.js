@@ -4,7 +4,7 @@ import path from "node:path";
 import { GuardEngine, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
-import { configureGuardianTelemetry, recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
+import { configureGuardianTelemetry, recordGuardianEvent, recordGuardianRedaction, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore } from "./evidence.js";
 import { createIdleQueue } from "./idle-queue.js";
@@ -866,10 +866,10 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
     }
 }
 /** Records only recognized shell/file calls and a rule code, never raw commands. */
-function inspectPreflight(tool, args, sessionID, directory, additionalTools = [], toastNotifier) {
+function inspectPreflight(tool, args, sessionID, directory, additionalTools = [], toastNotifier, mode = "strict") {
     if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool))
         return;
-    const finding = evaluatePreflight(tool, args, additionalTools);
+    const finding = evaluatePreflight(tool, args, additionalTools, mode);
     const session = sessionFingerprint(sessionID);
     const safeTool = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1);
     recordGuardianEvent({
@@ -1344,7 +1344,7 @@ const setup = async (context) => {
                         verificationStore.observeBefore(event.sessionID, event.id, event.tool, event.input, runtimeDirectory);
                     }
                     if (runtime.config.preflight?.enabled === true) {
-                        inspectPreflight(event.tool, event.input, event.sessionID, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier);
+                        inspectPreflight(event.tool, event.input, event.sessionID, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier, runtime.config.preflight?.mode ?? "strict");
                     }
                     if (canFinalizeSubagent && event.tool === "subagent") {
                         const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
@@ -1390,7 +1390,11 @@ const setup = async (context) => {
                     if (runtime.config.enabled === false)
                         return;
                     if (runtime.sanitizer && event.status === "error") {
+                        const beforeErr = JSON.stringify(event.error);
                         event.error = sanitizeV2ToolError(event.error, runtime.sanitizer);
+                        if (JSON.stringify(event.error) !== beforeErr) {
+                            recordGuardianRedaction(1, observedDirectory);
+                        }
                     }
                     if (controller.signal.aborted)
                         return;
@@ -1519,7 +1523,11 @@ const setup = async (context) => {
                     // text. Sanitize only after that rewrite so the parent never receives
                     // an unsanitized revised child result.
                     if (runtime.sanitizer && event.status === "completed") {
+                        const beforeRes = JSON.stringify(event.result);
                         event.result = sanitizeToolResult(event.result, runtime.sanitizer);
+                        if (JSON.stringify(event.result) !== beforeRes) {
+                            recordGuardianRedaction(1, observedDirectory);
+                        }
                     }
                     const result = event.status === "completed" ? event.result : undefined;
                     verificationStore.observe(event.sessionID, event.id, event.tool, input, extractV2OutputText(result?.output, result?.content), result?.metadata ?? {}, observedDirectory, event.status);
@@ -1586,7 +1594,7 @@ const setup = async (context) => {
                 if (runtime.config.enabled === false)
                     return;
                 if (runtime.config.preflight?.enabled === true) {
-                    inspectPreflight("shell", { command: eventRecord.command }, sid, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier);
+                    inspectPreflight("shell", { command: eventRecord.command }, sid, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier, runtime.config.preflight?.mode ?? "strict");
                 }
             });
             if (!shellBefore || typeof shellBefore.dispose !== "function") {

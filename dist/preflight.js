@@ -46,7 +46,7 @@ export function isProcessStartTool(tool) {
         ?? normalized.split(/[.:/]/).at(-1);
     return action === "process_start";
 }
-function evaluateProcessStartPreflight(input) {
+function evaluateProcessStartPreflight(input, mode = "strict") {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
         return "uninspectable-shell-input";
     }
@@ -79,17 +79,18 @@ function evaluateProcessStartPreflight(input) {
         const script = ["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(executable)
             ? args[option + 1]
             : args.slice(option + 1).join(" ");
-        return evaluatePreflight("bash", { command: script });
+        return evaluatePreflight("bash", { command: script }, [], mode);
     }
     if (["node", "python", "python3", "ruby", "perl"].includes(executable) &&
         args.some((arg) => ["-e", "--eval", "-c", "-E"].includes(arg))) {
         return "uninspectable-shell-input";
     }
     const command = [executable, ...args].map(quoteProcessArgument).join(" ");
-    if (assessCommandPreflight(command).isHighRiskEnvDump) {
+    if (mode === "strict" && assessCommandPreflight(command).isHighRiskEnvDump) {
         return "high-risk-environment-dump";
     }
-    if (isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
+    if (isDestructiveCommand(command) ||
+        (mode === "strict" && isSimpleFileRemoval(command)) ||
         isWindowsDestructiveCommand(command)) {
         return "destructive-command";
     }
@@ -288,9 +289,9 @@ export function isHallucinatedOrMalformedPackageInstall(command) {
     }
     return false;
 }
-export function evaluatePreflight(tool, input, additionalTools = []) {
+export function evaluatePreflight(tool, input, additionalTools = [], mode = "strict") {
     if (isProcessStartTool(tool)) {
-        return evaluateProcessStartPreflight(input);
+        return evaluateProcessStartPreflight(input, mode);
     }
     if (isShellExecutionTool(tool, additionalTools)) {
         if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -305,17 +306,20 @@ export function evaluatePreflight(tool, input, additionalTools = []) {
             return "uninspectable-shell-input";
         }
         const commands = values;
-        if (commands.some((command) => assessCommandPreflight(command).isHighRiskEnvDump)) {
+        if (mode === "strict" &&
+            commands.some((command) => assessCommandPreflight(command).isHighRiskEnvDump)) {
             return "high-risk-environment-dump";
         }
-        if (commands.some((command) => isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
-            isWindowsDestructiveCommand(command)))
+        if (commands.some((command) => isDestructiveCommand(command) ||
+            (mode === "strict" && isSimpleFileRemoval(command)) ||
+            isWindowsDestructiveCommand(command))) {
             return "destructive-command";
+        }
         if (commands.some(isOpaqueShellExecution))
             return "opaque-shell-execution";
         if (commands.some(hasDynamicCommandName))
             return "uninspectable-shell-input";
-        if (commands.some(isLazyCommitMessage))
+        if (mode === "strict" && commands.some(isLazyCommitMessage))
             return "lazy-commit-message";
         if (commands.some(isHallucinatedOrMalformedPackageInstall))
             return "hallucinated-or-malformed-package";
@@ -353,8 +357,8 @@ export class GuardianPreflightError extends Error {
  * Opt-in strict guard: reject recognized risks before a host executes a tool.
  * This does not parse arbitrary shell syntax or replace OS/host permissions.
  */
-export function enforcePreflight(tool, input, additionalTools = []) {
-    const finding = evaluatePreflight(tool, input, additionalTools);
+export function enforcePreflight(tool, input, additionalTools = [], mode = "strict") {
+    const finding = evaluatePreflight(tool, input, additionalTools, mode);
     if (finding)
         throw new GuardianPreflightError(finding);
 }

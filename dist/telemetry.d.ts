@@ -31,6 +31,8 @@ export type GuardianStatus = {
     verified: number;
     failed: number;
     unverified: number;
+    redacted?: number;
+    telemetryLevel?: TelemetryLevel;
     truncated: boolean;
     lastEvent?: string;
     /** Most recent event kind; counters above cover retained history. */
@@ -42,6 +44,7 @@ export declare function guardianStateDirectory(directory?: string): string;
 export declare function guardianEventPath(directory?: string): string;
 export declare function sessionFingerprint(value: string): string;
 export declare function sessionFingerprint(value?: string): string | undefined;
+export declare function recordGuardianRedaction(count?: number, directory?: string): void;
 export declare function configureGuardianTelemetry(directory: string | undefined, config?: GuardianTelemetryConfig): void;
 export declare function clearGuardianTelemetryConfig(): void;
 export declare function resolveTelemetrySettings(directory?: string): {

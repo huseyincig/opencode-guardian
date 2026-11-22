@@ -4,6 +4,7 @@ import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } f
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
 import { extractStructuredEditTexts, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
 import { findTruncationPlaceholder } from "./edit-integrity.js";
+import type { PreflightMode } from "./types.js";
 
 export type PreflightFinding =
   | "destructive-command"
@@ -66,7 +67,10 @@ export function isProcessStartTool(tool: string): boolean {
   return action === "process_start";
 }
 
-function evaluateProcessStartPreflight(input: unknown): PreflightFinding | undefined {
+function evaluateProcessStartPreflight(
+  input: unknown,
+  mode: PreflightMode = "strict"
+): PreflightFinding | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return "uninspectable-shell-input";
   }
@@ -101,18 +105,21 @@ function evaluateProcessStartPreflight(input: unknown): PreflightFinding | undef
     const script = ["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(executable)
       ? args[option + 1]
       : args.slice(option + 1).join(" ");
-    return evaluatePreflight("bash", { command: script });
+    return evaluatePreflight("bash", { command: script }, [], mode);
   }
   if (["node", "python", "python3", "ruby", "perl"].includes(executable) &&
       args.some((arg) => ["-e", "--eval", "-c", "-E"].includes(arg))) {
     return "uninspectable-shell-input";
   }
   const command = [executable, ...args].map(quoteProcessArgument).join(" ");
-  if (assessCommandPreflight(command).isHighRiskEnvDump) {
+  if (mode === "strict" && assessCommandPreflight(command).isHighRiskEnvDump) {
     return "high-risk-environment-dump";
   }
-  if (isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
-      isWindowsDestructiveCommand(command)) {
+  if (
+    isDestructiveCommand(command) ||
+    (mode === "strict" && isSimpleFileRemoval(command)) ||
+    isWindowsDestructiveCommand(command)
+  ) {
     return "destructive-command";
   }
   if (isOpaqueShellExecution(command)) return "opaque-shell-execution";
@@ -343,10 +350,11 @@ export function isHallucinatedOrMalformedPackageInstall(command: string): boolea
 export function evaluatePreflight(
   tool: string,
   input: unknown,
-  additionalTools: readonly string[] = []
+  additionalTools: readonly string[] = [],
+  mode: PreflightMode = "strict"
 ): PreflightFinding | undefined {
   if (isProcessStartTool(tool)) {
-    return evaluateProcessStartPreflight(input);
+    return evaluateProcessStartPreflight(input, mode);
   }
   if (isShellExecutionTool(tool, additionalTools)) {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -363,16 +371,25 @@ export function evaluatePreflight(
     }
     const commands = values as string[];
 
-    if (commands.some((command) =>
-      assessCommandPreflight(command).isHighRiskEnvDump)) {
+    if (
+      mode === "strict" &&
+      commands.some((command) => assessCommandPreflight(command).isHighRiskEnvDump)
+    ) {
       return "high-risk-environment-dump";
     }
-    if (commands.some((command) =>
-      isDestructiveCommand(command) || isSimpleFileRemoval(command) ||
-      isWindowsDestructiveCommand(command))) return "destructive-command";
+    if (
+      commands.some(
+        (command) =>
+          isDestructiveCommand(command) ||
+          (mode === "strict" && isSimpleFileRemoval(command)) ||
+          isWindowsDestructiveCommand(command)
+      )
+    ) {
+      return "destructive-command";
+    }
     if (commands.some(isOpaqueShellExecution)) return "opaque-shell-execution";
     if (commands.some(hasDynamicCommandName)) return "uninspectable-shell-input";
-    if (commands.some(isLazyCommitMessage)) return "lazy-commit-message";
+    if (mode === "strict" && commands.some(isLazyCommitMessage)) return "lazy-commit-message";
     if (commands.some(isHallucinatedOrMalformedPackageInstall)) return "hallucinated-or-malformed-package";
     // Different shell command aliases give no reliable way to know which the
     // host will execute. Do not pick only the first, apparently safe value.
@@ -415,8 +432,9 @@ export class GuardianPreflightError extends Error {
 export function enforcePreflight(
   tool: string,
   input: unknown,
-  additionalTools: readonly string[] = []
+  additionalTools: readonly string[] = [],
+  mode: PreflightMode = "strict"
 ): void {
-  const finding = evaluatePreflight(tool, input, additionalTools);
+  const finding = evaluatePreflight(tool, input, additionalTools, mode);
   if (finding) throw new GuardianPreflightError(finding);
 }

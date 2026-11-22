@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import Guardian, {
   GuardEngine,
+  loadConfig,
+  resolveEffectiveConfig,
   evaluatePreflight,
   sanitizeString,
   sanitizeObject,
@@ -17,9 +19,15 @@ import Guardian, {
   getLatestMeshIntervention,
   getActiveMeshHandoff,
   resetMeshStateForTests,
+  readGuardianStatus,
+  recordGuardianEvent,
+  guardianEventPath,
+  configureGuardianTelemetry,
+  clearGuardianTelemetryConfig,
   GUARDIAN_INTERVENTION_RPC_DEFINITION,
   GUARDIAN_INTERVENTION_RPC_METHOD,
 } from "../dist/index.js";
+import * as GuardianIndex from "../dist/index.js";
 import { splitShellStages } from "../dist/shell-risk.js";
 import { hasResearchOnlyConstraint } from "../dist/task-constraints.js";
 import { guardianCommandReport } from "../dist/commands.js";
@@ -906,4 +914,123 @@ test("12. testing/no-cheat detects Go t.SkipNow() and scopes file deletion autho
   });
   assert.match(report.message, /testing\/no-cheat: error/);
 });
+
+test("13. violations telemetry mode tracks in-memory inspection & redaction counters without disk I/O and reports telemetry mode transparently", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-live-mem-telem-"));
+  t.after(() => {
+    clearGuardianTelemetryConfig();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  configureGuardianTelemetry(dir, { enabled: true, level: "violations" });
+  recordGuardianEvent({ kind: "preflight-allowed", tool: "bash" }, dir);
+  recordGuardianEvent({ kind: "post-inspected" }, dir);
+  assert.equal(typeof GuardianIndex.recordGuardianRedaction, "function", "recordGuardianRedaction must be exported");
+  GuardianIndex.recordGuardianRedaction(2, dir);
+
+  // Zero disk writes for benign inspections or redactions in violations mode
+  assert.equal(fs.existsSync(guardianEventPath(dir)), false);
+
+  const status = readGuardianStatus(dir);
+  assert.equal(status.inspected, 2, "in-memory inspections should be reflected in readGuardianStatus");
+  assert.equal(status.redacted, 2, "in-memory secret redactions should be reflected in readGuardianStatus");
+
+  const report = await guardianCommandReport("status", dir, "0.17.0");
+  assert.match(report.message, /Telemetry mode: violations/);
+  assert.match(report.message, /Secret redactions \(in-memory\): 2/);
+});
+
+test("14. loadConfig merges global and project configs and enforces allowProjectOverrides: false against untrusted repo downgrades", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-global-lock-"));
+  const globalDir = path.join(root, "global-config");
+  const projDir = path.join(root, "untrusted-repo");
+  fs.mkdirSync(globalDir, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+
+  const origConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = globalDir;
+  t.after(() => {
+    if (origConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = origConfigDir;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  // 14a. Locked global config prevents untrusted repo from disabling Guardian, preflight, secrets, or rules
+  fs.writeFileSync(
+    path.join(globalDir, "opencode-guardian.json"),
+    JSON.stringify({
+      enabled: true,
+      allowProjectOverrides: false,
+      preflight: { enabled: true, mode: "strict" },
+      secrets: { enabled: true },
+      rules: { "security/no-secrets": "error", "safety/destructive-operations": "error" },
+    })
+  );
+  fs.writeFileSync(
+    path.join(projDir, "opencode-guardian.json"),
+    JSON.stringify({
+      enabled: false,
+      preflight: { enabled: false, mode: "critical" },
+      secrets: { enabled: false },
+      rules: { "security/no-secrets": "off", "safety/destructive-operations": "warn" },
+    })
+  );
+
+  const lockedEffective = resolveEffectiveConfig(loadConfig(projDir));
+  assert.equal(lockedEffective.enabled, true, "untrusted project must not disable globally locked Guardian");
+  assert.equal(lockedEffective.preflight?.enabled, true, "untrusted project must not disable globally locked preflight");
+  assert.equal(lockedEffective.preflight?.mode, "strict", "untrusted project must not downgrade strict preflight mode");
+  assert.equal(lockedEffective.secrets?.enabled, true, "untrusted project must not disable globally locked secret redaction");
+  assert.equal(lockedEffective.rules?.["security/no-secrets"], "error", "untrusted project must not turn off globally locked error rule");
+  assert.equal(lockedEffective.rules?.["safety/destructive-operations"], "error");
+
+  // 14b. When allowProjectOverrides is not false, project config inherits global config and overrides specific fields
+  fs.writeFileSync(
+    path.join(globalDir, "opencode-guardian.json"),
+    JSON.stringify({
+      enabled: true,
+      preflight: { enabled: true, mode: "critical" },
+    })
+  );
+  fs.writeFileSync(
+    path.join(projDir, "opencode-guardian.json"),
+    JSON.stringify({
+      remediationBudget: 2,
+    })
+  );
+  const mergedEffective = resolveEffectiveConfig(loadConfig(projDir));
+  assert.equal(mergedEffective.preflight?.enabled, true, "project config should inherit global preflight.enabled");
+  assert.equal(mergedEffective.preflight?.mode, "critical", "project config should inherit global preflight.mode");
+  assert.equal(mergedEffective.remediationBudget, 2, "project config should apply its own remediationBudget");
+});
+
+test("15. preflight 'critical' mode blocks catastrophic destructive commands and secret writes while allowing everyday rm, printenv/docker inspect, and WIP commits", () => {
+  // Catastrophic operations MUST still be blocked in 'critical' mode
+  assert.equal(evaluatePreflight("bash", { command: "rm -rf /" }, [], "critical"), "destructive-command");
+  assert.equal(evaluatePreflight("bash", { command: "git reset --hard HEAD~1" }, [], "critical"), "destructive-command");
+  assert.equal(evaluatePreflight("bash", { command: "git push --force origin main" }, [], "critical"), "destructive-command");
+  assert.equal(evaluatePreflight("bash", { command: "git clean -fdx" }, [], "critical"), "destructive-command");
+  assert.equal(
+    evaluatePreflight("write", { path: "src/a.ts", content: 'const k = "sk-proj-111111111111111111111111";' }, [], "critical"),
+    "hardcoded-secret-in-file-write"
+  );
+  assert.equal(
+    evaluatePreflight("write", { path: "src/a.ts", content: "// ... existing code ...\n" }, [], "critical"),
+    "truncation-placeholder-in-file-write"
+  );
+
+  // Everyday low-friction actions MUST be allowed in 'critical' mode (while blocked in 'strict' mode)
+  assert.equal(evaluatePreflight("bash", { command: "rm /tmp/scratch.txt" }, [], "critical"), undefined);
+  assert.equal(evaluatePreflight("bash", { command: "rm /tmp/scratch.txt" }, [], "strict"), "destructive-command");
+
+  assert.equal(evaluatePreflight("bash", { command: "printenv" }, [], "critical"), undefined);
+  assert.equal(evaluatePreflight("bash", { command: "printenv" }, [], "strict"), "high-risk-environment-dump");
+
+  assert.equal(evaluatePreflight("bash", { command: "docker inspect app-container" }, [], "critical"), undefined);
+  assert.equal(evaluatePreflight("bash", { command: "docker inspect app-container" }, [], "strict"), "high-risk-environment-dump");
+
+  assert.equal(evaluatePreflight("bash", { command: 'git commit -m "wip"' }, [], "critical"), undefined);
+  assert.equal(evaluatePreflight("bash", { command: 'git commit -m "wip"' }, [], "strict"), "lazy-commit-message");
+});
+
 

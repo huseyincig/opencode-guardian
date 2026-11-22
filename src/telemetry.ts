@@ -44,6 +44,8 @@ export type GuardianStatus = {
   verified: number;
   failed: number;
   unverified: number;
+  redacted?: number;
+  telemetryLevel?: TelemetryLevel;
   truncated: boolean;
   lastEvent?: string;
   /** Most recent event kind; counters above cover retained history. */
@@ -183,6 +185,34 @@ function checkFile(file: string): void {
 
 const telemetryConfigRegistry = new Map<string, GuardianTelemetryConfig>();
 const verifiedStateDirs = new Set<string>();
+const liveMemoryCounters = new Map<string, { inspectedSkippedDisk: number; redactions: number }>();
+
+function memoryCounterKey(directory?: string): string {
+  return directory && typeof directory === "string" && directory.trim().length > 0
+    ? projectStateKey(directory)
+    : "__default__";
+}
+
+function getOrCreateMemoryCounter(directory?: string): { inspectedSkippedDisk: number; redactions: number } {
+  const key = memoryCounterKey(directory);
+  let entry = liveMemoryCounters.get(key);
+  if (!entry) {
+    entry = { inspectedSkippedDisk: 0, redactions: 0 };
+    liveMemoryCounters.set(key, entry);
+    while (liveMemoryCounters.size > 256) {
+      const oldest = liveMemoryCounters.keys().next().value;
+      if (oldest === undefined) break;
+      liveMemoryCounters.delete(oldest);
+    }
+  }
+  return entry;
+}
+
+export function recordGuardianRedaction(count = 1, directory?: string): void {
+  if (!Number.isFinite(count) || count <= 0) return;
+  const entry = getOrCreateMemoryCounter(directory);
+  entry.redactions += Math.floor(count);
+}
 
 export function configureGuardianTelemetry(
   directory: string | undefined,
@@ -199,6 +229,7 @@ export function configureGuardianTelemetry(
 export function clearGuardianTelemetryConfig(): void {
   telemetryConfigRegistry.clear();
   verifiedStateDirs.clear();
+  liveMemoryCounters.clear();
 }
 
 export function resolveTelemetrySettings(directory?: string): {
@@ -249,6 +280,7 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
 
   if (settings.level === "violations") {
     if (event.kind === "preflight-allowed" || event.kind === "post-inspected") {
+      getOrCreateMemoryCounter(directoryArg).inspectedSkippedDisk += 1;
       return true;
     }
   }
@@ -308,6 +340,9 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
       if (fs.writeSync(fd, line) !== Buffer.byteLength(line)) {
         throw new Error("Guardian audit write was incomplete");
       }
+      if (event.kind === "statistics-reset") {
+        liveMemoryCounters.delete(memoryCounterKey(directoryArg));
+      }
       return true;
     } finally {
       if (fd !== -1) fs.closeSync(fd);
@@ -335,9 +370,21 @@ export function readGuardianStatus(
     directory = directoryOrMaxBytes;
   }
   maxBytes = Number.isFinite(maxBytes) ? Math.max(1, Math.min(GUARDIAN_MAX_LOG_BYTES, Math.floor(maxBytes))) : GUARDIAN_MAX_LOG_BYTES;
+  const mem = liveMemoryCounters.get(memoryCounterKey(directory));
+  const settings = resolveTelemetrySettings(directory);
   const result: GuardianStatus = {
-    preflight: "unknown", inspected: 0, blocked: 0, warnings: 0,
-    remediations: 0, errors: 0, verified: 0, failed: 0, unverified: 0, truncated: false,
+    preflight: "unknown",
+    inspected: typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0),
+    blocked: 0,
+    warnings: 0,
+    remediations: 0,
+    errors: 0,
+    verified: 0,
+    failed: 0,
+    unverified: 0,
+    redacted: mem?.redactions ?? 0,
+    telemetryLevel: settings.level,
+    truncated: false,
   };
   try {
     const file = guardianEventPath(directory);
@@ -393,7 +440,8 @@ export function readGuardianStatus(
         result.preflight = entry.preflight;
       }
       if (entry.kind === "statistics-reset") {
-        result.inspected = result.blocked = result.warnings = result.remediations = 0;
+        result.inspected = typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0);
+        result.blocked = result.warnings = result.remediations = 0;
         result.errors = result.verified = result.failed = result.unverified = 0;
         continue;
       }

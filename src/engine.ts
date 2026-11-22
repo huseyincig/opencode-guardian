@@ -136,6 +136,9 @@ export class GuardianConfigError extends Error {
 function validateConfig(value: Record<string, unknown>): GuardConfig {
   const fail = (name: string): never => { throw new Error("invalid configuration field: " + name); };
   if (value.enabled !== undefined && typeof value.enabled !== "boolean") fail("enabled");
+  if (value.allowProjectOverrides !== undefined && typeof value.allowProjectOverrides !== "boolean") {
+    fail("allowProjectOverrides");
+  }
   for (const name of ["remediationBudget", "iterationBudget"] as const) {
     if (value[name] !== undefined &&
         (typeof value[name] !== "number" || !Number.isInteger(value[name]) ||
@@ -146,6 +149,10 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
     if (item !== undefined && (!item || typeof item !== "object" ||
         Array.isArray(item) || ((item as Record<string, unknown>).enabled !== undefined &&
         typeof (item as Record<string, unknown>).enabled !== "boolean"))) fail(name);
+  }
+  const preflightMode = (value.preflight as Record<string, unknown> | undefined)?.mode;
+  if (preflightMode !== undefined && preflightMode !== "critical" && preflightMode !== "strict") {
+    fail("preflight.mode");
   }
   const shellTools = (value.preflight as Record<string, unknown> | undefined)?.shellTools;
   if (shellTools !== undefined &&
@@ -167,6 +174,9 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
     }
     if (sec.safeKeyNames !== undefined && (!Array.isArray(sec.safeKeyNames) || !sec.safeKeyNames.every(k => typeof k === "string"))) {
       fail("secrets.safeKeyNames");
+    }
+    if (sec.safeValues !== undefined && (!Array.isArray(sec.safeValues) || !sec.safeValues.every(v => typeof v === "string"))) {
+      fail("secrets.safeValues");
     }
   }
   if (value.telemetry !== undefined) {
@@ -219,6 +229,7 @@ export function resolveEffectiveConfig(
   const overlay: Record<string, unknown> = {};
   for (const key of [
     "enabled",
+    "allowProjectOverrides",
     "remediationBudget",
     "iterationBudget",
     "preflight",
@@ -243,6 +254,11 @@ export function resolveEffectiveConfig(
   const mergedRules: NonNullable<GuardConfig["rules"]> = {
     ...base.rules,
   };
+  const severityRank = (sev: Severity | undefined): number =>
+    sev === "error" ? 3 : sev === "warn" ? 2 : sev === "off" ? 1 : 0;
+  const extractSeverity = (entry: Severity | GuardRuleConfig | undefined): Severity | undefined =>
+    typeof entry === "string" ? entry : entry?.severity;
+
   for (const [ruleID, next] of Object.entries(validated.rules ?? {})) {
     const previous = mergedRules[ruleID];
     if (next && typeof next === "object" && !Array.isArray(next)) {
@@ -259,9 +275,20 @@ export function resolveEffectiveConfig(
     } else {
       mergedRules[ruleID] = next;
     }
+    if (base.allowProjectOverrides === false && previous !== undefined) {
+      const baseSev = extractSeverity(previous);
+      const nextEntry = mergedRules[ruleID];
+      const nextSev = extractSeverity(nextEntry);
+      if (baseSev && severityRank(nextSev) < severityRank(baseSev)) {
+        mergedRules[ruleID] =
+          nextEntry && typeof nextEntry === "object" && !Array.isArray(nextEntry)
+            ? { ...nextEntry, severity: baseSev }
+            : baseSev;
+      }
+    }
   }
 
-  return {
+  const merged: GuardConfig = {
     ...base,
     ...validated,
     preflight: {
@@ -288,21 +315,41 @@ export function resolveEffectiveConfig(
       : undefined,
     rules: mergedRules,
   };
+
+  if (base.allowProjectOverrides === false) {
+    merged.allowProjectOverrides = false;
+    if (base.enabled !== false) merged.enabled = true;
+    if (base.preflight?.enabled === true) {
+      const lockedMode =
+        base.preflight.mode === "strict" || merged.preflight?.mode === "strict"
+          ? "strict"
+          : (base.preflight.mode ?? merged.preflight?.mode);
+      merged.preflight = {
+        ...merged.preflight,
+        enabled: true,
+        ...(lockedMode ? { mode: lockedMode } : {}),
+      };
+    }
+    if (base.secrets?.enabled !== false) {
+      merged.secrets = {
+        ...merged.secrets,
+        enabled: true,
+      };
+    }
+    if (typeof base.remediationBudget === "number") {
+      merged.remediationBudget = Math.max(base.remediationBudget, merged.remediationBudget ?? 0);
+    }
+    if (typeof base.iterationBudget === "number") {
+      merged.iterationBudget = Math.max(base.iterationBudget, merged.iterationBudget ?? 0);
+    }
+  }
+
+  return merged;
 }
 
-export function loadConfig(directory?: string): GuardConfig {
-  const candidatePaths = [
-    directory ? path.resolve(directory, "opencode-guardian.json") : null,
-    directory ? path.resolve(directory, ".opencode/opencode-guardian.json") : null,
-    path.resolve(os.homedir(), ".config/opencode/opencode-guardian.json"),
-    directory ? path.resolve(directory, "opencode-guard.json") : null,
-    directory ? path.resolve(directory, ".opencode/opencode-guard.json") : null,
-    path.resolve(os.homedir(), ".config/opencode/opencode-guard.json"),
-  ].filter(Boolean) as string[];
-
+function readSingleConfigFile(candidatePaths: readonly string[]): GuardConfig | undefined {
   for (const configPath of candidatePaths) {
     if (!fs.existsSync(configPath)) continue;
-
     try {
       const raw = fs.readFileSync(configPath, "utf8");
       const parsed = JSON.parse(raw);
@@ -313,6 +360,52 @@ export function loadConfig(directory?: string): GuardConfig {
     } catch (error) {
       throw new GuardianConfigError(configPath, error);
     }
+  }
+  return undefined;
+}
+
+function resolveGlobalConfigDirectory(): string | undefined {
+  if (process.env.OPENCODE_CONFIG_DIR && process.env.OPENCODE_CONFIG_DIR.trim()) {
+    return path.resolve(process.env.OPENCODE_CONFIG_DIR.trim());
+  }
+  if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim()) {
+    return path.join(path.resolve(process.env.XDG_CONFIG_HOME.trim()), "opencode");
+  }
+  if (process.env.NODE_TEST_CONTEXT) {
+    return undefined;
+  }
+  return path.resolve(os.homedir(), ".config/opencode");
+}
+
+export function loadConfig(directory?: string): GuardConfig {
+  const globalDir = resolveGlobalConfigDirectory();
+  const projectCandidates = directory
+    ? [
+        path.resolve(directory, "opencode-guardian.json"),
+        path.resolve(directory, ".opencode/opencode-guardian.json"),
+        path.resolve(directory, "opencode-guard.json"),
+        path.resolve(directory, ".opencode/opencode-guard.json"),
+      ]
+    : [];
+  const globalCandidates =
+    globalDir && (!directory || path.resolve(directory) !== globalDir)
+      ? [
+          path.resolve(globalDir, "opencode-guardian.json"),
+          path.resolve(globalDir, "opencode-guard.json"),
+        ]
+      : [];
+
+  const projectConfig = readSingleConfigFile(projectCandidates);
+  const globalConfig = readSingleConfigFile(globalCandidates);
+
+  if (globalConfig && projectConfig) {
+    return resolveEffectiveConfig(globalConfig, projectConfig);
+  }
+  if (projectConfig) {
+    return projectConfig;
+  }
+  if (globalConfig) {
+    return globalConfig;
   }
 
   return DEFAULT_CONFIG;

@@ -19,6 +19,7 @@ export interface GuardianSecretsConfig {
     safeValues?: string[];
 }
 export type TelemetryLevel = "all" | "violations" | "off";
+export type PreflightMode = "critical" | "strict";
 export interface GuardianTelemetryConfig {
     enabled?: boolean;
     level?: TelemetryLevel;
@@ -26,12 +27,15 @@ export interface GuardianTelemetryConfig {
 }
 export interface GuardConfig {
     enabled?: boolean;
+    /** When false in global config, prevents untrusted project configs from weakening security settings. */
+    allowProjectOverrides?: boolean;
     remediationBudget?: number;
     /** Separate, bounded continuation budget for explicit iterative tasks (0..5). */
     iterationBudget?: number;
-    /** Optional strict tool hook; disabled unless explicitly enabled. */
+    /** Optional pre-execution tool hook; disabled unless explicitly enabled. */
     preflight?: {
         enabled?: boolean;
+        mode?: PreflightMode;
         shellTools?: string[];
     };
     /** Passive startup update notice; enabled unless explicitly disabled. */

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.3 — 2026-11-22
+
+- **XDG State Directory Compliance (`src/telemetry.ts`):**
+  - Updated `guardianStateDirectory` to honor an absolute `XDG_STATE_HOME` path (when `OPENCODE_GUARDIAN_STATE_DIR` and `NODE_TEST_CONTEXT` are unset), falling back to `~/.local/state/opencode-guardian` when `XDG_STATE_HOME` is unset or relative per the XDG Base Directory Specification.
+- **Test & Verification Alignment:**
+  - Added `XDG_STATE_HOME` resolution coverage in `tests/project-scope-and-state-isolation.test.mjs` and standardized the deep-debug regression suite name to `tests/v0162-deep-debug.test.mjs` (**807 / 807** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.3.2` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 113 files).
+
 ## 0.16.2 — 2026-11-22
 
 - **TUI Banner Lifecycle & Polling Precision (`src/tui.tsx`):**

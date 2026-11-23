@@ -35,6 +35,7 @@ import {
   dispatchGuardianToastClear,
   formatGuardianToast,
   type GuardianToastNotifier,
+  type GuardianInterventionInput,
   type GuardianToastPayload,
 } from "./toast.js";
 import {
@@ -1533,6 +1534,39 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     toastNotifiersByDirectory.set(key, notifier);
     return notifier;
   };
+  // Optional chat-flow notice (V1 parity). It is a `visible` Guardian message:
+  // stripped from model context and from inspection, and never resumes the model.
+  const lastTranscriptNotice = new Map<string, { text: string; at: number }>();
+  const postTranscriptNotice = (input: GuardianInterventionInput, runtimeDirectory: string): void => {
+    const sid = input.sessionID;
+    if (!sid || controller.signal.aborted) return;
+    try {
+      const runtime = runtimeForDirectory(runtimeDirectory);
+      if (runtime.config.enabled === false || runtime.config.notifications?.transcript !== true) return;
+      const payload = formatGuardianToast(input);
+      const text = `[Guardian] ${payload.title.replace(/^Guardian\s+[—-]\s+/, "")}: ${payload.message}`;
+      const now = Date.now();
+      const last = lastTranscriptNotice.get(sid);
+      if (last && last.text === text && now - last.at < 10_000) return;
+      lastTranscriptNotice.delete(sid);
+      lastTranscriptNotice.set(sid, { text, at: now });
+      while (lastTranscriptNotice.size > 256) {
+        const oldest = lastTranscriptNotice.keys().next().value;
+        if (oldest === undefined) break;
+        lastTranscriptNotice.delete(oldest);
+      }
+      void Promise.resolve(context.session.synthetic({
+        sessionID: sid,
+        text,
+        description: "OpenCode Guardian notice",
+        metadata: v2GuardianMetadata(sid, "visible"),
+        delivery: "queue",
+        resume: false,
+      })).catch(() => {});
+    } catch {
+      // The notice is additive; it must never disturb enforcement.
+    }
+  };
   const toastNotifier: TrackedGuardianToastNotifier = createTrackedToastNotifier({
     notify(input): void {
       if (
@@ -1566,6 +1600,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           ? sessionDirectories.get(input.sessionID) ?? directory
           : directory;
       baseToastForDirectory(runtimeDirectory).notify(input);
+      postTranscriptNotice(input, runtimeDirectory);
     },
     clear(sessionID): void {
       clearInterventionSnapshot(sessionID);

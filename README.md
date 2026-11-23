@@ -365,6 +365,16 @@ Blocks catastrophic, irreversible shell commands (`rm -rf`, `git reset --hard`, 
 
 - Setting `"allowProjectOverrides": false` in your global `~/.config/opencode/opencode-guardian.json` ensures that an untrusted cloned repository cannot weaken or disable your global Guardian, preflight, secret redaction, or rule severities via a repo-local `opencode-guardian.json`.
 
+### Chat Transcript Notices (opt-in)
+
+By default Guardian interventions appear as a toast and a short-lived conversation banner. To also leave a persistent line in the chat that scrolls up with the conversation (like V1), enable:
+
+```json
+{ "notifications": { "transcript": true } }
+```
+
+Each intervention (warning, remediation, preflight block, stream stop) posts one `[Guardian] <title>: <message>` line containing only the safe rule ID and the action taken. The message is a Guardian `visible` notice: it never wakes the model (`resume: false`), is removed from model context, and is ignored by Guardian's own inspection. Identical notices are de-duplicated for 10 seconds per session.
+
 ### 2. Full `"strict"` Mode (Maximum Pre-Execution Lockdown)
 
 ```json

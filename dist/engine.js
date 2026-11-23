@@ -120,6 +120,9 @@ function validateConfig(value) {
             typeof item.enabled !== "boolean")))
             fail(name);
     }
+    const transcript = value.notifications?.transcript;
+    if (transcript !== undefined && typeof transcript !== "boolean")
+        fail("notifications.transcript");
     const preflightMode = value.preflight?.mode;
     if (preflightMode !== undefined && preflightMode !== "critical" && preflightMode !== "strict") {
         fail("preflight.mode");

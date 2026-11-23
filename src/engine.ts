@@ -150,6 +150,8 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
         Array.isArray(item) || ((item as Record<string, unknown>).enabled !== undefined &&
         typeof (item as Record<string, unknown>).enabled !== "boolean"))) fail(name);
   }
+  const transcript = (value.notifications as Record<string, unknown> | undefined)?.transcript;
+  if (transcript !== undefined && typeof transcript !== "boolean") fail("notifications.transcript");
   const preflightMode = (value.preflight as Record<string, unknown> | undefined)?.mode;
   if (preflightMode !== undefined && preflightMode !== "critical" && preflightMode !== "strict") {
     fail("preflight.mode");

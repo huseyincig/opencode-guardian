@@ -42,6 +42,7 @@ export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REM
  * message shape consumed by the rules and engine.
  */
 export declare function normalizeV2Messages(messages: readonly unknown[], sessionID?: string): SessionMessage[];
+export declare function hasUnfinishedBackgroundTool(messages: readonly SessionMessage[]): boolean;
 /**
  * OpenCode V2 Plugin Definition.
  */

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.1 — 2026-11-23
+
+- **OpenCode `v2.4.0` Runtime & SDK Compatibility (`src/index.ts`, `src/evidence.ts`, `package.json`):**
+  - Updated `devDependencies` to `@opencode/plugin` `^2.4.0`, `@opentui/core` `^0.9.7`, and `@opentui/solid` `^0.9.7` (matching `@opencode/plugin@2.4.0`'s OpenTUI `>=0.9.4` floor while preserving `peerDependencies` `>=2.3.0` / `>=0.8.4` compatibility).
+  - **Code Mode Background Timeout & Dotted Tool Calls:** Treated `v2.4.0` backgrounded Code Mode `execute` calls (`metadata.jobID`, `metadata.status === "running"`, `"Execution moved to the background"`) as unfinished/`"unknown"` in `hasUnfinishedBackgroundTool` and `statusFromPart` until `type: "synthetic"` (`source: "codemode"`, `jobID`) completion arrives. Extracted nested `metadata.toolCalls` from top-level dotted Code Mode calls (`tools.ns.fn`).
+  - **Background Job Lifecycle (`experimental.job.updated` & `"video"`):** Tracked per-session active background jobs from `experimental.idle` (`"codemode" | "shell" | "subagent" | "image" | "video"`) and cleared `backgroundSessions` locks when `experimental.job.updated` reports `completed`, `error`, or `cancelled` and no remaining jobs are active.
+  - **Automations (`ses_aut_*`) & Hot-Reload (`plugin.updated`):** Classified `ses_aut_` automation child run sessions (`Automation.isRunSession`) as subagents so read-only automation runs never receive root remediation prompts, and invalidated agent capability caches on `plugin.updated` alongside clean `backgroundSessions`/`sessionBackgroundJobs` teardown for `v2.4.0` hot-reload.
+- **Verification:**
+  - Added 5 OpenCode `v2.4.0` compatibility regression tests in `tests/v0171-v240-compat.test.mjs` (**815 / 815** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.0` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 114 files).
+
 ## 0.17.0 — 2026-11-23
 
 - **Frictionless `"critical"` vs `"strict"` Preflight Protection Modes (`src/preflight.ts`, `src/types.ts`, `src/index.ts`, `src/commands.ts`):**

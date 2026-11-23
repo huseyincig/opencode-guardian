@@ -98,13 +98,22 @@ function statusFromPart(part, outputText) {
             errorText: errorText || outputText,
         };
     }
-    // OpenCode v2.3.1+ backgrounded or timed-out-to-background shell commands
-    // return status: "completed" with metadata.status === "running" / shellID
-    // and no exit code yet. Never treat a running background job as finished.
+    // OpenCode v2.3.1+ backgrounded shell commands and v2.4.0+ backgrounded
+    // Code Mode (execute) scripts return status: "completed" with
+    // metadata.status === "running", shellID, or jobID without an exit code.
+    // Never treat a running background job as finished.
+    const hasRunningJobID = typeof state.metadata?.jobID === "string" &&
+        exitCode === undefined &&
+        state.metadata?.status !== "completed" &&
+        state.metadata?.state !== "completed";
+    const isMovedToBackground = /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(outputText) ||
+        /(?:^|\n)The (?:command|execution) did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText) ||
+        /\bmoved to the background\s*\(job\b/i.test(outputText);
     if (state.metadata?.status === "running" ||
+        state.metadata?.state === "running" ||
         (typeof state.metadata?.shellID === "string" && exitCode === undefined) ||
-        /(?:^|\n)Command moved to the background\b/i.test(outputText) ||
-        /(?:^|\n)The command did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText)) {
+        hasRunningJobID ||
+        isMovedToBackground) {
         return { status: "unknown", errorText: "" };
     }
     if (exitCode !== undefined) {

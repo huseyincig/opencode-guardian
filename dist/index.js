@@ -177,7 +177,10 @@ function normalizeV2AssistantParts(part) {
         state: normalizedState,
     };
     const toolCalls = normalizedState.metadata?.toolCalls;
-    if (value.name !== "execute" || !Array.isArray(toolCalls)) {
+    const isCodeModeCall = value.name === "execute" ||
+        normalizedState.metadata?.codemode === true ||
+        (typeof value.name === "string" && value.name.startsWith("tools."));
+    if (!isCodeModeCall || !Array.isArray(toolCalls)) {
         return [primary];
     }
     const nestedParts = [];
@@ -301,6 +304,38 @@ export function normalizeV2Messages(messages, sessionID) {
                                 output: msg.text,
                                 metadata: meta,
                                 ...(meta.exit !== undefined ? { exitCode: meta.exit } : {}),
+                            },
+                        }],
+                });
+                continue;
+            }
+            if (meta?.source === "codemode" ||
+                meta?.source === "image" ||
+                meta?.source === "video" ||
+                typeof meta?.jobID === "string") {
+                const jobState = meta.state ?? meta.status;
+                const jobStatus = jobState === "running"
+                    ? "running"
+                    : jobState === "error" || jobState === "failed" || jobState === "cancelled"
+                        ? "error"
+                        : "completed";
+                const toolName = meta.source === "image"
+                    ? "generate_image"
+                    : meta.source === "video"
+                        ? "generate_video"
+                        : "execute";
+                normalized.push({
+                    info: { id, role: "assistant" },
+                    parts: [{
+                            type: "tool",
+                            tool: toolName,
+                            name: toolName,
+                            callID: typeof meta.jobID === "string" ? meta.jobID : id,
+                            state: {
+                                status: jobStatus,
+                                input: {},
+                                output: msg.text,
+                                metadata: { ...meta, status: jobStatus },
                             },
                         }],
                 });
@@ -706,7 +741,7 @@ async function finalizeSubagentHandoff(input) {
     clearMeshIntervention(input.sessionID);
     throw new Error("[opencode-guardian handoff] subagent finalization exceeded its bounded loop.");
 }
-function hasUnfinishedBackgroundTool(messages) {
+export function hasUnfinishedBackgroundTool(messages) {
     const lastHumanIdx = messages.findLastIndex((msg) => msg.info.role === "user" &&
         msg.parts.some((p) => p.type === "text" &&
             typeof p.text === "string" &&
@@ -724,13 +759,20 @@ function hasUnfinishedBackgroundTool(messages) {
             const meta = part.state.metadata;
             const outputText = typeof part.state.output === "string" ? part.state.output : "";
             const shellID = typeof meta?.shellID === "string" ? meta.shellID : undefined;
-            const id = shellID ?? (typeof part.callID === "string" ? part.callID : undefined);
-            const isMovedToBackground = /(?:^|\n)Command moved to the background\b/i.test(outputText) ||
-                /(?:^|\n)The command did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText);
+            const jobID = typeof meta?.jobID === "string" ? meta.jobID : undefined;
+            const id = shellID ?? jobID ?? (typeof part.callID === "string" ? part.callID : undefined);
+            const isMovedToBackground = /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(outputText) ||
+                /(?:^|\n)The (?:command|execution) did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText) ||
+                /\bmoved to the background\s*\(job\b/i.test(outputText);
+            const isPendingJobID = Boolean(jobID) &&
+                meta?.status !== "completed" &&
+                meta?.state !== "completed" &&
+                meta?.source === undefined;
             const isRunning = part.state.status === "running" ||
                 meta?.status === "running" ||
                 meta?.state === "running" ||
-                isMovedToBackground;
+                isMovedToBackground ||
+                isPendingJobID;
             if (isRunning) {
                 if (id)
                     runningIDs.add(id);
@@ -1135,6 +1177,24 @@ const setup = async (context) => {
     };
     const verificationStore = new VerificationSnapshotStore();
     const backgroundSessions = new Set();
+    const sessionBackgroundJobs = new Map();
+    const backgroundJobKey = (job) => {
+        if (!job || typeof job !== "object")
+            return undefined;
+        const rec = job;
+        if (typeof rec.id === "string" && rec.id.length > 0)
+            return rec.id;
+        if (typeof rec.jobID === "string" && rec.jobID.length > 0)
+            return rec.jobID;
+        if (typeof rec.shellID === "string" && rec.shellID.length > 0)
+            return rec.shellID;
+        if (typeof rec.childSessionID === "string" && rec.childSessionID.length > 0)
+            return rec.childSessionID;
+        if (typeof rec.path === "string" && rec.path.length > 0) {
+            return typeof rec.kind === "string" ? `${rec.kind}:${rec.path}` : rec.path;
+        }
+        return typeof rec.kind === "string" && rec.kind.length > 0 ? rec.kind : undefined;
+    };
     const contracts = new Map();
     const setSessionContract = (sessionID, contract) => {
         contracts.delete(sessionID);
@@ -1642,6 +1702,7 @@ const setup = async (context) => {
                 foregroundHandoffs.delete(event.sessionID);
                 contracts.delete(event.sessionID);
                 backgroundSessions.delete(event.sessionID);
+                sessionBackgroundJobs.delete(event.sessionID);
                 toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
                 verificationStore.beginTurn(event.sessionID);
                 const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
@@ -1731,6 +1792,22 @@ const setup = async (context) => {
                         })
                         : [];
                     if (ownBg.length > 0) {
+                        const keys = new Set();
+                        for (const job of ownBg) {
+                            const key = backgroundJobKey(job);
+                            if (key)
+                                keys.add(key);
+                        }
+                        if (keys.size > 0) {
+                            sessionBackgroundJobs.delete(event.sessionID);
+                            sessionBackgroundJobs.set(event.sessionID, keys);
+                            while (sessionBackgroundJobs.size > 512) {
+                                const oldest = sessionBackgroundJobs.keys().next().value;
+                                if (oldest === undefined)
+                                    break;
+                                sessionBackgroundJobs.delete(oldest);
+                            }
+                        }
                         backgroundSessions.delete(event.sessionID);
                         backgroundSessions.add(event.sessionID);
                         if (backgroundSessions.size > 512) {
@@ -1740,6 +1817,7 @@ const setup = async (context) => {
                         }
                     }
                     else {
+                        sessionBackgroundJobs.delete(event.sessionID);
                         backgroundSessions.delete(event.sessionID);
                     }
                 });
@@ -1807,6 +1885,7 @@ const setup = async (context) => {
                             forgetSessionRuntime(deletedSessionID);
                             verificationStore.forget(deletedSessionID);
                             backgroundSessions.delete(deletedSessionID);
+                            sessionBackgroundJobs.delete(deletedSessionID);
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
@@ -1821,6 +1900,7 @@ const setup = async (context) => {
                         if (failedSessionID) {
                             idleQueue.forget(failedSessionID);
                             backgroundSessions.delete(failedSessionID);
+                            sessionBackgroundJobs.delete(failedSessionID);
                             releaseRemediationLeaseForSession(failedSessionID);
                         }
                         continue;
@@ -1858,6 +1938,7 @@ const setup = async (context) => {
                             }
                             verificationStore.forget(movedSessionID);
                             backgroundSessions.delete(movedSessionID);
+                            sessionBackgroundJobs.delete(movedSessionID);
                             contracts.delete(movedSessionID);
                             foregroundHandoffs.delete(movedSessionID);
                             clearAgentCapability(movedSessionID);
@@ -1866,8 +1947,54 @@ const setup = async (context) => {
                         }
                         continue;
                     }
-                    if (eventData.type === "agent.updated") {
+                    if (eventData.type === "agent.updated" || eventData.type === "plugin.updated") {
                         clearAllAgentCapabilities();
+                        continue;
+                    }
+                    if (eventData.type === "experimental.job.updated") {
+                        const jobInfo = eventPayload?.info;
+                        const jobSessionID = typeof jobInfo?.sessionID === "string" && jobInfo.sessionID.length > 0
+                            ? jobInfo.sessionID
+                            : undefined;
+                        if (jobSessionID) {
+                            const jobStatus = typeof jobInfo?.status === "string" ? jobInfo.status : undefined;
+                            if (jobStatus === "running") {
+                                const key = backgroundJobKey(jobInfo);
+                                const set = sessionBackgroundJobs.get(jobSessionID) ?? new Set();
+                                if (key)
+                                    set.add(key);
+                                sessionBackgroundJobs.set(jobSessionID, set);
+                                backgroundSessions.add(jobSessionID);
+                            }
+                            else if (jobStatus === "completed" ||
+                                jobStatus === "error" ||
+                                jobStatus === "cancelled") {
+                                const set = sessionBackgroundJobs.get(jobSessionID);
+                                if (set) {
+                                    for (const candidate of [
+                                        jobInfo?.id,
+                                        jobInfo?.shellID,
+                                        jobInfo?.childSessionID,
+                                        typeof jobInfo?.path === "string" && typeof jobInfo?.kind === "string"
+                                            ? `${jobInfo.kind}:${jobInfo.path}`
+                                            : undefined,
+                                        typeof jobInfo?.path === "string" ? jobInfo.path : undefined,
+                                        jobInfo?.kind,
+                                    ]) {
+                                        if (typeof candidate === "string" && candidate.length > 0) {
+                                            set.delete(candidate);
+                                        }
+                                    }
+                                    if (set.size === 0) {
+                                        sessionBackgroundJobs.delete(jobSessionID);
+                                        backgroundSessions.delete(jobSessionID);
+                                    }
+                                }
+                                else {
+                                    backgroundSessions.delete(jobSessionID);
+                                }
+                            }
+                        }
                         continue;
                     }
                     if (eventData.type === "config.updated") {
@@ -1900,7 +2027,8 @@ const setup = async (context) => {
                                         ? session.parentID
                                         : undefined;
                                 const isForkedSession = Boolean(session.fork && typeof session.fork === "object");
-                                sessionIsSubagent = Boolean(sessionParentID) && !isForkedSession;
+                                const isAutomationRunSession = sessionID.startsWith("ses_aut_");
+                                sessionIsSubagent = (Boolean(sessionParentID) || isAutomationRunSession) && !isForkedSession;
                                 const rawAgent = session.agent;
                                 if (typeof rawAgent === "string" && rawAgent.trim().length > 0) {
                                     sessionAgentName = rawAgent.trim();
@@ -2056,6 +2184,8 @@ const setup = async (context) => {
         contracts.clear();
         verificationStore.clear();
         foregroundHandoffs.clear();
+        backgroundSessions.clear();
+        sessionBackgroundJobs.clear();
         for (const timer of interventionExpiryTimers.values()) {
             clearTimeout(timer);
         }

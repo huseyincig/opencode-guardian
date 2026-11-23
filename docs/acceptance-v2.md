@@ -1,10 +1,10 @@
 # OpenCode V2 Acceptance Result
 
-## v0.17.0 Live OpenCode v2.3.2 + Bun 1.4.4 Host Acceptance
+## v0.17.1 Live OpenCode v2.4.0 + Bun 1.4.4 Host Acceptance
 
 > **Verification Date:** 23 November 2026  
-> **Host Environment:** OpenCode `v2.3.2` (`/usr/local/bin/opencode`), Node `v26.13.1`, Bun `1.4.4`, Linux x86_64  
-> **Plugin Under Test:** `opencode-guardian@0.17.0` (Pure OpenCode V2)  
+> **Host Environment:** OpenCode `v2.4.0` (`/usr/bin/opencode`), Node `v26.13.1`, Bun `1.4.4`, Linux x86_64  
+> **Plugin Under Test:** `opencode-guardian@0.17.1` (Pure OpenCode V2)  
 > **Acceptance Script:** [`sandbox/v2-live-acceptance.mjs`](../sandbox/v2-live-acceptance.mjs)  
 > **Result:** **10 / 10 CHECKS PASS — ZERO DEFECTS**
 
@@ -12,14 +12,14 @@
 | :--- | :--- | :--- | :---: |
 | **Check 1** | Packed `.tgz` in Node `v26.13.1` | Import `.`, `./tui`, and `./rpc` from packed tarball | **PASS** |
 | **Check 2** | Packed `.tgz` in Bun `1.4.4` | Import `.`, `./tui`, `./rpc` & `dist/tui.js` standalone fallback without `ResolveMessage` crash | **PASS** |
-| **Check 3** | V2.3.2 Server Hook & RPC Registration | All V2.3.2 hooks (`experimental.idle` included) & `./rpc` methods registered via `setup(ctx)` | **PASS** |
+| **Check 3** | V2.4.0 Server Hook & RPC Registration | All V2.4.0 hooks (`experimental.idle` included) & `./rpc` methods registered via `setup(ctx)` | **PASS** |
 | **Check 4** | Preflight in `tool.execute.before` & `shell.create.before` | Blocks destructive commands across both tool and shell creation hooks | **PASS** |
 | **Check 5** | Error Secret Redaction | Nested Error credentials redacted before visibility | **PASS** |
 | **Check 6** | Post-Turn Remediation & Clean-Turn RPC Clear | Remediation dispatched on violation; RPC state cleared on clean turn | **PASS** |
 | **Check 7** | Low-I/O Telemetry Filtering | Default `violations` mode filters benign events while preserving violations | **PASS** |
 | **Check 8** | Clean Server Disposal | `setup(ctx)` disposer tears down listeners, hooks, and timers cleanly | **PASS** |
 | **Check 9** | V2 TUI Verification | Additive `sidebar.content` / `session.composer.top` slots, 7 commands + `/guardian`, and `enabled: false` hide | **PASS** |
-| **Check 10** | Real OpenCode `v2.3.2` CLI Host | `/usr/local/bin/opencode` (`v2.3.2`) isolated workspace with plugin config | **PASS** |
+| **Check 10** | Real OpenCode `v2.4.0` CLI Host | `/usr/bin/opencode` (`v2.4.0`) isolated workspace with plugin config | **PASS** |
 
 ---
 

@@ -246,6 +246,8 @@ function GuardianSidebar(props: {
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested": return "! stream stop";
+      case "stream-interrupt-verified": return "✓ stream stopped";
+      case "stream-interrupt-ineffective": return "✕ stream not stopped";
       case "inspection-error": return "✕ inspection error";
       case "preflight-blocked": return "⊘ preflight blocked";
       case "post-remediation": return "↻ remediation sent";
@@ -266,6 +268,7 @@ function GuardianSidebar(props: {
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
+      case "stream-interrupt-ineffective":
       case "remediation-failed": return errorColor();
       case "stream-interrupt-requested":
       case "post-warning":
@@ -273,6 +276,7 @@ function GuardianSidebar(props: {
       case "verification-unavailable": return warningColor();
       case "post-remediation": return props.colors.accent;
       case "remediation-verified":
+      case "stream-interrupt-verified":
       case "preflight-allowed":
       case "post-inspected":
       case "runtime-started": return successColor();
@@ -323,7 +327,7 @@ function GuardianSidebar(props: {
           />
           <StatRow
             label="Interventions"
-            value={`${status().warnings}w · ${status().remediations}r`}
+            value={`${status().warnings}w · ${status().remediations}r${status().streamStops > 0 ? ` · ${status().streamStops}s` : ""}`}
             muted={props.colors.muted}
             text={props.colors.text}
           />
@@ -372,6 +376,15 @@ function GuardianSidebar(props: {
             muted={props.colors.muted}
             text={props.colors.text}
           />
+          <Show when={status().streamStops > 0}>
+            <StatRow
+              label="Stream Stops"
+              value={`${status().streamStops} (${status().streamVerified}✓ ${status().streamIneffective}✗)`}
+              valueColor={status().streamIneffective > 0 ? errorColor() : warningColor()}
+              muted={props.colors.muted}
+              text={props.colors.text}
+            />
+          </Show>
           <Show when={status().errors > 0}>
             <StatRow
               label="Errors"

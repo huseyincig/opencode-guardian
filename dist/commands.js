@@ -42,6 +42,8 @@ export async function guardianCommandReport(command, directory, installedVersion
                     "Verified / failed / unverified: " +
                         status.verified + " / " + status.failed + " / " + status.unverified,
                     "Inspection errors: " + status.errors,
+                    "Stream stops requested / verified / ineffective: " +
+                        status.streamStops + " / " + status.streamVerified + " / " + status.streamIneffective,
                     "Last event: " + (status.lastKind ?? "none"),
                     "Recent rule sample: " + (popular || "none"),
                     "History: " + (status.truncated ? "partial (bounded window)" : "retained log window"),

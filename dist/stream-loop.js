@@ -2,6 +2,11 @@
 import { detectDegenerativeLoop } from "./degeneration.js";
 import { recordGuardianEvent, sessionFingerprint } from "./telemetry.js";
 const TAIL = 2048;
+const DEFAULT_VERIFY_WINDOW_MS = 4000;
+function verifyWindowMs() {
+    const raw = Number(process.env.OPENCODE_GUARDIAN_STREAM_VERIFY_MS);
+    return Number.isFinite(raw) && raw > 0 ? Math.min(60_000, Math.floor(raw)) : DEFAULT_VERIFY_WINDOW_MS;
+}
 function cancellable(operation, signal) {
     return new Promise((resolve, reject) => {
         const abort = () => reject(new Error("Stream inspection cancelled"));
@@ -19,7 +24,39 @@ export class StreamLoopWatcher {
     constructor(options) {
         this.options = options;
     }
-    clear() { this.sessions.clear(); }
+    clear() {
+        for (const state of this.sessions.values())
+            this.endVerification(state);
+        this.sessions.clear();
+    }
+    endVerification(state) {
+        if (!state.verify)
+            return;
+        clearTimeout(state.verify.timer);
+        delete state.verify;
+    }
+    /**
+     * An accepted interrupt only proves the host took the request. Watch the host's own
+     * events afterwards: a terminal execution event proves the stream stopped, whereas
+     * deltas still arriving when the window closes prove it did not.
+     */
+    beginVerification(sessionID, state, directory) {
+        this.endVerification(state);
+        const timer = setTimeout(() => {
+            const verify = state.verify;
+            if (!verify)
+                return;
+            delete state.verify;
+            if (this.options.signal.aborted || this.sessions.get(sessionID) !== state || !state.active)
+                return;
+            if (verify.deltas > 0) {
+                state.stopped = false;
+                recordGuardianEvent({ kind: "stream-interrupt-ineffective", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, verify.directory);
+            }
+        }, verifyWindowMs());
+        timer.unref?.();
+        state.verify = { deltas: 0, directory, timer };
+    }
     dispatch(raw) {
         // event() consumes ownership/lifecycle synchronously before its first await.
         // Never let slow host I/O stop ingestion of a completion or deletion event.
@@ -28,7 +65,12 @@ export class StreamLoopWatcher {
         void task.finally(() => this.tasks.delete(task));
     }
     async drain() { await Promise.allSettled(this.tasks); }
-    forget(sessionID) { this.sessions.delete(sessionID); }
+    forget(sessionID) {
+        const state = this.sessions.get(sessionID);
+        if (state)
+            this.endVerification(state);
+        this.sessions.delete(sessionID);
+    }
     response(sessionID, messageID) {
         let state = this.sessions.get(sessionID);
         if (state?.messageID === messageID)
@@ -59,8 +101,15 @@ export class StreamLoopWatcher {
         }
         if (sid && (event.type === "session.idle" || event.type === "session.execution.interrupted" || event.type === "session.execution.succeeded" || event.type === "session.execution.failed" || (event.type === "session.status" && data.status?.type === "idle"))) {
             const state = this.sessions.get(sid);
-            if (state)
+            if (state) {
+                const verify = state.verify;
+                const stoppedByHost = event.type === "session.execution.interrupted" || event.type === "session.idle" || event.type === "session.status";
+                if (verify && stoppedByHost) {
+                    recordGuardianEvent({ kind: "stream-interrupt-verified", session: sessionFingerprint(sid), rules: ["runtime/circuit-breaker"] }, verify.directory);
+                }
+                this.endVerification(state);
                 state.active = false;
+            }
             return;
         }
         let sessionID, state, key, text, delta = false;
@@ -86,6 +135,8 @@ export class StreamLoopWatcher {
         }
         else
             return;
+        if (delta && state.verify)
+            state.verify.deltas++;
         if (!state.active || state.stopped || state.warned || state.attempts >= 3)
             return;
         let part = state.parts.get(key);
@@ -136,6 +187,7 @@ export class StreamLoopWatcher {
                 if (!current())
                     return;
                 state.stopped = true;
+                this.beginVerification(sessionID, state, directory);
                 // API acceptance alone cannot prove how many tokens, if any, were saved.
                 recordGuardianEvent({ kind: "stream-interrupt-requested", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, directory);
                 this.options.notifier.notify({ kind: "stream-interrupt-requested", ruleId: "runtime/circuit-breaker", sessionID });

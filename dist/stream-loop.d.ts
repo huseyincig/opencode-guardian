@@ -16,6 +16,13 @@ export declare class StreamLoopWatcher {
         notifier: GuardianToastNotifier;
     });
     clear(): void;
+    private endVerification;
+    /**
+     * An accepted interrupt only proves the host took the request. Watch the host's own
+     * events afterwards: a terminal execution event proves the stream stopped, whereas
+     * deltas still arriving when the window closes prove it did not.
+     */
+    private beginVerification;
     dispatch(raw: unknown): void;
     drain(): Promise<void>;
     forget(sessionID: string): void;

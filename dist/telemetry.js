@@ -9,6 +9,8 @@ export const GUARDIAN_MAX_LOG_BYTES = 2 * 1024 * 1024;
 const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ACTIONS = {
     "stream-interrupt-requested": ["interrupt-requested", "unverified"],
+    "stream-interrupt-verified": ["interrupt-checked", "verified"],
+    "stream-interrupt-ineffective": ["interrupt-checked", "reported"],
     "runtime-started": ["started", "started"],
     "preflight-allowed": ["allowed", "allowed"],
     "preflight-blocked": ["blocked-before-execution", "prevented"],
@@ -313,6 +315,9 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
         verified: 0,
         failed: 0,
         unverified: 0,
+        streamStops: 0,
+        streamVerified: 0,
+        streamIneffective: 0,
         redacted: mem?.redactions ?? 0,
         telemetryLevel: settings.level,
         truncated: false,
@@ -385,8 +390,15 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
                 result.inspected = typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0);
                 result.blocked = result.warnings = result.remediations = 0;
                 result.errors = result.verified = result.failed = result.unverified = 0;
+                result.streamStops = result.streamVerified = result.streamIneffective = 0;
                 continue;
             }
+            if (entry.kind === "stream-interrupt-requested")
+                result.streamStops++;
+            if (entry.kind === "stream-interrupt-verified")
+                result.streamVerified++;
+            if (entry.kind === "stream-interrupt-ineffective")
+                result.streamIneffective++;
             if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked" || entry.kind === "post-inspected")
                 result.inspected++;
             if (entry.kind === "preflight-blocked")

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Stream Stop Verification & Visibility (`src/stream-loop.ts`, `src/telemetry.ts`, `src/tui.tsx`, `src/commands.ts`, `scripts/guardian-status.mjs`):**
+  - After an accepted `session.interrupt`, the watcher now checks the host's own events: `session.execution.interrupted` / `session.idle` records `stream-interrupt-verified`; deltas still arriving when the window closes (`OPENCODE_GUARDIAN_STREAM_VERIFY_MS`, default 4000 ms) record `stream-interrupt-ineffective` and re-enable another interrupt attempt. With neither signal, the stop stays `unverified`.
+  - Added `streamStops`, `streamVerified` and `streamIneffective` counters to `readGuardianStatus`, the sidebar (`Interventions` row `Ns` suffix and a `Stream Stops` row), `/guardian-status` and `opencode-guardian-status`.
+  - Added 3 regression tests in `tests/v0172-stream-verify.test.mjs` (**818 / 818** tests passing).
+
 ## 0.17.1 — 2026-11-23
 
 - **OpenCode `v2.4.0` Runtime & SDK Compatibility (`src/index.ts`, `src/evidence.ts`, `package.json`):**

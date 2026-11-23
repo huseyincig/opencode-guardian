@@ -1,9 +1,9 @@
 import { type AuditReason } from "./audit.js";
 import type { GuardianTelemetryConfig, TelemetryLevel } from "./types.js";
 export type { GuardianTelemetryConfig, TelemetryLevel };
-export type GuardianEventKind = "stream-interrupt-requested" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected" | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
+export type GuardianEventKind = "stream-interrupt-requested" | "stream-interrupt-verified" | "stream-interrupt-ineffective" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected" | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
-export type GuardianAction = "interrupt-requested" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned" | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
+export type GuardianAction = "interrupt-requested" | "interrupt-checked" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned" | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
 export type GuardianOutcome = "started" | "allowed" | "prevented" | "reported" | "unverified" | "verified" | "error";
 export interface GuardianEvent {
     at: string;
@@ -32,6 +32,10 @@ export type GuardianStatus = {
     failed: number;
     unverified: number;
     redacted?: number;
+    /** Stream interrupts requested; verified/ineffective are the host-observed outcomes of those requests. */
+    streamStops: number;
+    streamVerified: number;
+    streamIneffective: number;
     telemetryLevel?: TelemetryLevel;
     truncated: boolean;
     lastEvent?: string;

@@ -240,6 +240,10 @@ function GuardianSidebar(props) {
     switch (status().lastKind) {
       case "stream-interrupt-requested":
         return "! stream stop";
+      case "stream-interrupt-verified":
+        return "✓ stream stopped";
+      case "stream-interrupt-ineffective":
+        return "✕ stream not stopped";
       case "inspection-error":
         return "✕ inspection error";
       case "preflight-blocked":
@@ -272,6 +276,7 @@ function GuardianSidebar(props) {
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
+      case "stream-interrupt-ineffective":
       case "remediation-failed":
         return errorColor();
       case "stream-interrupt-requested":
@@ -282,6 +287,7 @@ function GuardianSidebar(props) {
       case "post-remediation":
         return props.colors.accent;
       case "remediation-verified":
+      case "stream-interrupt-verified":
       case "preflight-allowed":
       case "post-inspected":
       case "runtime-started":
@@ -389,7 +395,7 @@ function GuardianSidebar(props) {
         _$insert(_el$17, _$createComponent(StatRow, {
           label: "Interventions",
           get value() {
-            return `${status().warnings}w · ${status().remediations}r`;
+            return `${status().warnings}w · ${status().remediations}r${status().streamStops > 0 ? ` · ${status().streamStops}s` : ""}`;
           },
           get muted() {
             return props.colors.muted;
@@ -493,6 +499,28 @@ function GuardianSidebar(props) {
           },
           get text() {
             return props.colors.text;
+          }
+        }), null);
+        _$insert(_el$18, _$createComponent(Show, {
+          get when() {
+            return status().streamStops > 0;
+          },
+          get children() {
+            return _$createComponent(StatRow, {
+              label: "Stream Stops",
+              get value() {
+                return `${status().streamStops} (${status().streamVerified}✓ ${status().streamIneffective}✗)`;
+              },
+              get valueColor() {
+                return _$memo(() => status().streamIneffective > 0)() ? errorColor() : warningColor();
+              },
+              get muted() {
+                return props.colors.muted;
+              },
+              get text() {
+                return props.colors.text;
+              }
+            });
           }
         }), null);
         _$insert(_el$18, _$createComponent(Show, {

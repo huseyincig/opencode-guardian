@@ -19,5 +19,6 @@ const modeNote =
 console.log(`Guardian | preflight at last start: ${s.preflight} | telemetry mode: ${modeNote}`);
 console.log(`Inspections (tool + turn): ${s.inspected} | blocked tools (preflight): ${s.blocked} | secret redactions (in-memory): ${s.redacted ?? 0}`);
 console.log(`Post-turn warnings: ${s.warnings} | remediations: ${s.remediations} | errors: ${s.errors}`);
+console.log(`Stream stops requested: ${s.streamStops} | verified: ${s.streamVerified} | ineffective: ${s.streamIneffective}`);
 if (s.truncated) console.log("Note: counters cover only the newest 2 MiB of the log.");
 console.log(`Event log: ${guardianEventPath(targetDir)}`);

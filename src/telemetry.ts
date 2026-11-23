@@ -9,11 +9,11 @@ import type { GuardianTelemetryConfig, TelemetryLevel } from "./types.js";
 export type { GuardianTelemetryConfig, TelemetryLevel };
 
 export type GuardianEventKind =
-  | "stream-interrupt-requested" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected"
+  | "stream-interrupt-requested" | "stream-interrupt-verified" | "stream-interrupt-ineffective" | "runtime-started" | "preflight-allowed" | "preflight-blocked" | "post-inspected"
   | "post-warning" | "post-remediation" | "remediation-verified" | "remediation-failed" | "remediation-unverified" | "verification-unavailable" | "inspection-error" | "statistics-reset";
 export type PreflightState = "active" | "disabled" | "unavailable";
 export type GuardianAction =
-  | "interrupt-requested" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned"
+  | "interrupt-requested" | "interrupt-checked" | "started" | "allowed" | "inspected" | "blocked-before-execution" | "warned"
   | "remediation-requested" | "remediation-checked" | "inspection-failed" | "statistics-reset";
 export type GuardianOutcome =
   | "started" | "allowed" | "prevented" | "reported"
@@ -45,6 +45,10 @@ export type GuardianStatus = {
   failed: number;
   unverified: number;
   redacted?: number;
+  /** Stream interrupts requested; verified/ineffective are the host-observed outcomes of those requests. */
+  streamStops: number;
+  streamVerified: number;
+  streamIneffective: number;
   telemetryLevel?: TelemetryLevel;
   truncated: boolean;
   lastEvent?: string;
@@ -58,6 +62,8 @@ const ISO_EVENT_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const ACTIONS: Record<GuardianEventKind, [GuardianAction, GuardianOutcome]> = {
   "stream-interrupt-requested": ["interrupt-requested", "unverified"],
+  "stream-interrupt-verified": ["interrupt-checked", "verified"],
+  "stream-interrupt-ineffective": ["interrupt-checked", "reported"],
   "runtime-started": ["started", "started"],
   "preflight-allowed": ["allowed", "allowed"],
   "preflight-blocked": ["blocked-before-execution", "prevented"],
@@ -382,6 +388,9 @@ export function readGuardianStatus(
     verified: 0,
     failed: 0,
     unverified: 0,
+    streamStops: 0,
+    streamVerified: 0,
+    streamIneffective: 0,
     redacted: mem?.redactions ?? 0,
     telemetryLevel: settings.level,
     truncated: false,
@@ -443,8 +452,12 @@ export function readGuardianStatus(
         result.inspected = typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0);
         result.blocked = result.warnings = result.remediations = 0;
         result.errors = result.verified = result.failed = result.unverified = 0;
+        result.streamStops = result.streamVerified = result.streamIneffective = 0;
         continue;
       }
+      if (entry.kind === "stream-interrupt-requested") result.streamStops++;
+      if (entry.kind === "stream-interrupt-verified") result.streamVerified++;
+      if (entry.kind === "stream-interrupt-ineffective") result.streamIneffective++;
       if (entry.kind === "preflight-allowed" || entry.kind === "preflight-blocked" || entry.kind === "post-inspected") result.inspected++;
       if (entry.kind === "preflight-blocked") result.blocked++;
       if (entry.kind === "post-warning") result.warnings++;

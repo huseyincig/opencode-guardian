@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Telemetry Level Display Fix (`src/telemetry.ts`, `src/commands.ts`, `scripts/guardian-status.mjs`):** Processes that never ran the server `setup()` (the TUI, `/guardian-status`, `opencode-guardian-status`) fell back to `all` and reported `Telemetry mode: all` although the server writes in the documented default `violations` mode. The fallback is now `violations`, and the status commands report the project's effective `telemetry` setting. Added 3 regression tests in `tests/v0172-telemetry-level.test.mjs` (**821 / 821** tests passing).
 - **Stream Stop Verification & Visibility (`src/stream-loop.ts`, `src/telemetry.ts`, `src/tui.tsx`, `src/commands.ts`, `scripts/guardian-status.mjs`):**
   - After an accepted `session.interrupt`, the watcher now checks the host's own events: `session.execution.interrupted` / `session.idle` records `stream-interrupt-verified`; deltas still arriving when the window closes (`OPENCODE_GUARDIAN_STREAM_VERIFY_MS`, default 4000 ms) record `stream-interrupt-ineffective` and re-enable another interrupt attempt. With neither signal, the stop stays `unverified`.
   - Added `streamStops`, `streamVerified` and `streamIneffective` counters to `readGuardianStatus`, the sidebar (`Interventions` row `Ns` suffix and a `Stream Stops` row), `/guardian-status` and `opencode-guardian-status`.

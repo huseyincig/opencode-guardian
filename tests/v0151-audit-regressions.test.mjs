@@ -271,7 +271,7 @@ test("enabled: false cleans up telemetryConfigRegistry and default maxBytes is 5
   const settings = resolveTelemetrySettings(dir);
   assert.equal(settings.maxBytes, DEFAULT_GUARDIAN_LOG_BYTES);
   assert.equal(DEFAULT_GUARDIAN_LOG_BYTES, 512 * 1024);
-  assert.equal(settings.level, "all");
+  assert.equal(settings.level, "violations");
 });
 
 test("GUARDIAN_INTERVENTION_RPC_DEFINITION exposes RPC id and directory-scoped clear schema", () => {

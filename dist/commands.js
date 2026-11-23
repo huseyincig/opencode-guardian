@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { BUILTIN_RULES, DEFAULT_CONFIG, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { checkGuardianUpdate } from "./version-notice.js";
-import { guardianEventPath, readGuardianActivity, readGuardianStatus, resetGuardianStatistics, resolveTelemetrySettings } from "./telemetry.js";
+import { guardianEventPath, readGuardianActivity, readGuardianStatus, configureGuardianTelemetry, resetGuardianStatistics, resolveTelemetrySettings } from "./telemetry.js";
 export const GUARDIAN_COMMANDS = [
     { id: "status", title: "Guardian: Status", description: "Project statistics and remediation outcomes" },
     { id: "activity", title: "Guardian: Activity", description: "Recent redacted security and quality events" },
@@ -14,6 +14,14 @@ export const GUARDIAN_COMMANDS = [
 ];
 function option(value) { return value ? "enabled" : "disabled"; }
 export async function guardianCommandReport(command, directory, installedVersion, options) {
+    // The TUI and status CLI run outside the server process, so their telemetry
+    // registry is empty: report the project's effective setting, not a fallback.
+    try {
+        configureGuardianTelemetry(directory, resolveEffectiveConfig(loadConfig(directory), options).telemetry);
+    }
+    catch {
+        // A broken config is reported by the config command; keep the default level.
+    }
     const status = readGuardianStatus(directory);
     switch (command) {
         case "status": {

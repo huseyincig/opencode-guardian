@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { readGuardianStatus, guardianEventPath } from "../dist/telemetry.js";
+import { readGuardianStatus, guardianEventPath, configureGuardianTelemetry } from "../dist/telemetry.js";
+import { loadConfig, resolveEffectiveConfig } from "../dist/engine.js";
 
 const cwd = process.cwd();
 const targetDir =
@@ -11,6 +12,11 @@ const targetDir =
   fs.existsSync(path.join(cwd, ".git"))
     ? cwd
     : undefined);
+try {
+  if (targetDir) configureGuardianTelemetry(targetDir, resolveEffectiveConfig(loadConfig(targetDir)).telemetry);
+} catch {
+  // Keep the default telemetry level when the project config is unreadable.
+}
 const s = readGuardianStatus(targetDir);
 const modeNote =
   (s.telemetryLevel ?? "violations") === "violations"

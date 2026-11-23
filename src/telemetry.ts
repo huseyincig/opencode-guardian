@@ -255,7 +255,8 @@ export function resolveTelemetrySettings(directory?: string): {
   const registered = telemetryConfigRegistry.get(key) ?? telemetryConfigRegistry.get("__default__");
 
   const enabled = registered?.enabled !== false;
-  let level: TelemetryLevel = registered ? (registered.level ?? "violations") : "all";
+  // Unconfigured processes (TUI, status CLI) must show the documented default.
+  let level: TelemetryLevel = registered?.level ?? "violations";
 
   if (envLevel === "violations" || envLevel === "audit") {
     level = "violations";

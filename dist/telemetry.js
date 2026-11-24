@@ -137,6 +137,25 @@ function checkFile(file) {
 const telemetryConfigRegistry = new Map();
 const verifiedStateDirs = new Set();
 const liveMemoryCounters = new Map();
+const statusFileCache = new Map();
+function fileStatSignature(filePath) {
+    try {
+        const st = fs.lstatSync(filePath, { bigint: true });
+        if (!st.isFile() || st.isSymbolicLink())
+            return "invalid";
+        return `${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.mode}`;
+    }
+    catch (error) {
+        return error.code === "ENOENT" ? "missing" : "error";
+    }
+}
+function invalidateStatusCacheForFile(filePath) {
+    const prefix = `${filePath}\0`;
+    for (const key of statusFileCache.keys()) {
+        if (key.startsWith(prefix))
+            statusFileCache.delete(key);
+    }
+}
 function memoryCounterKey(directory) {
     return directory && typeof directory === "string" && directory.trim().length > 0
         ? projectStateKey(directory)
@@ -176,6 +195,7 @@ export function clearGuardianTelemetryConfig() {
     telemetryConfigRegistry.clear();
     verifiedStateDirs.clear();
     liveMemoryCounters.clear();
+    statusFileCache.clear();
 }
 export function resolveTelemetrySettings(directory) {
     const envTelemetry = process.env.OPENCODE_GUARDIAN_TELEMETRY?.trim().toLowerCase();
@@ -277,6 +297,7 @@ export function recordGuardianEvent(event, directoryArg) {
             if (event.kind === "statistics-reset") {
                 liveMemoryCounters.delete(memoryCounterKey(directoryArg));
             }
+            invalidateStatusCacheForFile(filePath);
             return true;
         }
         finally {
@@ -306,9 +327,32 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
     maxBytes = Number.isFinite(maxBytes) ? Math.max(1, Math.min(GUARDIAN_MAX_LOG_BYTES, Math.floor(maxBytes))) : GUARDIAN_MAX_LOG_BYTES;
     const mem = liveMemoryCounters.get(memoryCounterKey(directory));
     const settings = resolveTelemetrySettings(directory);
+    const inspectedSkippedDisk = typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0);
+    const redactions = mem?.redactions ?? 0;
+    let cacheKey;
+    let sig1 = "missing";
+    let sig2 = "missing";
+    try {
+        const file = guardianEventPath(directory);
+        sig1 = fileStatSignature(file);
+        sig2 = fileStatSignature(file + ".1");
+        cacheKey = `${file}\0${maxBytes}`;
+        const cached = statusFileCache.get(cacheKey);
+        if (cached &&
+            cached.sig1 === sig1 &&
+            cached.sig2 === sig2 &&
+            cached.inspectedSkippedDisk === inspectedSkippedDisk &&
+            cached.redactions === redactions &&
+            cached.telemetryLevel === settings.level) {
+            return { ...cached.status };
+        }
+    }
+    catch {
+        // Fall through to normal read path on path resolution issues.
+    }
     const result = {
         preflight: "unknown",
-        inspected: typeof directoryOrMaxBytes === "number" ? 0 : (mem?.inspectedSkippedDisk ?? 0),
+        inspected: inspectedSkippedDisk,
         blocked: 0,
         warnings: 0,
         remediations: 0,
@@ -319,7 +363,7 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
         streamStops: 0,
         streamVerified: 0,
         streamIneffective: 0,
-        redacted: mem?.redactions ?? 0,
+        redacted: redactions,
         telemetryLevel: settings.level,
         truncated: false,
     };
@@ -421,6 +465,23 @@ export function readGuardianStatus(directoryOrMaxBytes, maxBytesArg = GUARDIAN_M
     catch {
         // A damaged audit file must not prevent the plugin or TUI from starting.
         result.truncated = true;
+    }
+    if (cacheKey && sig1 !== "error" && sig2 !== "error") {
+        statusFileCache.delete(cacheKey);
+        statusFileCache.set(cacheKey, {
+            sig1,
+            sig2,
+            inspectedSkippedDisk,
+            redactions,
+            telemetryLevel: settings.level,
+            status: { ...result },
+        });
+        while (statusFileCache.size > 64) {
+            const oldest = statusFileCache.keys().next().value;
+            if (oldest === undefined)
+                break;
+            statusFileCache.delete(oldest);
+        }
     }
     return result;
 }

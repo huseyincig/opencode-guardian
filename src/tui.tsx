@@ -181,6 +181,31 @@ export function registerGuardianV2Commands(
   }
 }
 
+function guardianStatusEqual(
+  a: ReturnType<typeof readGuardianStatus>,
+  b: ReturnType<typeof readGuardianStatus>
+): boolean {
+  return (
+    a.preflight === b.preflight &&
+    a.inspected === b.inspected &&
+    a.blocked === b.blocked &&
+    a.warnings === b.warnings &&
+    a.remediations === b.remediations &&
+    a.errors === b.errors &&
+    a.verified === b.verified &&
+    a.failed === b.failed &&
+    a.unverified === b.unverified &&
+    a.streamStops === b.streamStops &&
+    a.streamVerified === b.streamVerified &&
+    a.streamIneffective === b.streamIneffective &&
+    a.redacted === b.redacted &&
+    a.telemetryLevel === b.telemetryLevel &&
+    a.truncated === b.truncated &&
+    a.lastEvent === b.lastEvent &&
+    a.lastKind === b.lastKind
+  );
+}
+
 function GuardianSidebar(props: {
   colors: SidebarColors;
   directory?: string;
@@ -191,12 +216,16 @@ function GuardianSidebar(props: {
   const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
   const [status, setStatus] = createSignal(readGuardianStatus(currentDirectory()));
+  const syncStatus = (dir: string) => {
+    const next = readGuardianStatus(dir);
+    setStatus((prev) => (guardianStatusEqual(prev, next) ? prev : next));
+  };
   createEffect(() => {
     const dir = currentDirectory();
     props.refreshVersion?.();
-    setStatus(readGuardianStatus(dir));
+    syncStatus(dir);
   });
-  const timer = setInterval(() => setStatus(readGuardianStatus(currentDirectory())), 2500);
+  const timer = setInterval(() => syncStatus(currentDirectory()), 5000);
   (timer as { unref?: () => void }).unref?.();
   const updateController = new AbortController();
   let disposed = false;
@@ -615,17 +644,44 @@ const v2Plugin: Plugin.Definition = {
         ).catch(() => {});
       }
     };
-    let rpcPoll: ReturnType<typeof setInterval> | undefined;
+    const ACTIVE_RPC_POLL_MS = 500;
+    const IDLE_RPC_POLL_MS = 5000;
+    let rpcPollTimer: ReturnType<typeof setTimeout> | undefined;
+    const nextRpcPollMs = (): number => {
+      const route = context.ui?.router?.current?.();
+      if (route?.type !== "session") return IDLE_RPC_POLL_MS;
+      if (interventions()[route.sessionID]) return ACTIVE_RPC_POLL_MS;
+      const statusFn = context.data?.session?.status;
+      if (typeof statusFn === "function") {
+        try {
+          if (statusFn(route.sessionID) === "idle") return IDLE_RPC_POLL_MS;
+        } catch {}
+      }
+      return ACTIVE_RPC_POLL_MS;
+    };
+    const refreshCurrentSession = () => {
+      const route = context.ui?.router?.current?.();
+      if (route?.type === "session") {
+        void refreshIntervention(route.sessionID);
+      }
+    };
+    const scheduleRpcPoll = () => {
+      if (!interventionRpc || disposed) return;
+      if (rpcPollTimer !== undefined) {
+        clearTimeout(rpcPollTimer);
+        rpcPollTimer = undefined;
+      }
+      rpcPollTimer = setTimeout(() => {
+        rpcPollTimer = undefined;
+        if (disposed) return;
+        refreshCurrentSession();
+        scheduleRpcPoll();
+      }, nextRpcPollMs());
+      (rpcPollTimer as { unref?: () => void }).unref?.();
+    };
     if (interventionRpc) {
-      const refreshCurrentSession = () => {
-        const route = context.ui?.router?.current?.();
-        if (route?.type === "session") {
-          void refreshIntervention(route.sessionID);
-        }
-      };
       refreshCurrentSession();
-      rpcPoll = setInterval(refreshCurrentSession, 500);
-      (rpcPoll as { unref?: () => void }).unref?.();
+      scheduleRpcPoll();
     }
 
     const ownsInterventionScope = (scope: {
@@ -732,9 +788,30 @@ const v2Plugin: Plugin.Definition = {
         void refreshIntervention(route.sessionID);
       }
     };
+    const handleSessionActivity = (event: unknown): void => {
+      const sid = extractTuiEventSessionID(event);
+      const route = context.ui?.router?.current?.();
+      setSidebarVersion((v) => v + 1);
+      if (route?.type === "session" && (!sid || sid === route.sessionID)) {
+        void refreshIntervention(route.sessionID);
+      }
+      scheduleRpcPoll();
+    };
+    let unregisterSessionStatus: (() => void) | undefined;
+    let unregisterSessionIdle: (() => void) | undefined;
     let unregisterPluginUpdated: (() => void) | undefined;
     let unregisterConfigUpdated: (() => void) | undefined;
     if (typeof context.data?.on === "function") {
+      try {
+        unregisterSessionStatus = context.data.on("session.status", handleSessionActivity);
+      } catch {
+        // Optional reactive session status event for adaptive polling.
+      }
+      try {
+        unregisterSessionIdle = context.data.on("session.idle", handleSessionActivity);
+      } catch {
+        // Optional reactive session idle event for adaptive polling.
+      }
       try {
         unregisterPluginUpdated = context.data.on("plugin.updated", handleHostRefresh);
       } catch {
@@ -799,11 +876,13 @@ const v2Plugin: Plugin.Definition = {
       }
       interventionTimers.clear();
       updateNoticeController.abort();
-      if (rpcPoll) clearInterval(rpcPoll);
+      if (rpcPollTimer !== undefined) clearTimeout(rpcPollTimer);
       try { unregisterToast?.(); } catch {}
       try { unregisterToastClear?.(); } catch {}
       try { unregisterSessionDelete?.(); } catch {}
       try { unregisterSessionMoved?.(); } catch {}
+      try { unregisterSessionStatus?.(); } catch {}
+      try { unregisterSessionIdle?.(); } catch {}
       try { unregisterPluginUpdated?.(); } catch {}
       try { unregisterConfigUpdated?.(); } catch {}
       try { conversationSlotDisposer?.(); } catch {}

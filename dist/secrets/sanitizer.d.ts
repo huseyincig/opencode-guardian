@@ -8,6 +8,15 @@ export declare function sanitizeString(text: string, options?: SanitizerOptions)
  */
 export declare function sanitizeObject<T>(data: T, options?: SanitizerOptions, rootInsideMeshEnvelope?: boolean): SanitizeResult<T>;
 /**
+ * Universal Tool Result Sanitizer with redaction metadata.
+ * Runs a single pass over any tool result shape (string, Error, V2 { content, output, metadata },
+ * process { stdout, stderr }, or generic object/array) so callers do not need JSON.stringify diffs.
+ */
+export declare function sanitizeToolResultWithMeta<T>(result: T, options?: SanitizerOptions): {
+    sanitized: T;
+    redactedCount: number;
+};
+/**
  * Universal Tool Result Sanitizer.
  * Safely transforms any tool result shape (string, { output, metadata }, { stdout, stderr }, MCP content)
  * into a sanitized version without modifying internal non-string metadata.

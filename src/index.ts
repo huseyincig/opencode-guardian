@@ -28,7 +28,7 @@ import {
   sanitizeMessages,
   sanitizeObject,
   sanitizeString,
-  sanitizeToolResult,
+  sanitizeToolResultWithMeta,
 } from "./secrets/index.js";
 import {
   createGuardianToastNotifier,
@@ -137,24 +137,25 @@ export {
   resetMeshStateForTests,
 } from "./bridge.js";
 
-function sanitizeV2ToolError<T>(
+function sanitizeV2ToolErrorWithMeta<T>(
   error: T,
   options: NonNullable<ReturnType<typeof resolveSanitizerOptions>>
-): T {
-  const fallback = (): T => {
+): { sanitized: T; redactedCount: number } {
+  const fallback = (): { sanitized: T; redactedCount: number } => {
     const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
     if (error && typeof error === "object") {
       try { Object.setPrototypeOf(safe, Object.getPrototypeOf(error)); } catch {}
     }
-    return safe as unknown as T;
+    return { sanitized: safe as unknown as T, redactedCount: 1 };
   };
 
   try {
     if (!error || typeof error !== "object") {
-      return sanitizeToolResult(error, options);
+      return sanitizeToolResultWithMeta(error, options);
     }
     if (error instanceof Error) {
-      return sanitizeObject(error, options).sanitized;
+      const res = sanitizeObject(error, options);
+      return { sanitized: res.sanitized, redactedCount: res.redactedCount };
     }
     const source = error as Record<string, unknown> & {
       message?: unknown;
@@ -169,15 +170,18 @@ function sanitizeV2ToolError<T>(
     if (typeof source.stack === "string") snapshot.stack = source.stack;
     if (typeof source.name === "string") snapshot.name = source.name;
 
-    const sanitized = sanitizeObject(snapshot, options).sanitized;
-    if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
+    const res = sanitizeObject(snapshot, options);
+    if (!res.sanitized || typeof res.sanitized !== "object" || Array.isArray(res.sanitized)) {
       return fallback();
     }
 
-    return Object.assign(
-      Object.create(Object.getPrototypeOf(error)),
-      sanitized
-    ) as T;
+    return {
+      sanitized: Object.assign(
+        Object.create(Object.getPrototypeOf(error)),
+        res.sanitized
+      ) as T,
+      redactedCount: res.redactedCount,
+    };
   } catch {
     return fallback();
   }
@@ -1723,9 +1727,9 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           if (runtime.config.enabled === false) return;
 
           if (runtime.sanitizer && event.status === "error") {
-            const beforeErr = JSON.stringify(event.error);
-            event.error = sanitizeV2ToolError(event.error, runtime.sanitizer);
-            if (JSON.stringify(event.error) !== beforeErr) {
+            const { sanitized, redactedCount } = sanitizeV2ToolErrorWithMeta(event.error, runtime.sanitizer);
+            event.error = sanitized;
+            if (redactedCount > 0) {
               recordGuardianRedaction(1, observedDirectory);
             }
           }
@@ -1891,9 +1895,9 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           // text. Sanitize only after that rewrite so the parent never receives
           // an unsanitized revised child result.
           if (runtime.sanitizer && event.status === "completed") {
-            const beforeRes = JSON.stringify(event.result);
-            event.result = sanitizeToolResult(event.result, runtime.sanitizer);
-            if (JSON.stringify(event.result) !== beforeRes) {
+            const { sanitized, redactedCount } = sanitizeToolResultWithMeta(event.result, runtime.sanitizer);
+            event.result = sanitized;
+            if (redactedCount > 0) {
               recordGuardianRedaction(1, observedDirectory);
             }
           }

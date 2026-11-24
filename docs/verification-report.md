@@ -1,19 +1,19 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.17.2 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **24 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** (OpenCode V1 support ended in `v0.14.0`).
+This document reports the **v0.17.3 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **24 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** (OpenCode V1 support ended in `v0.14.0`).
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.17.2` (Pure OpenCode V2 `>=2.3.0`)
-- **Previous Package Version:** `v0.17.1` (OpenCode V1 support ended in `v0.14.0`; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **827 / 827 unit, security, mesh interoperability, scope isolation, telemetry, and regression tests passed**, zero failed, cancelled or skipped
+- **Package Version:** OpenCode Guardian `v0.17.3` (Pure OpenCode V2 `>=2.3.0`)
+- **Previous Package Version:** `v0.17.2` (OpenCode V1 support ended in `v0.14.0`; historical v0.6.0 host acceptance evidence retained below)
+- **Current Automated Source Suite:** **830 / 830 unit, security, mesh interoperability, scope isolation, telemetry, and regression tests passed**, zero failed, cancelled or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
 - **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode v2.4.1 (`/usr/bin/opencode`) + Bun `1.4.4` + packed `.tgz`
 - **Historical Live-Host Dual Acceptance (v0.6.0):** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`)
 
-> v0.17.2 aligns `opencode-guardian` with OpenCode `v2.4.1` (`@opencode/plugin` `^2.4.1`, `@opentui/*` `^0.9.9`), reconciles canonical background job keys between `experimental.idle` and `experimental.job.updated`, adds TUI `plugin.updated`/`config.updated` non-blocking recovery, verifies stream stops via host events with sidebar counters, fixes out-of-process telemetry default reporting, and adds opt-in model-invisible chat transcript notices (`notifications.transcript`).
+> v0.17.3 eliminates double `JSON.stringify` diffing and triple regex passes on V2 tool outputs via `sanitizeToolResultWithMeta`, adds nanosecond `lstatSync` memoization (`statusFileCache`) and equality-guarded rendering in `GuardianSidebar`, and upgrades TUI RPC polling to an adaptive event-driven schedule (`500ms` active / `5000ms` idle with immediate `session.status` / `session.idle` wakeups).
 
 ---
 
@@ -289,19 +289,19 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 - **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
 - **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
 
-## Automated Source Verification Results — v0.17.2
+## Automated Source Verification Results — v0.17.3
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 827 tests across all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), OpenCode `v2.4.1` compatibility (canonical `experimental.job.updated` / `experimental.idle` keys, background Code Mode `execute`, dotted Code Mode calls, `ses_aut_*` automation subagent isolation, TUI `plugin.updated`/`config.updated` recovery), stream stop verification & counters, opt-in chat transcript notices (`notifications.transcript`), telemetry level reporting, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), local/global project scope isolation & `XDG_STATE_HOME` compliance, global config merging & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, `session.fork`/subagent isolation, evidence summaries, edit integrity, secret redaction, external per-project low-I/O & in-memory telemetry, and handoff protocol | **827 / 827 PASS** |
+| **Unit & Regression Suite** | 830 tests across all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), OpenCode `v2.4.1` compatibility (canonical `experimental.job.updated` / `experimental.idle` keys, background Code Mode `execute`, dotted Code Mode calls, `ses_aut_*` automation subagent isolation, TUI `plugin.updated`/`config.updated` recovery), single-pass `sanitizeToolResultWithMeta`, nanosecond `statusFileCache`, adaptive TUI RPC polling, stream stop verification & counters, opt-in chat transcript notices (`notifications.transcript`), telemetry level reporting, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), local/global project scope isolation & `XDG_STATE_HOME` compliance, global config merging & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, `session.fork`/subagent isolation, evidence summaries, edit integrity, secret redaction, external per-project low-I/O & in-memory telemetry, and handoff protocol | **830 / 830 PASS** |
 | **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
 | **Smoke Test** | V2 `setup(ctx)` plugin initialization, idle inspection, and expected remediation | **PASS** |
 | **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
-| **Lint** | Oxlint (`src` + `tests`, warnings denied; 118 files) | **PASS** |
+| **Lint** | Oxlint (`src` + `tests`, warnings denied; 119 files) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
 | **Production Audit** | `npm audit --omit=dev` | **PASS** (0 vulnerabilities) |
 | **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** (0 critical, tracked upstream chains) |
-| **Packaging Dry Run** | `npm pack --dry-run` (`v0.17.2` metadata) | **PASS** |
+| **Packaging Dry Run** | `npm pack --dry-run` (`v0.17.3` metadata) | **PASS** |
 | **Live OpenCode V2 Acceptance** | Packed `.tgz` in Node `26.13.1` + Bun `1.4.4`, V2.4.1 server/RPC/TUI, and real `/usr/bin/opencode` (`v2.4.1`) (`sandbox/v2-live-acceptance.mjs`) | **10 / 10 PASS** |
 
 ---

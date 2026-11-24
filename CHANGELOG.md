@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.3 — 2026-11-24
+
+- **Server & TUI Runtime Performance Optimizations (`src/secrets/sanitizer.ts`, `src/index.ts`, `src/telemetry.ts`, `src/tui.tsx`):**
+  - **Single-Pass Tool Result Sanitization (`sanitizeToolResultWithMeta` & `sanitizeV2ToolErrorWithMeta`):** Collapsed OpenCode V2 `{ content, metadata }` tool output redaction from 3 redundant regex passes to a single pass, and removed double `JSON.stringify` diffing in `tool.hook("execute.after")` by counting redactions directly from `redactedCount > 0`.
+  - **`lstatSync` Nanosecond Telemetry Cache & Equality-Guarded Sidebar:** Added a bounded `statusFileCache` (`ino + size + mtimeNs + ctimeNs + mode`, immediately invalidated on `recordGuardianEvent` and `clearGuardianTelemetryConfig`) to `readGuardianStatus` so unchanged logs skip `openSync`/`readSync`/`JSON.parse`. Added `guardianStatusEqual` to `GuardianSidebar` to prevent redundant Solid re-renders and relaxed the idle sidebar poll interval from `2500ms` to `5000ms`.
+  - **Adaptive Event-Driven TUI RPC Polling:** Replaced fixed `500ms` `setInterval` RPC polling with an adaptive `setTimeout` schedule (`500ms` while a session is `running` or an intervention banner is active, `5000ms` while `idle` with no active banner — 10x lower idle RPC traffic) paired with immediate event-driven wakeups on `session.status` and `session.idle`.
+- **Verification:**
+  - Added 3 regression tests in `tests/v0173-perf-optimizations.test.mjs` (**830 / 830** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 119 files).
+
 ## 0.17.2 — 2026-11-24
 
 - **OpenCode `v2.4.1` SDK & Runtime Alignment (`package.json`, `src/index.ts`, `src/tui.tsx`):**

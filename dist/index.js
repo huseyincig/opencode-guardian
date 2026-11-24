@@ -10,7 +10,7 @@ import { VerificationSnapshotStore } from "./evidence.js";
 import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, cacheV2SessionPermissions, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
-import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResult, } from "./secrets/index.js";
+import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
 import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
@@ -53,7 +53,7 @@ export * from "./intervention.js";
 export * from "./intervention-rpc.js";
 export * from "./provenance.js";
 export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, setActiveMeshHandoff, getActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, clearActiveMeshHandoff, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
-function sanitizeV2ToolError(error, options) {
+function sanitizeV2ToolErrorWithMeta(error, options) {
     const fallback = () => {
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
         if (error && typeof error === "object") {
@@ -62,14 +62,15 @@ function sanitizeV2ToolError(error, options) {
             }
             catch { }
         }
-        return safe;
+        return { sanitized: safe, redactedCount: 1 };
     };
     try {
         if (!error || typeof error !== "object") {
-            return sanitizeToolResult(error, options);
+            return sanitizeToolResultWithMeta(error, options);
         }
         if (error instanceof Error) {
-            return sanitizeObject(error, options).sanitized;
+            const res = sanitizeObject(error, options);
+            return { sanitized: res.sanitized, redactedCount: res.redactedCount };
         }
         const source = error;
         const snapshot = { ...source };
@@ -82,11 +83,14 @@ function sanitizeV2ToolError(error, options) {
             snapshot.stack = source.stack;
         if (typeof source.name === "string")
             snapshot.name = source.name;
-        const sanitized = sanitizeObject(snapshot, options).sanitized;
-        if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
+        const res = sanitizeObject(snapshot, options);
+        if (!res.sanitized || typeof res.sanitized !== "object" || Array.isArray(res.sanitized)) {
             return fallback();
         }
-        return Object.assign(Object.create(Object.getPrototypeOf(error)), sanitized);
+        return {
+            sanitized: Object.assign(Object.create(Object.getPrototypeOf(error)), res.sanitized),
+            redactedCount: res.redactedCount,
+        };
     }
     catch {
         return fallback();
@@ -1492,9 +1496,9 @@ const setup = async (context) => {
                     if (runtime.config.enabled === false)
                         return;
                     if (runtime.sanitizer && event.status === "error") {
-                        const beforeErr = JSON.stringify(event.error);
-                        event.error = sanitizeV2ToolError(event.error, runtime.sanitizer);
-                        if (JSON.stringify(event.error) !== beforeErr) {
+                        const { sanitized, redactedCount } = sanitizeV2ToolErrorWithMeta(event.error, runtime.sanitizer);
+                        event.error = sanitized;
+                        if (redactedCount > 0) {
                             recordGuardianRedaction(1, observedDirectory);
                         }
                     }
@@ -1625,9 +1629,9 @@ const setup = async (context) => {
                     // text. Sanitize only after that rewrite so the parent never receives
                     // an unsanitized revised child result.
                     if (runtime.sanitizer && event.status === "completed") {
-                        const beforeRes = JSON.stringify(event.result);
-                        event.result = sanitizeToolResult(event.result, runtime.sanitizer);
-                        if (JSON.stringify(event.result) !== beforeRes) {
+                        const { sanitized, redactedCount } = sanitizeToolResultWithMeta(event.result, runtime.sanitizer);
+                        event.result = sanitized;
+                        if (redactedCount > 0) {
                             recordGuardianRedaction(1, observedDirectory);
                         }
                     }

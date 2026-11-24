@@ -400,62 +400,36 @@ export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = fals
     }
 }
 /**
+ * Universal Tool Result Sanitizer with redaction metadata.
+ * Runs a single pass over any tool result shape (string, Error, V2 { content, output, metadata },
+ * process { stdout, stderr }, or generic object/array) so callers do not need JSON.stringify diffs.
+ */
+export function sanitizeToolResultWithMeta(result, options = {}) {
+    if (result === null || result === undefined) {
+        return { sanitized: result, redactedCount: 0 };
+    }
+    try {
+        if (typeof result === 'string') {
+            const res = sanitizeString(result, options);
+            return { sanitized: res.sanitized, redactedCount: res.redactedCount };
+        }
+        if (typeof result === 'object') {
+            const res = sanitizeObject(result, options);
+            return { sanitized: res.sanitized, redactedCount: res.redactedCount };
+        }
+        return { sanitized: result, redactedCount: 0 };
+    }
+    catch {
+        return { sanitized: FAIL_SAFE_OUTPUT, redactedCount: 1 };
+    }
+}
+/**
  * Universal Tool Result Sanitizer.
  * Safely transforms any tool result shape (string, { output, metadata }, { stdout, stderr }, MCP content)
  * into a sanitized version without modifying internal non-string metadata.
  */
 export function sanitizeToolResult(result, options = {}) {
-    if (result === null || result === undefined)
-        return result;
-    try {
-        if (typeof result === 'string') {
-            return sanitizeString(result, options).sanitized;
-        }
-        if (result instanceof Error) {
-            return sanitizeObject(result, options).sanitized;
-        }
-        if (typeof result === 'object') {
-            // Check for common tool result shapes
-            const resObj = result;
-            // 1. OpenCode V2 tool output shape: { title?, output, metadata? }
-            if ('output' in resObj && typeof resObj.output === 'string') {
-                // output may coexist with content, title and provider-specific fields.
-                // Redact the complete envelope before returning any sibling to a host.
-                return sanitizeObject(resObj, options).sanitized;
-            }
-            // 2. Process stdout/stderr shape: { stdout, stderr, ... }.
-            // Sanitize the complete envelope so sibling metadata/raw fields cannot
-            // retain a secret after stdout/stderr themselves are redacted.
-            if ('stdout' in resObj || 'stderr' in resObj) {
-                return sanitizeObject(resObj, options).sanitized;
-            }
-            // 3. MCP/OpenCode content shape: { content: [...], output?, metadata? }.
-            // Tool.Result officially allows output/content/metadata siblings. Never
-            // sanitize only content and then spread raw sibling fields back in.
-            if (Array.isArray(resObj.content)) {
-                const sanitizedContent = resObj.content.map((item) => {
-                    if (item && typeof item === 'object' && 'text' in item && typeof item.text === 'string') {
-                        return {
-                            ...sanitizeObject(item, options).sanitized,
-                            text: sanitizeString(item.text, options).sanitized,
-                        };
-                    }
-                    return sanitizeObject(item, options).sanitized;
-                });
-                const sanitizedEnvelope = sanitizeObject(resObj, options).sanitized;
-                return {
-                    ...sanitizedEnvelope,
-                    content: sanitizedContent,
-                };
-            }
-            // Generic object/array
-            return sanitizeObject(result, options).sanitized;
-        }
-        return result;
-    }
-    catch {
-        return FAIL_SAFE_OUTPUT;
-    }
+    return sanitizeToolResultWithMeta(result, options).sanitized;
 }
 /**
  * Sanitizes an array of session messages and parts before sending to the model context.

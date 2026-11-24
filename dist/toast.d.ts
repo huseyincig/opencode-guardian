@@ -19,12 +19,20 @@ export interface GuardianToastPayload {
     variant: GuardianToastVariant;
     duration: number;
 }
+export interface GuardianInterventionDetail {
+    ruleId: string;
+    pattern?: string | undefined;
+    description?: string | undefined;
+    filePath?: string | undefined;
+    confidence?: "low" | "medium" | "high" | undefined;
+}
 export interface GuardianInterventionInput {
     kind: GuardianInterventionKind;
     ruleIds?: readonly string[] | undefined;
     ruleId?: string | undefined;
     tool?: string | undefined;
     sessionID?: string | undefined;
+    details?: readonly GuardianInterventionDetail[] | undefined;
 }
 export interface GuardianToastScope {
     directory?: string | undefined;
@@ -40,6 +48,12 @@ export interface GuardianToastNotifier {
     notify(input: GuardianInterventionInput): void;
     clear?(sessionID: string): void;
 }
+import type { SanitizerOptions } from "./secrets/types.js";
+/**
+ * Formats a detailed, secret-safe, model-invisible chat transcript notice
+ * for `notifications.transcript: true`.
+ */
+export declare function formatGuardianTranscriptNotice(input: GuardianInterventionInput, sanitizer?: SanitizerOptions | null): string;
 export declare function sanitizeToastRuleId(raw: unknown): string;
 export declare function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload;
 export declare function registerToastListener(listener: GuardianToastListener, scope?: GuardianToastScope): () => void;

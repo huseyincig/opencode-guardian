@@ -11,7 +11,7 @@ import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, cacheV2SessionPermissions, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
 import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
-import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
+import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, formatGuardianTranscriptNotice, } from "./toast.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
@@ -566,6 +566,21 @@ function createTrackedToastNotifier(base) {
         [INTERVENTION_TRACKER]: tracker,
     };
 }
+function buildInterventionDetails(results) {
+    const details = [];
+    for (const item of results) {
+        for (const finding of item.findings) {
+            details.push({
+                ruleId: finding.ruleId || item.ruleId,
+                ...(finding.pattern ? { pattern: finding.pattern } : {}),
+                ...(finding.description ? { description: finding.description } : {}),
+                ...(finding.filePath ? { filePath: finding.filePath } : {}),
+                ...(finding.confidence ? { confidence: finding.confidence } : {}),
+            });
+        }
+    }
+    return details;
+}
 function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
     const findings = result.results.filter((item) => item.findings.length > 0);
     // Only completed, non-duplicate rule evaluations count toward Inspected.
@@ -619,6 +634,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
         toastNotifier?.notify({
             kind: "warning",
             ruleIds: findings.map((item) => item.ruleId),
+            details: buildInterventionDetails(findings),
             sessionID,
         });
     }
@@ -712,6 +728,7 @@ async function finalizeSubagentHandoff(input) {
                 input.toastNotifier?.notify({
                     kind: "remediation",
                     ruleIds: findings.map((item) => item.ruleId),
+                    details: buildInterventionDetails(findings),
                     sessionID: input.sessionID,
                 });
             }
@@ -924,6 +941,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 toastNotifier?.notify({
                     kind: "remediation",
                     ruleIds: findings.map((item) => item.ruleId),
+                    details: buildInterventionDetails(findings),
                     sessionID,
                 });
             }
@@ -1518,8 +1536,7 @@ const setup = async (context) => {
             const runtime = runtimeForDirectory(runtimeDirectory);
             if (runtime.config.enabled === false || runtime.config.notifications?.transcript !== true)
                 return;
-            const payload = formatGuardianToast(input);
-            const text = `[Guardian] ${payload.title.replace(/^Guardian\s+[—-]\s+/, "")}: ${payload.message}`;
+            const text = formatGuardianTranscriptNotice(input, runtime.sanitizer);
             const now = Date.now();
             const last = lastTranscriptNotice.get(sid);
             if (last && last.text === text && now - last.at < 10_000)

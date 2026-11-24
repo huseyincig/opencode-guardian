@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.6 — 2026-11-24
+
+- **Detailed, Secret-Safe Chat Transcript Notices (`src/toast.ts`, `src/index.ts`, `src/commands.ts`):**
+  - Added `formatGuardianTranscriptNotice` and `GuardianInterventionDetail` so `notifications.transcript: true` posts rich, structured, model-invisible (`visible`, `resume: false`) intervention entries directly into the chat flow with unmistakable intervention headers (`⊘ BLOCKED`, `↻ REMEDIATION`, `⏹ STREAM STOP`, `▲ WARNING`), deduplicated per-finding bullets (`ruleId`, `pattern`, optional `[filePath]`, and bounded `description`), and a clear `Action:` line.
+  - All free-text detail fields are passed through `sanitizeString` before posting so raw secrets and raw model prose never leak into the transcript.
+  - Surfaced `Chat transcript notices: enabled|disabled` in `/guardian config`.
+- **Verification:**
+  - Added 2 regression tests in `tests/v0172-transcript-notice.test.mjs` (**842 / 842** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 121 files).
+
 ## 0.17.5 — 2026-11-24
 
 - **Multi-Location Event Ownership & Process-Shared Deduplication (`src/index.ts`):**

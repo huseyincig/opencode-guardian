@@ -17,11 +17,16 @@ console.log("===================================================================
 const repoDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-v2-live-"));
 const oldStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+const oldConfigDir = process.env.OPENCODE_CONFIG_DIR;
 process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(tmpRoot, "state");
+process.env.OPENCODE_CONFIG_DIR = path.join(tmpRoot, "global-config");
+fs.mkdirSync(process.env.OPENCODE_CONFIG_DIR, { recursive: true });
 
 const cleanupTmp = () => {
   if (oldStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
   else process.env.OPENCODE_GUARDIAN_STATE_DIR = oldStateDir;
+  if (oldConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = oldConfigDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 };
 
@@ -227,10 +232,11 @@ try {
   // Post-turn remediation & RPC intervention active -> clean turn clears
   // OpenCode v2.4.1 emits session.execution.succeeded (not legacy session.idle).
   await pushEvent({ type: "session.execution.succeeded", data: { sessionID: "s-live" } });
-  for (let i = 0; i < 60 && synthetics.length === 0; i++) {
+  const hasRemediation = () => synthetics.some((s) => s.description === "OpenCode Guardian remediation");
+  for (let i = 0; i < 60 && !hasRemediation(); i++) {
     await new Promise((r) => setTimeout(r, 15));
   }
-  assert.ok(synthetics.length >= 1, "Expected post-turn remediation on session.execution.succeeded");
+  assert.ok(hasRemediation(), "Expected post-turn remediation on session.execution.succeeded");
   const snapActive = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID: "s-live" });
   assert.equal(snapActive.active, true);
 

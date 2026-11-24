@@ -142,6 +142,7 @@ export async function guardianCommandReport(command, directory, installedVersion
                     "Remediation budget: " + (config.remediationBudget ?? 1),
                     "Iteration budget: " + (config.iterationBudget ?? 3),
                     "Update notice: " + option(config.updateNotice?.enabled !== false),
+                    "Chat transcript notices: " + option(config.notifications?.transcript === true),
                     "Configured rule overrides: " + Object.keys(config.rules ?? {}).length,
                     "Sensitive configuration values are not displayed.",
                 ].join("\n"),

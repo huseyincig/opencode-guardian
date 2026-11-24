@@ -1,6 +1,6 @@
 # Security Benchmark & Synthetic Preflight Test Suite
 
-Documentation for OpenCode Guardian **v0.17.5**.
+Documentation for OpenCode Guardian **v0.17.6**.
 
 Guardian includes a curated suite of synthetic benchmark tests that evaluate preflight shell-risk detection logic without executing destructive commands or mutating files.
 
@@ -37,4 +37,4 @@ The frozen test suite defined in [`tests/security-benchmark.test.mjs`](../tests/
 
 The 17-case frozen benchmark above is a limited synthetic corpus, not universal shell protection. Additional `tests/repair-followup.test.mjs` cases cover privileged Node Command execution and structured `process_start` inputs, including literal Windows CMD/PowerShell deletion forms. Strict preflight remains opt-in and does not replace host permissions or OS sandboxing.
 
-The v0.17.5 pure OpenCode V2 engine additions and low-I/O telemetry architecture are described in [discipline coverage](discipline-coverage.md). The 28-case discipline corpus and the frozen 17-case shell benchmark measure separate synthetic case sets; neither establishes real-world detection accuracy.
+The v0.17.6 pure OpenCode V2 engine additions and low-I/O telemetry architecture are described in [discipline coverage](discipline-coverage.md). The 28-case discipline corpus and the frozen 17-case shell benchmark measure separate synthetic case sets; neither establishes real-world detection accuracy.

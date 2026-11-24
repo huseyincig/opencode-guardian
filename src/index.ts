@@ -34,6 +34,8 @@ import {
   createGuardianToastNotifier,
   dispatchGuardianToastClear,
   formatGuardianToast,
+  formatGuardianTranscriptNotice,
+  type GuardianInterventionDetail,
   type GuardianToastNotifier,
   type GuardianInterventionInput,
   type GuardianToastPayload,
@@ -710,6 +712,24 @@ function createTrackedToastNotifier(base: GuardianToastNotifier): TrackedGuardia
   };
 }
 
+function buildInterventionDetails(
+  results: readonly EngineExecutionResult["results"][number][]
+): GuardianInterventionDetail[] {
+  const details: GuardianInterventionDetail[] = [];
+  for (const item of results) {
+    for (const finding of item.findings) {
+      details.push({
+        ruleId: finding.ruleId || item.ruleId,
+        ...(finding.pattern ? { pattern: finding.pattern } : {}),
+        ...(finding.description ? { description: finding.description } : {}),
+        ...(finding.filePath ? { filePath: finding.filePath } : {}),
+        ...(finding.confidence ? { confidence: finding.confidence } : {}),
+      });
+    }
+  }
+  return details;
+}
+
 function recordInspectionOutcome(
   result: EngineExecutionResult,
   sessionID: string,
@@ -769,6 +789,7 @@ function recordInspectionOutcome(
     toastNotifier?.notify({
       kind: "warning",
       ruleIds: findings.map((item) => item.ruleId),
+      details: buildInterventionDetails(findings),
       sessionID,
     });
   }
@@ -888,6 +909,7 @@ async function finalizeSubagentHandoff(input: {
         input.toastNotifier?.notify({
           kind: "remediation",
           ruleIds: findings.map((item) => item.ruleId),
+          details: buildInterventionDetails(findings),
           sessionID: input.sessionID,
         });
       } catch {
@@ -1125,6 +1147,7 @@ async function handleSessionIdle(
         toastNotifier?.notify({
           kind: "remediation",
           ruleIds: findings.map((item) => item.ruleId),
+          details: buildInterventionDetails(findings),
           sessionID,
         });
       } catch (promptError) {
@@ -1784,8 +1807,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     try {
       const runtime = runtimeForDirectory(runtimeDirectory);
       if (runtime.config.enabled === false || runtime.config.notifications?.transcript !== true) return;
-      const payload = formatGuardianToast(input);
-      const text = `[Guardian] ${payload.title.replace(/^Guardian\s+[—-]\s+/, "")}: ${payload.message}`;
+      const text = formatGuardianTranscriptNotice(input, runtime.sanitizer);
       const now = Date.now();
       const last = lastTranscriptNotice.get(sid);
       if (last && last.text === text && now - last.at < 10_000) return;

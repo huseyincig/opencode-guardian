@@ -16,6 +16,100 @@ const activeClearListeners = new Set();
 const recentDispatches = new Map();
 const DEDUPE_WINDOW_MS = 600;
 import { SAFE_RULE_IDS } from "./audit.js";
+import { sanitizeString } from "./secrets/sanitizer.js";
+const DEFAULT_TRANSCRIPT_SANITIZER = {
+    replacement: "[REDACTED]",
+};
+function cleanTranscriptField(raw, maxLen, sanitizer) {
+    if (typeof raw !== "string")
+        return undefined;
+    const collapsed = raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    if (!collapsed)
+        return undefined;
+    const activeSanitizer = sanitizer ?? DEFAULT_TRANSCRIPT_SANITIZER;
+    const redacted = sanitizeString(collapsed, activeSanitizer).sanitized;
+    return redacted.length > maxLen ? `${redacted.slice(0, maxLen - 1)}…` : redacted;
+}
+/**
+ * Formats a detailed, secret-safe, model-invisible chat transcript notice
+ * for `notifications.transcript: true`.
+ */
+export function formatGuardianTranscriptNotice(input, sanitizer) {
+    const headerByKind = {
+        "preflight-blocked": {
+            header: "[Guardian] ⊘ BLOCKED — Preflight safety block",
+            action: "Execution was prevented before running.",
+        },
+        remediation: {
+            header: "[Guardian] ↻ REMEDIATION — Correction requested",
+            action: "Agent was asked to correct the issue.",
+        },
+        "stream-interrupt-requested": {
+            header: "[Guardian] ⏹ STREAM STOP — Repetition detected",
+            action: "A stream interruption was requested.",
+        },
+        warning: {
+            header: "[Guardian] ▲ WARNING — Advisory finding",
+            action: "Advisory notice recorded (execution allowed).",
+        },
+    };
+    const { header, action } = headerByKind[input.kind];
+    const lines = [header];
+    if (input.kind === "stream-interrupt-requested") {
+        lines.push("- runtime/circuit-breaker: Repetitive generation detected in output stream.");
+    }
+    else if (input.kind === "preflight-blocked") {
+        const safeRule = sanitizeToastRuleId(input.ruleId ?? input.ruleIds?.[0] ?? "preflight");
+        const safeTool = typeof input.tool === "string" && /^[a-z0-9_.-]+$/i.test(input.tool.trim())
+            ? input.tool.trim()
+            : undefined;
+        const toolSuffix = safeTool ? ` (tool: ${safeTool})` : "";
+        lines.push(`- preflight / ${safeRule}${toolSuffix}: Dangerous operation blocked by preflight policy.`);
+    }
+    else if (Array.isArray(input.details) && input.details.length > 0) {
+        const seen = new Set();
+        const bullets = [];
+        for (const detail of input.details) {
+            const ruleId = sanitizeToastRuleId(detail.ruleId);
+            const pattern = cleanTranscriptField(detail.pattern, 80, sanitizer);
+            const description = cleanTranscriptField(detail.description, 180, sanitizer);
+            const filePath = cleanTranscriptField(detail.filePath, 120, sanitizer);
+            const key = `${ruleId}|${pattern ?? ""}|${description ?? ""}|${filePath ?? ""}`;
+            if (seen.has(key))
+                continue;
+            seen.add(key);
+            let entry = `- ${ruleId}`;
+            if (pattern)
+                entry += ` (${pattern})`;
+            if (filePath)
+                entry += ` [${filePath}]`;
+            if (description)
+                entry += `: ${description}`;
+            bullets.push(entry);
+        }
+        const MAX_BULLETS = 6;
+        lines.push(...bullets.slice(0, MAX_BULLETS));
+        if (bullets.length > MAX_BULLETS) {
+            lines.push(`- ... (+${bullets.length - MAX_BULLETS} more findings)`);
+        }
+    }
+    else {
+        const rawRules = Array.isArray(input.ruleIds) && input.ruleIds.length
+            ? input.ruleIds
+            : input.ruleId
+                ? [input.ruleId]
+                : ["quality/policy"];
+        const uniqueRules = Array.from(new Set(rawRules.map(sanitizeToastRuleId)));
+        for (const ruleId of uniqueRules.slice(0, 6)) {
+            lines.push(`- ${ruleId}`);
+        }
+        if (uniqueRules.length > 6) {
+            lines.push(`- ... (+${uniqueRules.length - 6} more rules)`);
+        }
+    }
+    lines.push(`Action: ${action}`);
+    return lines.join("\n");
+}
 export function sanitizeToastRuleId(raw) {
     if (typeof raw !== "string")
         return "guardian/policy";

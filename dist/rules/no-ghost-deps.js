@@ -680,8 +680,10 @@ export function isHallucinatedOrSuspiciousPackage(ecosystemOrName, name) {
     return false;
 }
 function getNodePackageName(importPath) {
-    if (importPath.startsWith("node:") || importPath.startsWith("#"))
+    if (/^(?:node|bun|data|file|https?|blob|virtual):/i.test(importPath) ||
+        importPath.startsWith("#")) {
         return "";
+    }
     if (importPath.startsWith(".") ||
         importPath.startsWith("/") ||
         importPath.startsWith("~")) {

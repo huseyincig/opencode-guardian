@@ -753,18 +753,62 @@ export function hasUnfinishedBackgroundTool(messages) {
             p.ignored !== true &&
             p.text.trim().length > 0));
     const turn = lastHumanIdx >= 0 ? messages.slice(lastHumanIdx) : messages;
-    const runningIDs = new Set();
-    const finishedIDs = new Set();
+    const activeIDs = new Set();
     let anonymousRunning = 0;
     for (const msg of turn) {
         for (const part of msg.parts) {
+            // OpenCode V2 background subagent completion notices arrive as synthetic
+            // user text messages with metadata: { source: "subagent", childID, state }.
+            if (part.type === "text" && part.synthetic === true) {
+                const rawMeta = part.metadata;
+                const meta = rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)
+                    ? rawMeta
+                    : undefined;
+                if (meta?.source === "subagent") {
+                    const childID = typeof meta.childID === "string" && meta.childID.length > 0
+                        ? meta.childID
+                        : typeof meta.childSessionID === "string" && meta.childSessionID.length > 0
+                            ? meta.childSessionID
+                            : typeof meta.sessionID === "string" && meta.sessionID.length > 0
+                                ? meta.sessionID
+                                : undefined;
+                    const subState = meta.state ?? meta.status;
+                    if (childID) {
+                        if (subState === "running") {
+                            activeIDs.add(childID);
+                        }
+                        else {
+                            activeIDs.delete(childID);
+                        }
+                    }
+                }
+                continue;
+            }
             if (part.type !== "tool" || !part.state)
                 continue;
             const meta = part.state.metadata;
             const outputText = typeof part.state.output === "string" ? part.state.output : "";
+            const toolName = typeof part.tool === "string"
+                ? part.tool
+                : typeof part.name === "string"
+                    ? part.name
+                    : undefined;
+            const isSubagentTool = toolName === "subagent";
+            const subagentChildID = isSubagentTool
+                ? (typeof meta?.childSessionID === "string" && meta.childSessionID.length > 0
+                    ? meta.childSessionID
+                    : typeof meta?.childID === "string" && meta.childID.length > 0
+                        ? meta.childID
+                        : typeof meta?.sessionID === "string" && meta.sessionID.length > 0
+                            ? meta.sessionID
+                            : undefined)
+                : undefined;
             const shellID = typeof meta?.shellID === "string" ? meta.shellID : undefined;
             const jobID = typeof meta?.jobID === "string" ? meta.jobID : undefined;
-            const id = shellID ?? jobID ?? (typeof part.callID === "string" ? part.callID : undefined);
+            const id = subagentChildID ??
+                shellID ??
+                jobID ??
+                (typeof part.callID === "string" ? part.callID : undefined);
             const isMovedToBackground = /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(outputText) ||
                 /(?:^|\n)The (?:command|execution) did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText) ||
                 /\bmoved to the background\s*\(job\b/i.test(outputText);
@@ -779,22 +823,16 @@ export function hasUnfinishedBackgroundTool(messages) {
                 isPendingJobID;
             if (isRunning) {
                 if (id)
-                    runningIDs.add(id);
+                    activeIDs.add(id);
                 else
                     anonymousRunning += 1;
             }
             else if (id && (part.state.status === "completed" || part.state.status === "error")) {
-                finishedIDs.add(id);
+                activeIDs.delete(id);
             }
         }
     }
-    if (anonymousRunning > 0)
-        return true;
-    for (const id of runningIDs) {
-        if (!finishedIDs.has(id))
-            return true;
-    }
-    return false;
+    return anonymousRunning > 0 || activeIDs.size > 0;
 }
 /**
  * Common handler to process session.idle events in OpenCode V2.
@@ -2054,6 +2092,7 @@ const setup = async (context) => {
                         continue;
                     }
                     const idleEvent = eventData.type === "session.idle" ||
+                        eventData.type === "session.execution.succeeded" ||
                         (eventData.type === "session.status" &&
                             (eventData.data?.status?.type ?? eventData.properties?.status?.type) === "idle");
                     if (!idleEvent)

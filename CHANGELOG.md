@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.4 — 2026-11-24
+
+- **OpenCode `v2.4.1` Execution Lifecycle & Background Subagent Fixes (`src/index.ts`, `src/tui.tsx`, `src/rules/no-ghost-deps.ts`):**
+  - **Server Post-Turn Trigger (`session.execution.succeeded`):** Added `session.execution.succeeded` to the V2 server event loop alongside `session.idle` and `session.status` (`status.type === "idle"`), restoring post-turn inspection across all 14 rules on OpenCode `v2.4.x` (where the execution engine publishes `session.execution.succeeded` rather than legacy `session.idle` / `session.status`). Existing per-message deduplication (`inspectedMessages`) prevents duplicate runs if a host emits both events.
+  - **Background Subagent Lifecycle & Warm Child Reuse (`hasUnfinishedBackgroundTool`):** Updated `hasUnfinishedBackgroundTool` to pair background `subagent` tool calls (`metadata.sessionID` / `childSessionID`) chronologically with OpenCode V2 synthetic completion notices (`metadata: { source: "subagent", childID, state }`), preventing root orchestrator sessions from staying permanently deferred after a background worker completes while still deferring during warm child session reuse.
+  - **TUI Reactive Execution Wakeups (`src/tui.tsx`):** Subscribed the adaptive TUI RPC poller to `session.execution.started`, `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` (in addition to `session.status` / `session.idle`) with clean unsubscribe on teardown.
+  - **URI Scheme Imports in `manifest/no-ghost-deps`:** Ignored standard non-npm URI schemes (`data:`, `file:`, `http:`, `https:`, `bun:`, `blob:`, `virtual:`) in `getNodePackageName` so dynamic `import("data:text/javascript,...")` and Bun/URL specifiers are not flagged as missing npm dependencies.
+- **Verification:**
+  - Added 5 regression tests in `tests/v241-execution-lifecycle.test.mjs` and updated `sandbox/v2-live-acceptance.mjs` to exercise `session.execution.succeeded` (**835 / 835** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 120 files).
+
 ## 0.17.3 — 2026-11-24
 
 - **Server & TUI Runtime Performance Optimizations (`src/secrets/sanitizer.ts`, `src/index.ts`, `src/telemetry.ts`, `src/tui.tsx`):**

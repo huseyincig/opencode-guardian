@@ -225,16 +225,17 @@ try {
   console.log("    ✓ Error secret redaction verified");
 
   // Post-turn remediation & RPC intervention active -> clean turn clears
-  await pushEvent({ type: "session.idle", data: { sessionID: "s-live" } });
+  // OpenCode v2.4.1 emits session.execution.succeeded (not legacy session.idle).
+  await pushEvent({ type: "session.execution.succeeded", data: { sessionID: "s-live" } });
   for (let i = 0; i < 60 && synthetics.length === 0; i++) {
     await new Promise((r) => setTimeout(r, 15));
   }
-  assert.ok(synthetics.length >= 1, "Expected post-turn remediation");
+  assert.ok(synthetics.length >= 1, "Expected post-turn remediation on session.execution.succeeded");
   const snapActive = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID: "s-live" });
   assert.equal(snapActive.active, true);
 
   turnMode = "clean";
-  await pushEvent({ type: "session.idle", data: { sessionID: "s-live" } });
+  await pushEvent({ type: "session.execution.succeeded", data: { sessionID: "s-live" } });
   for (let i = 0; i < 60; i++) {
     const s = await rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD]({ sessionID: "s-live" });
     if (!s.active) break;

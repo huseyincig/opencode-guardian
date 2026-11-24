@@ -933,20 +933,19 @@ const v2Plugin = {
       }
       scheduleRpcPoll();
     };
-    let unregisterSessionStatus;
-    let unregisterSessionIdle;
+    const sessionActivityUnregisters = [];
     let unregisterPluginUpdated;
     let unregisterConfigUpdated;
     if (typeof context.data?.on === "function") {
-      try {
-        unregisterSessionStatus = context.data.on("session.status", handleSessionActivity);
-      } catch {
-        // Optional reactive session status event for adaptive polling.
-      }
-      try {
-        unregisterSessionIdle = context.data.on("session.idle", handleSessionActivity);
-      } catch {
-        // Optional reactive session idle event for adaptive polling.
+      for (const evType of ["session.status", "session.idle", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]) {
+        try {
+          const unreg = context.data.on(evType, handleSessionActivity);
+          if (typeof unreg === "function") {
+            sessionActivityUnregisters.push(unreg);
+          }
+        } catch {
+          // Optional reactive session lifecycle event for adaptive polling.
+        }
       }
       try {
         unregisterPluginUpdated = context.data.on("plugin.updated", handleHostRefresh);
@@ -1036,12 +1035,11 @@ const v2Plugin = {
       try {
         unregisterSessionMoved?.();
       } catch {}
-      try {
-        unregisterSessionStatus?.();
-      } catch {}
-      try {
-        unregisterSessionIdle?.();
-      } catch {}
+      for (const unreg of sessionActivityUnregisters.splice(0)) {
+        try {
+          unreg();
+        } catch {}
+      }
       try {
         unregisterPluginUpdated?.();
       } catch {}

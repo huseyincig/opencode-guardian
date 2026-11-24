@@ -744,7 +744,12 @@ export function isHallucinatedOrSuspiciousPackage(ecosystemOrName: string, name?
 }
 
 function getNodePackageName(importPath: string): string {
-  if (importPath.startsWith("node:") || importPath.startsWith("#")) return "";
+  if (
+    /^(?:node|bun|data|file|https?|blob|virtual):/i.test(importPath) ||
+    importPath.startsWith("#")
+  ) {
+    return "";
+  }
   if (
     importPath.startsWith(".") ||
     importPath.startsWith("/") ||

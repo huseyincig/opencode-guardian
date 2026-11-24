@@ -1182,8 +1182,9 @@ const setup = async (context) => {
         if (!job || typeof job !== "object")
             return undefined;
         const rec = job;
-        if (typeof rec.id === "string" && rec.id.length > 0)
-            return rec.id;
+        // Prefer shared semantic identifiers present in both SessionIdleBackground
+        // (experimental.idle) and Job.Info (experimental.job.updated) so both
+        // sources reconcile to the exact same key for every v2.4.x job kind.
         if (typeof rec.jobID === "string" && rec.jobID.length > 0)
             return rec.jobID;
         if (typeof rec.shellID === "string" && rec.shellID.length > 0)
@@ -1193,6 +1194,8 @@ const setup = async (context) => {
         if (typeof rec.path === "string" && rec.path.length > 0) {
             return typeof rec.kind === "string" ? `${rec.kind}:${rec.path}` : rec.path;
         }
+        if (typeof rec.id === "string" && rec.id.length > 0)
+            return rec.id;
         return typeof rec.kind === "string" && rec.kind.length > 0 ? rec.kind : undefined;
     };
     const contracts = new Map();
@@ -1894,6 +1897,8 @@ const setup = async (context) => {
         for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt++) {
             try {
                 for await (const event of activeEvents) {
+                    if (controller.signal.aborted)
+                        break;
                     const eventData = event;
                     const eventPayload = eventData.data ?? eventData.properties;
                     const extractEventSessionID = () => eventData.data?.sessionID ??
@@ -1929,6 +1934,7 @@ const setup = async (context) => {
                             foregroundHandoffs.delete(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
                             forgetGuardianProvenance(deletedSessionID);
+                            lastTranscriptNotice.delete(deletedSessionID);
                             provenanceSessions.delete(deletedSessionID);
                         }
                         continue;
@@ -1982,6 +1988,7 @@ const setup = async (context) => {
                             foregroundHandoffs.delete(movedSessionID);
                             clearAgentCapability(movedSessionID);
                             forgetGuardianProvenance(movedSessionID);
+                            lastTranscriptNotice.delete(movedSessionID);
                             provenanceSessions.delete(movedSessionID);
                         }
                         continue;
@@ -2225,6 +2232,7 @@ const setup = async (context) => {
         foregroundHandoffs.clear();
         backgroundSessions.clear();
         sessionBackgroundJobs.clear();
+        lastTranscriptNotice.clear();
         for (const timer of interventionExpiryTimers.values()) {
             clearTimeout(timer);
         }

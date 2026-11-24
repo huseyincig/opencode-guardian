@@ -1,13 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.17.2 — 2026-11-24
 
-- **Opt-in Chat Transcript Notices (`notifications.transcript`, `src/index.ts`, `src/engine.ts`, `src/types.ts`):** With `{ "notifications": { "transcript": true } }`, every intervention also posts a `[Guardian] <title>: <message>` line into the chat as a model-invisible `visible` synthetic message (`resume: false`, de-duplicated for 10 s per session), restoring the V1 behavior of a scrolling chat record. Default off. Added 3 tests in `tests/v0172-transcript-notice.test.mjs`.
-- **Telemetry Level Display Fix (`src/telemetry.ts`, `src/commands.ts`, `scripts/guardian-status.mjs`):** Processes that never ran the server `setup()` (the TUI, `/guardian-status`, `opencode-guardian-status`) fell back to `all` and reported `Telemetry mode: all` although the server writes in the documented default `violations` mode. The fallback is now `violations`, and the status commands report the project's effective `telemetry` setting. Added 3 regression tests in `tests/v0172-telemetry-level.test.mjs` (**821 / 821** tests passing).
+- **OpenCode `v2.4.1` SDK & Runtime Alignment (`package.json`, `src/index.ts`, `src/tui.tsx`):**
+  - Updated `devDependencies` to `@opencode/plugin` `^2.4.1`, `@opentui/core` `^0.9.9`, and `@opentui/solid` `^0.9.9` while keeping `peerDependencies` backward-compatible (`@opencode/plugin >=2.3.0`, `@opentui/* >=0.8.4`).
+  - **Canonical Background Job Key Reconciliation:** Updated `backgroundJobKey` in `src/index.ts` to prefer shared semantic job identifiers (`jobID` → `shellID` → `childSessionID` → `kind:path` → `id`) so `experimental.idle` (`SessionIdleBackground`) and `experimental.job.updated` (`Job.Info`) map to identical keys across all 5 job kinds (`codemode`, `shell`, `subagent`, `image`, `video`).
+  - **TUI Non-Blocking Startup & Hot-Reload Recovery:** Subscribed `src/tui.tsx` to `plugin.updated` and `config.updated` (guarded defensively for minimal hosts) to refresh RPC interventions and sidebar state on `v2.4.x` background plugin load and 24h auto-reload, and cleared `dismissedInterventionSignatures` on teardown.
+  - **Abort & Teardown Hygiene (`v2.4.1` `#65441`):** Added immediate `controller.signal.aborted` exit inside `eventLoop` and cleared `lastTranscriptNotice` on `session.deleted`, `session.moved`, and plugin disposal.
+- **Opt-in Chat Transcript Notices (`notifications.transcript`, `src/index.ts`, `src/engine.ts`, `src/types.ts`):**
+  - With `{ "notifications": { "transcript": true } }`, every intervention also posts a `[Guardian] <title>: <message>` line into the chat as a model-invisible `visible` synthetic message (`resume: false`, de-duplicated for 10 s per session), restoring the V1 scrolling chat record. Default off.
+- **Telemetry Level Display Fix (`src/telemetry.ts`, `src/commands.ts`, `scripts/guardian-status.mjs`):**
+  - Processes that never ran the server `setup()` (TUI, `/guardian-status`, `opencode-guardian-status`) now fall back to the documented `violations` default instead of `all`, and status commands report the project's effective `telemetry` setting.
 - **Stream Stop Verification & Visibility (`src/stream-loop.ts`, `src/telemetry.ts`, `src/tui.tsx`, `src/commands.ts`, `scripts/guardian-status.mjs`):**
-  - After an accepted `session.interrupt`, the watcher now checks the host's own events: `session.execution.interrupted` / `session.idle` records `stream-interrupt-verified`; deltas still arriving when the window closes (`OPENCODE_GUARDIAN_STREAM_VERIFY_MS`, default 4000 ms) record `stream-interrupt-ineffective` and re-enable another interrupt attempt. With neither signal, the stop stays `unverified`.
-  - Added `streamStops`, `streamVerified` and `streamIneffective` counters to `readGuardianStatus`, the sidebar (`Interventions` row `Ns` suffix and a `Stream Stops` row), `/guardian-status` and `opencode-guardian-status`.
-  - Added 3 regression tests in `tests/v0172-stream-verify.test.mjs` (**818 / 818** tests passing).
+  - After an accepted `session.interrupt`, the watcher checks host events: `session.execution.interrupted` / `session.idle` records `stream-interrupt-verified`; deltas still arriving when the window closes (`OPENCODE_GUARDIAN_STREAM_VERIFY_MS`, default 4000 ms) record `stream-interrupt-ineffective` and re-enable another interrupt attempt.
+  - Added `streamStops`, `streamVerified`, and `streamIneffective` counters to `readGuardianStatus`, sidebar (`Interventions` `Ns` suffix and `Stream Stops` row), `/guardian-status`, and `opencode-guardian-status`.
+- **Verification:**
+  - Added 12 regression tests across `tests/v0172-stream-verify.test.mjs`, `tests/v0172-telemetry-level.test.mjs`, `tests/v0172-transcript-notice.test.mjs`, and `tests/v0172-v241-audit.test.mjs` (**827 / 827** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 118 files).
 
 ## 0.17.1 — 2026-11-23
 

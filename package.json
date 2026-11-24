@@ -1,6 +1,6 @@
 {
   "name": "opencode-guardian",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "description": "Autonomous quality, discipline, and runtime security guardian plugin for OpenCode V2 AI agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -64,9 +64,9 @@
   "devDependencies": {
     "@babel/core": "^7.29.7",
     "@babel/preset-typescript": "^7.27.1",
-    "@opencode/plugin": "^2.4.0",
-    "@opentui/core": "^0.9.7",
-    "@opentui/solid": "^0.9.7",
+    "@opencode/plugin": "^2.4.1",
+    "@opentui/core": "^0.9.9",
+    "@opentui/solid": "^0.9.9",
     "@types/node": "^22.0.0",
     "babel-preset-solid": "^1.9.12",
     "oxlint": "1.87.0",

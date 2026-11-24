@@ -1,6 +1,6 @@
 # Task Contract and OpenCode V2 Adapter Architecture
 
-Documentation for OpenCode Guardian **v0.17.1**.
+Documentation for OpenCode Guardian **v0.17.2**.
 
 Guardian implements a pure **OpenCode V2** (`@opencode/plugin >=2.3.0`) architecture across its server entry (`.`), terminal UI entry (`./tui`), and typed intervention RPC contract (`./rpc`) using standard, non-invasive V2 plugin hooks.
 

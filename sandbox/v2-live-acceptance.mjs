@@ -11,7 +11,7 @@ import OpencodeGuardian, {
 import TuiPlugin from "../dist/tui.js";
 
 console.log("================================================================================");
-console.log("     OPENCODE-GUARDIAN — LIVE V2.4.0 + BUN HOST ACCEPTANCE TEST SUITE");
+console.log("     OPENCODE-GUARDIAN — LIVE V2.4.1 + BUN HOST ACCEPTANCE TEST SUITE");
 console.log("================================================================================");
 
 const repoDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -81,8 +81,8 @@ try {
   assert.match(bunImport.stdout, /EXPORTS_OK/);
   console.log("    ✓ Bun (1.4.4) packed '.', './tui', './rpc' imports & dist/tui.js fallback verified (no ResolveMessage crash)");
 
-  // 2. Full V2.4.0 Server Hook Set, Preflight, Redaction, Post-Turn Remediation, RPC & Telemetry
-  console.log("\n[2] V2 Server setup(ctx) Full v2.4.0 Hook Set & Lifecycle...");
+  // 2. Full V2.4.1 Server Hook Set, Preflight, Redaction, Post-Turn Remediation, RPC & Telemetry
+  console.log("\n[2] V2 Server setup(ctx) Full v2.4.1 Hook Set & Lifecycle...");
   const projectDir = path.join(tmpRoot, "project-v2");
   fs.mkdirSync(projectDir, { recursive: true });
   fs.writeFileSync(path.join(projectDir, "opencode-guardian.json"), JSON.stringify({
@@ -190,7 +190,7 @@ try {
   }
   assert.equal(typeof rpcHandlers[GUARDIAN_INTERVENTION_RPC_METHOD], "function");
   assert.equal(typeof rpcHandlers[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD], "function");
-  console.log("    ✓ All 10 V2.4.0 hooks & RPC methods registered");
+  console.log("    ✓ All 10 V2.4.1 hooks & RPC methods registered");
 
   // Preflight blocking (tool.execute.before + shell.create.before)
   await assert.rejects(
@@ -292,9 +292,9 @@ try {
   assert.equal(disabledSlotCalled, false);
   console.log("    ✓ V2 TUI additive slots, 7 commands + /guardian, and enabled: false verified");
 
-  // 4. Real OpenCode v2.4.0 CLI Host Acceptance
+  // 4. Real OpenCode v2.4.1 CLI Host Acceptance
   const ocBin = ["/usr/bin/opencode", "/usr/local/bin/opencode"].find((p) => fs.existsSync(p));
-  console.log(`\n[4] Real OpenCode v2.4.0 CLI Host Acceptance (${ocBin ?? "/usr/bin/opencode"})...`);
+  console.log(`\n[4] Real OpenCode v2.4.1 CLI Host Acceptance (${ocBin ?? "/usr/bin/opencode"})...`);
   assert.ok(ocBin, "OpenCode binary not found at /usr/bin/opencode or /usr/local/bin/opencode");
   const ocWorkspace = path.join(tmpRoot, "oc-workspace");
   fs.mkdirSync(ocWorkspace, { recursive: true });
@@ -309,7 +309,7 @@ try {
   console.log(`    ✓ Real OpenCode CLI (${ocVersionText}) verified in isolated workspace with plugin config`);
 
   console.log("\n================================================================================");
-  console.log("  OPENCODE V2.4.0 + BUN 1.4.4 LIVE ACCEPTANCE TESTS PASSED SUCCESSFULLY!");
+  console.log("  OPENCODE V2.4.1 + BUN 1.4.4 LIVE ACCEPTANCE TESTS PASSED SUCCESSFULLY!");
   console.log("================================================================================");
 } finally {
   cleanupTmp();

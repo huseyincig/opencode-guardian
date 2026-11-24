@@ -881,6 +881,29 @@ const v2Plugin = {
       }
       setSidebarVersion(v => v + 1);
     }) : undefined;
+    const handleHostRefresh = () => {
+      rpcGeneration += 1;
+      rpcInFlight.clear();
+      setSidebarVersion(v => v + 1);
+      const route = context.ui?.router?.current?.();
+      if (route?.type === "session") {
+        void refreshIntervention(route.sessionID);
+      }
+    };
+    let unregisterPluginUpdated;
+    let unregisterConfigUpdated;
+    if (typeof context.data?.on === "function") {
+      try {
+        unregisterPluginUpdated = context.data.on("plugin.updated", handleHostRefresh);
+      } catch {
+        // Optional v2.4.x non-blocking startup / hot-reload refresh event.
+      }
+      try {
+        unregisterConfigUpdated = context.data.on("config.updated", handleHostRefresh);
+      } catch {
+        // Optional config reload refresh event.
+      }
+    }
 
     // Main conversation column: visible Guardian interventions belong next to
     // the active chat, not only in the sidebar/toast layer.
@@ -939,6 +962,7 @@ const v2Plugin = {
       disposed = true;
       rpcGeneration += 1;
       rpcInFlight.clear();
+      dismissedInterventionSignatures.clear();
       for (const timer of interventionTimers.values()) {
         clearTimeout(timer);
       }
@@ -956,6 +980,12 @@ const v2Plugin = {
       } catch {}
       try {
         unregisterSessionMoved?.();
+      } catch {}
+      try {
+        unregisterPluginUpdated?.();
+      } catch {}
+      try {
+        unregisterConfigUpdated?.();
       } catch {}
       try {
         conversationSlotDisposer?.();

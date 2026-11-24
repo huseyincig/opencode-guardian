@@ -850,6 +850,10 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             return;
         if (hasUnfinishedBackgroundTool(messages))
             return;
+        const lastAssistantID = messages.findLast((m) => m.info.role === "assistant")?.info.id;
+        if (lastAssistantID && wasMessageInspectedInProcess(sessionID, lastAssistantID)) {
+            return;
+        }
         stage = "engine-inspect";
         // Unknown topology is not permission to treat a session as root. Fail safe
         // as a non-self-remediating child until the host proves parent/root state.
@@ -874,6 +878,9 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             result.rollback?.();
             return;
         }
+        const rollbackProcessInspect = lastAssistantID && result.results.length > 0
+            ? recordMessageInspectedInProcess(sessionID, lastAssistantID, directory)
+            : undefined;
         const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
             if (effectiveIsSubagent && agentCapability !== "write-allowed") {
@@ -903,6 +910,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 if (signal?.aborted) {
                     releaseRemediationLease();
                     result.rollback?.();
+                    rollbackProcessInspect?.();
                     clearMeshIntervention(sessionID);
                     return;
                 }
@@ -922,6 +930,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             catch (promptError) {
                 releaseRemediationLease();
                 result.rollback?.();
+                rollbackProcessInspect?.();
                 clearMeshIntervention(sessionID);
                 throw promptError;
             }
@@ -1071,6 +1080,152 @@ function isDirectoryInGuardianScope(startupDirectory, targetDirectory) {
     }
     return true;
 }
+const GUARDIAN_PROCESS_REGISTRY_SYMBOL = Symbol.for("opencode.guardian.runtime.v2");
+const INFLIGHT_IDLE_TTL_MS = 60_000;
+const MAX_TRACKED_PROCESS_SESSIONS = 512;
+function getGuardianProcessRegistry() {
+    const g = globalThis;
+    let reg = g[GUARDIAN_PROCESS_REGISTRY_SYMBOL];
+    if (!reg || typeof reg !== "object" || !(reg.activeInstances instanceof Map)) {
+        reg = {
+            nextInstanceId: 0,
+            activeInstances: new Map(),
+            inflightIdle: new Map(),
+            inspectedMessages: new Map(),
+        };
+        g[GUARDIAN_PROCESS_REGISTRY_SYMBOL] = reg;
+    }
+    return reg;
+}
+function registerGuardianInstance(directory) {
+    const reg = getGuardianProcessRegistry();
+    const id = ++reg.nextInstanceId;
+    const canonicalDir = realpathLoose(directory);
+    reg.activeInstances.set(id, { id, directory, canonicalDir });
+    return {
+        id,
+        canonicalDir,
+        unregister: () => {
+            reg.activeInstances.delete(id);
+            for (const [sid, entry] of reg.inflightIdle.entries()) {
+                if (entry.instanceId === id)
+                    reg.inflightIdle.delete(sid);
+            }
+            let hasRemainingForDir = false;
+            for (const inst of reg.activeInstances.values()) {
+                if (inst.canonicalDir === canonicalDir) {
+                    hasRemainingForDir = true;
+                    break;
+                }
+            }
+            if (!hasRemainingForDir) {
+                for (const [sid, entry] of reg.inspectedMessages.entries()) {
+                    if (entry.canonicalDir === canonicalDir) {
+                        reg.inspectedMessages.delete(sid);
+                    }
+                }
+            }
+        },
+    };
+}
+/**
+ * Ensures exactly one active Guardian instance in a multi-location OpenCode
+ * server process owns global event-stream work for a target directory.
+ */
+function isGuardianOwnerForDirectory(instanceId, startupDirectory, targetDirectory) {
+    if (!isDirectoryInGuardianScope(startupDirectory, targetDirectory)) {
+        return false;
+    }
+    const reg = getGuardianProcessRegistry();
+    if (reg.activeInstances.size <= 1) {
+        return true;
+    }
+    const canonicalTarget = realpathLoose(targetDirectory);
+    // Tier 1: exact location match (newest active instance wins on reload overlap)
+    let exactWinner = -1;
+    for (const inst of reg.activeInstances.values()) {
+        if (inst.canonicalDir === canonicalTarget && inst.id > exactWinner) {
+            exactWinner = inst.id;
+        }
+    }
+    if (exactWinner !== -1) {
+        return instanceId === exactWinner;
+    }
+    // Tier 2: deepest enclosing parent location match
+    let parentWinner = -1;
+    let parentLen = -1;
+    for (const inst of reg.activeInstances.values()) {
+        if (isSameOrSubdirectory(canonicalTarget, inst.canonicalDir)) {
+            const len = inst.canonicalDir.length;
+            if (len > parentLen || (len === parentLen && inst.id > parentWinner)) {
+                parentLen = len;
+                parentWinner = inst.id;
+            }
+        }
+    }
+    if (parentWinner !== -1) {
+        return instanceId === parentWinner;
+    }
+    // Tier 3: single deterministic fallback among global-scope instances
+    let scopeWinner = -1;
+    for (const inst of reg.activeInstances.values()) {
+        if (isDirectoryInGuardianScope(inst.directory, targetDirectory) && inst.id > scopeWinner) {
+            scopeWinner = inst.id;
+        }
+    }
+    return scopeWinner === -1 || instanceId === scopeWinner;
+}
+function acquireProcessIdleSlot(sessionID, instanceId) {
+    const reg = getGuardianProcessRegistry();
+    const now = Date.now();
+    const existing = reg.inflightIdle.get(sessionID);
+    if (existing && existing.instanceId !== instanceId && now - existing.startedAt < INFLIGHT_IDLE_TTL_MS) {
+        return undefined;
+    }
+    reg.inflightIdle.delete(sessionID);
+    reg.inflightIdle.set(sessionID, { instanceId, startedAt: now });
+    while (reg.inflightIdle.size > MAX_TRACKED_PROCESS_SESSIONS) {
+        const oldest = reg.inflightIdle.keys().next().value;
+        if (oldest === undefined)
+            break;
+        reg.inflightIdle.delete(oldest);
+    }
+    return () => {
+        const current = reg.inflightIdle.get(sessionID);
+        if (current?.instanceId === instanceId) {
+            reg.inflightIdle.delete(sessionID);
+        }
+    };
+}
+function wasMessageInspectedInProcess(sessionID, messageID) {
+    return getGuardianProcessRegistry().inspectedMessages.get(sessionID)?.messageID === messageID;
+}
+function recordMessageInspectedInProcess(sessionID, messageID, directory) {
+    const reg = getGuardianProcessRegistry();
+    const previous = reg.inspectedMessages.get(sessionID);
+    const canonicalDir = realpathLoose(directory);
+    reg.inspectedMessages.delete(sessionID);
+    reg.inspectedMessages.set(sessionID, { messageID, canonicalDir });
+    while (reg.inspectedMessages.size > MAX_TRACKED_PROCESS_SESSIONS) {
+        const oldest = reg.inspectedMessages.keys().next().value;
+        if (oldest === undefined)
+            break;
+        reg.inspectedMessages.delete(oldest);
+    }
+    return () => {
+        if (reg.inspectedMessages.get(sessionID)?.messageID === messageID) {
+            if (previous)
+                reg.inspectedMessages.set(sessionID, previous);
+            else
+                reg.inspectedMessages.delete(sessionID);
+        }
+    };
+}
+function forgetProcessSession(sessionID) {
+    const reg = getGuardianProcessRegistry();
+    reg.inflightIdle.delete(sessionID);
+    reg.inspectedMessages.delete(sessionID);
+}
 const setup = async (context) => {
     // Transition builds may call setup() with a partial v2 context.
     // Resolve the explicit security setting first: strict preflight must never
@@ -1101,7 +1256,10 @@ const setup = async (context) => {
     }
     const runtimeByDirectory = new Map();
     const controller = new AbortController();
+    const instanceRegistration = registerGuardianInstance(directory);
+    const instanceId = instanceRegistration.id;
     controller.signal.addEventListener("abort", () => {
+        instanceRegistration.unregister();
         configureGuardianTelemetry(directory, undefined);
         for (const key of runtimeByDirectory.keys()) {
             configureGuardianTelemetry(key, undefined);
@@ -1435,7 +1593,11 @@ const setup = async (context) => {
         directory,
         settings: async (sessionID) => {
             const targetDirectory = await resolveSessionDirectory(sessionID);
-            return { config: runtimeForDirectory(targetDirectory).config, directory: targetDirectory };
+            const rt = runtimeForDirectory(targetDirectory);
+            if (!isGuardianOwnerForDirectory(instanceId, directory, targetDirectory)) {
+                return { config: { ...rt.config, enabled: false }, directory: targetDirectory };
+            }
+            return { config: rt.config, directory: targetDirectory };
         },
         interrupt: async (sessionID) => {
             if (typeof context.session.interrupt !== "function")
@@ -1950,7 +2112,14 @@ const setup = async (context) => {
                         eventData.properties?.info?.id ??
                         eventData.properties?.id ??
                         eventData.sessionID;
-                    streamWatcher.dispatch(event);
+                    const eventLocationDir = typeof eventPayload?.location?.directory === "string" && eventPayload.location.directory.trim()
+                        ? eventPayload.location.directory
+                        : typeof eventData.location?.directory === "string" && eventData.location.directory.trim()
+                            ? eventData.location.directory
+                            : undefined;
+                    if (!eventLocationDir || isGuardianOwnerForDirectory(instanceId, directory, eventLocationDir)) {
+                        streamWatcher.dispatch(event);
+                    }
                     if (eventData.type === "session.created" || eventData.type === "session.forked") {
                         const createdSessionID = extractEventSessionID();
                         if (createdSessionID) {
@@ -1965,6 +2134,7 @@ const setup = async (context) => {
                         if (deletedSessionID) {
                             idleQueue.forget(deletedSessionID);
                             streamWatcher.forget(deletedSessionID);
+                            forgetProcessSession(deletedSessionID);
                             releaseRemediationLeaseForSession(deletedSessionID);
                             toastNotifier.clear?.(deletedSessionID);
                             clearInterventionSnapshot(deletedSessionID);
@@ -2015,6 +2185,7 @@ const setup = async (context) => {
                         if (movedSessionID) {
                             idleQueue.forget(movedSessionID);
                             streamWatcher.forget(movedSessionID);
+                            forgetProcessSession(movedSessionID);
                             releaseRemediationLeaseForSession(movedSessionID);
                             toastNotifier.clear?.(movedSessionID);
                             clearInterventionSnapshot(movedSessionID);
@@ -2100,10 +2271,15 @@ const setup = async (context) => {
                     const sessionID = extractEventSessionID();
                     if (!sessionID)
                         continue;
+                    if (eventLocationDir && !isGuardianOwnerForDirectory(instanceId, directory, eventLocationDir)) {
+                        continue;
+                    }
                     foregroundHandoffs.delete(sessionID);
                     idleQueue.enqueue(sessionID, async (idleSignal) => {
                         foregroundHandoffs.delete(sessionID);
-                        let activeDirectory = await resolveSessionDirectory(sessionID);
+                        let activeDirectory = eventLocationDir
+                            ? rememberSessionDirectory(sessionID, eventLocationDir)
+                            : await resolveSessionDirectory(sessionID);
                         let sessionIsSubagent;
                         let sessionParentID;
                         let sessionAgentName;
@@ -2127,6 +2303,9 @@ const setup = async (context) => {
                         catch {
                             // A transient/partial host must not disable the existing idle path.
                         }
+                        if (!isGuardianOwnerForDirectory(instanceId, directory, activeDirectory)) {
+                            return;
+                        }
                         if (sessionParentID && sessionIsSubagent !== false && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
                             return;
                         }
@@ -2136,63 +2315,72 @@ const setup = async (context) => {
                         if (backgroundSessions.has(sessionID)) {
                             return;
                         }
+                        const releaseProcessIdleSlot = acquireProcessIdleSlot(sessionID, instanceId);
+                        if (!releaseProcessIdleSlot) {
+                            return;
+                        }
                         let fetchedNormalizedMessages;
-                        await handleSessionIdle(sessionID, activeDirectory, async () => {
-                            const messages = await context.session.context({ sessionID });
-                            const normalized = normalizeV2Messages(messages, sessionID);
-                            fetchedNormalizedMessages = normalized;
-                            const contract = extractTaskContract(normalized);
-                            if (contract)
-                                setSessionContract(sessionID, contract);
-                            return normalized;
-                        }, async (text) => {
-                            if (idleSignal.aborted)
-                                return;
-                            const remediationText = runtime.sanitizer
-                                ? sanitizeString(text, runtime.sanitizer).sanitized
-                                : text;
-                            await context.session.synthetic({
-                                sessionID,
-                                text: remediationText,
-                                description: "OpenCode Guardian remediation",
-                                metadata: v2GuardianMetadata(sessionID, "remediation"),
-                                delivery: "queue",
-                                resume: true,
-                            });
-                        }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, (sessionIsSubagent ?? true)
-                            ? async () => {
-                                const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
-                                if (meshProfile && meshProfile.capability !== "unknown") {
-                                    const resolved = {
-                                        capability: meshProfile.capability,
-                                        evidence: {
-                                            agentName: meshProfile.agentName ?? sessionAgentName,
-                                            reasons: [`mesh:${meshProfile.managedBy}`],
-                                        },
-                                    };
-                                    if (!idleSignal.aborted)
-                                        cacheAgentCapability(sessionID, resolved);
-                                    return resolved;
-                                }
-                                const cached = getCachedAgentCapability(sessionID);
-                                if (cached)
-                                    return cached;
-                                let agentName = sessionAgentName;
-                                if (!agentName) {
-                                    try {
-                                        const normalized = fetchedNormalizedMessages ??
-                                            normalizeV2Messages(await context.session.context({ sessionID }), sessionID);
-                                        agentName = extractAgentNameFromMessages(normalized);
+                        try {
+                            await handleSessionIdle(sessionID, activeDirectory, async () => {
+                                const messages = await context.session.context({ sessionID });
+                                const normalized = normalizeV2Messages(messages, sessionID);
+                                fetchedNormalizedMessages = normalized;
+                                const contract = extractTaskContract(normalized);
+                                if (contract)
+                                    setSessionContract(sessionID, contract);
+                                return normalized;
+                            }, async (text) => {
+                                if (idleSignal.aborted)
+                                    return;
+                                const remediationText = runtime.sanitizer
+                                    ? sanitizeString(text, runtime.sanitizer).sanitized
+                                    : text;
+                                await context.session.synthetic({
+                                    sessionID,
+                                    text: remediationText,
+                                    description: "OpenCode Guardian remediation",
+                                    metadata: v2GuardianMetadata(sessionID, "remediation"),
+                                    delivery: "queue",
+                                    resume: true,
+                                });
+                            }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, (sessionIsSubagent ?? true)
+                                ? async () => {
+                                    const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
+                                    if (meshProfile && meshProfile.capability !== "unknown") {
+                                        const resolved = {
+                                            capability: meshProfile.capability,
+                                            evidence: {
+                                                agentName: meshProfile.agentName ?? sessionAgentName,
+                                                reasons: [`mesh:${meshProfile.managedBy}`],
+                                            },
+                                        };
+                                        if (!idleSignal.aborted)
+                                            cacheAgentCapability(sessionID, resolved);
+                                        return resolved;
                                     }
-                                    catch { }
+                                    const cached = getCachedAgentCapability(sessionID);
+                                    if (cached)
+                                        return cached;
+                                    let agentName = sessionAgentName;
+                                    if (!agentName) {
+                                        try {
+                                            const normalized = fetchedNormalizedMessages ??
+                                                normalizeV2Messages(await context.session.context({ sessionID }), sessionID);
+                                            agentName = extractAgentNameFromMessages(normalized);
+                                        }
+                                        catch { }
+                                    }
+                                    const p = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
+                                    if (!idleSignal.aborted && p.capability !== "unknown") {
+                                        cacheAgentCapability(sessionID, p);
+                                    }
+                                    return p;
                                 }
-                                const p = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
-                                if (!idleSignal.aborted && p.capability !== "unknown") {
-                                    cacheAgentCapability(sessionID, p);
-                                }
-                                return p;
-                            }
-                            : undefined, toastNotifier);
+                                : undefined, toastNotifier);
+                        }
+                        finally {
+                            releaseProcessIdleSlot();
+                        }
                     });
                 }
                 if (controller.signal.aborted)

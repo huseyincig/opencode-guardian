@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.5 — 2026-11-24
+
+- **Multi-Location Event Ownership & Process-Shared Deduplication (`src/index.ts`):**
+  - Added a process-shared Guardian instance registry (`Symbol.for("opencode.guardian.runtime.v2")`) that arbitrates single-owner directory ownership (`isGuardianOwnerForDirectory`: exact location → deepest parent → deterministic global fallback) and enforces atomic in-flight (`acquireProcessIdleSlot`) and `(sessionID, assistantMessageID)` deduplication across all active OpenCode V2 Locations in the same server process.
+  - Eliminated N× duplicate post-turn remediations, warnings, and stream interrupts when OpenCode's background service loads `opencode-guardian@latest` across multiple Locations sharing the global `context.event.subscribe()` stream, while preserving single-instance global supervision and clean `setup → dispose → setup` teardown.
+- **TUI Sidebar Header & Distinct Intervention Banners (`src/tui.tsx`):**
+  - Removed inline status/warning clutter from next to the version number in the `GuardianSidebar` header row (`▶ guardian` left, clean `v0.17.5` right; status remains on its dedicated `Status` row).
+  - Upgraded `GuardianConversationIntervention` (`session.composer.top`) with distinct high-contrast pill badges, icons, and subtitles for every intervention kind (`⊘ BLOCKED`, `↻ REMEDIATION`, `⏹ STREAM STOP`, `▲ WARNING`, `● NOTICE`) plus a clear `[dismiss]` affordance.
+- **Verification:**
+  - Added 5 regression tests in `tests/v241-multi-location-dedup.test.mjs` (**840 / 840** tests passing, **18 / 18** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, Oxlint 0 warnings / 0 errors across 121 files).
+
 ## 0.17.4 — 2026-11-24
 
 - **OpenCode `v2.4.1` Execution Lifecycle & Background Subagent Fixes (`src/index.ts`, `src/tui.tsx`, `src/rules/no-ghost-deps.ts`):**

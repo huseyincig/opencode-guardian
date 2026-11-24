@@ -58,14 +58,48 @@ function GuardianConversationIntervention(props: {
   colors: SidebarColors;
   onDismiss?: () => void;
 }) {
-  const accent = () =>
-    props.payload?.variant === "warning"
-      ? props.colors.warning ?? props.colors.accent
-      : props.colors.error ?? props.colors.accent;
-  const label = () => {
-    if (props.payload?.variant === "warning") return "GUARDIAN · WARNING";
-    if (props.payload?.title.includes("Blocked")) return "GUARDIAN · BLOCKED";
-    return "GUARDIAN · ERROR";
+  const kindMeta = () => {
+    const title = props.payload?.title ?? "";
+    if (title.includes("Blocked")) {
+      return {
+        badge: "⊘ BLOCKED",
+        subtitle: "Preflight safety block",
+        color: props.colors.error ?? props.colors.accent,
+      };
+    }
+    if (title.includes("Remediation")) {
+      return {
+        badge: "↻ REMEDIATION",
+        subtitle: "Correction requested",
+        color: props.colors.error ?? props.colors.accent,
+      };
+    }
+    if (title.includes("Repetition")) {
+      return {
+        badge: "⏹ STREAM STOP",
+        subtitle: "Repetition detected",
+        color: props.colors.warning ?? props.colors.accent,
+      };
+    }
+    if (props.payload?.variant === "warning" || title.includes("Warning")) {
+      return {
+        badge: "▲ WARNING",
+        subtitle: "Advisory finding",
+        color: props.colors.warning ?? props.colors.accent,
+      };
+    }
+    if (props.payload?.variant === "info") {
+      return {
+        badge: "● NOTICE",
+        subtitle: "Guardian notice",
+        color: props.colors.accent,
+      };
+    }
+    return {
+      badge: "✕ ERROR",
+      subtitle: "Policy intervention",
+      color: props.colors.error ?? props.colors.accent,
+    };
   };
 
   return (
@@ -74,12 +108,21 @@ function GuardianConversationIntervention(props: {
         width="100%"
         flexDirection="column"
         border={["left"]}
-        borderColor={accent()}
+        borderColor={kindMeta().color}
         paddingLeft={1}
         marginBottom={1}
         onMouseDown={() => props.onDismiss?.()}
       >
-        <text fg={accent()}><b>{label()}</b></text>
+        <box width="100%" flexDirection="row" justifyContent="space-between" alignItems="center">
+          <box flexDirection="row" alignItems="center">
+            <box backgroundColor={kindMeta().color} paddingLeft={1} paddingRight={1}>
+              <text fg={props.colors.background}><b>{kindMeta().badge}</b></text>
+            </box>
+            <text fg={kindMeta().color}><b>{" GUARDIAN"}</b></text>
+            <text fg={props.colors.muted}>{` · ${kindMeta().subtitle}`}</text>
+          </box>
+          <text fg={props.colors.muted}>{"[dismiss]"}</text>
+        </box>
         <text fg={props.colors.text}>{props.payload?.message ?? ""}</text>
       </box>
     </Show>
@@ -318,21 +361,22 @@ function GuardianSidebar(props: {
       <box
         width="100%"
         flexDirection="row"
+        justifyContent="space-between"
+        alignItems="center"
         onMouseDown={() => setOpen((value) => !value)}
       >
-        <text fg={props.colors.muted}>{() => open() ? "▼ " : "▶ "}</text>
-        <box backgroundColor={props.colors.accent} paddingLeft={1} paddingRight={1}>
-          <text fg={props.colors.background}>guardian</text>
+        <box flexDirection="row" alignItems="center">
+          <text fg={props.colors.muted}>{() => open() ? "▼ " : "▶ "}</text>
+          <box backgroundColor={props.colors.accent} paddingLeft={1} paddingRight={1}>
+            <text fg={props.colors.background}>guardian</text>
+          </box>
         </box>
-        <text fg={props.colors.muted}>{" v" + guardianVersion}</text>
-        <text fg={statusColor()} flexShrink={1} truncate wrapMode="none">
-          {` · ${statusLabel()}`}
-        </text>
-        <Show when={hasUpdate()}>
-          <text fg={successColor()} flexShrink={0} wrapMode="none">
-            {latestVersion() ? ` (↑${latestVersion()})` : " (↑)"}
-          </text>
-        </Show>
+        <box flexDirection="row" alignItems="center">
+          <text fg={props.colors.muted}>{"v" + guardianVersion}</text>
+          <Show when={hasUpdate()}>
+            <text fg={successColor()}><b>{" (↑)"}</b></text>
+          </Show>
+        </box>
       </box>
       <Show when={hasUpdate() && latestVersion()}>
         <box width="100%" flexDirection="column" paddingLeft={1}>

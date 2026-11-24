@@ -43,19 +43,25 @@ export type GuardianToastClearListener = (scope: GuardianToastScope) => void | P
 export interface GuardianToastNotifierOptions extends GuardianToastScope {
     context?: unknown;
     enabled?: boolean | undefined;
+    detailed?: boolean | undefined;
+    sanitizer?: SanitizerOptions | null | undefined;
 }
 export interface GuardianToastNotifier {
     notify(input: GuardianInterventionInput): void;
     clear?(sessionID: string): void;
 }
 import type { SanitizerOptions } from "./secrets/types.js";
+export interface GuardianToastFormatOptions {
+    detailed?: boolean | undefined;
+    sanitizer?: SanitizerOptions | null | undefined;
+}
 /**
- * Formats a detailed, secret-safe, model-invisible chat transcript notice
- * for `notifications.transcript: true`.
+ * Formats a detailed, secret-safe intervention summary for UI display
+ * (`notifications.transcript: true`). Never writes to `session_inbox`.
  */
 export declare function formatGuardianTranscriptNotice(input: GuardianInterventionInput, sanitizer?: SanitizerOptions | null): string;
 export declare function sanitizeToastRuleId(raw: unknown): string;
-export declare function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload;
+export declare function formatGuardianToast(input: GuardianInterventionInput, options?: GuardianToastFormatOptions): GuardianToastPayload;
 export declare function registerToastListener(listener: GuardianToastListener, scope?: GuardianToastScope): () => void;
 export declare function registerToastClearListener(listener: GuardianToastClearListener, scope?: GuardianToastScope): () => void;
 export declare function dispatchGuardianToastClear(scope: GuardianToastScope): void;

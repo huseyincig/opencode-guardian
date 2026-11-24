@@ -43,7 +43,7 @@ export interface GuardConfig {
         enabled?: boolean;
     };
     /** User-facing intervention toast notification configuration. Enabled by default. */
-    /** User-facing intervention notifications. `transcript` also posts a model-invisible notice into the chat (default off). */
+    /** User-facing intervention notifications. `transcript` enables detailed per-finding conversation banners in the TUI without mutating `session_inbox` (default off). */
     notifications?: {
         enabled?: boolean;
         transcript?: boolean;

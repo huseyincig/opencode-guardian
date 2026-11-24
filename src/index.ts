@@ -34,10 +34,8 @@ import {
   createGuardianToastNotifier,
   dispatchGuardianToastClear,
   formatGuardianToast,
-  formatGuardianTranscriptNotice,
   type GuardianInterventionDetail,
   type GuardianToastNotifier,
-  type GuardianInterventionInput,
   type GuardianToastPayload,
 } from "./toast.js";
 import {
@@ -1794,44 +1792,20 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       enabled:
         runtime.config.enabled !== false &&
         runtime.config.notifications?.enabled !== false,
+      detailed:
+        runtime.config.enabled !== false &&
+        runtime.config.notifications?.transcript === true,
+      sanitizer: runtime.sanitizer,
     });
     toastNotifiersByDirectory.set(key, notifier);
     return notifier;
   };
-  // Optional chat-flow notice (V1 parity). It is a `visible` Guardian message:
-  // stripped from model context and from inspection, and never resumes the model.
-  const lastTranscriptNotice = new Map<string, { text: string; at: number }>();
-  const postTranscriptNotice = (input: GuardianInterventionInput, runtimeDirectory: string): void => {
-    const sid = input.sessionID;
-    if (!sid || controller.signal.aborted) return;
-    try {
-      const runtime = runtimeForDirectory(runtimeDirectory);
-      if (runtime.config.enabled === false || runtime.config.notifications?.transcript !== true) return;
-      const text = formatGuardianTranscriptNotice(input, runtime.sanitizer);
-      const now = Date.now();
-      const last = lastTranscriptNotice.get(sid);
-      if (last && last.text === text && now - last.at < 10_000) return;
-      lastTranscriptNotice.delete(sid);
-      lastTranscriptNotice.set(sid, { text, at: now });
-      while (lastTranscriptNotice.size > 256) {
-        const oldest = lastTranscriptNotice.keys().next().value;
-        if (oldest === undefined) break;
-        lastTranscriptNotice.delete(oldest);
-      }
-      void Promise.resolve(context.session.synthetic({
-        sessionID: sid,
-        text,
-        description: "OpenCode Guardian notice",
-        metadata: v2GuardianMetadata(sid, "visible"),
-        delivery: "queue",
-        resume: false,
-      })).catch(() => {});
-    } catch {
-      // The notice is additive; it must never disturb enforcement.
-    }
-  };
   const toastNotifier: TrackedGuardianToastNotifier = createTrackedToastNotifier({
     notify(input): void {
+      const runtimeDirectory =
+        typeof input.sessionID === "string"
+          ? sessionDirectories.get(input.sessionID) ?? directory
+          : directory;
       if (
         typeof input.sessionID === "string" &&
         input.sessionID.length > 0
@@ -1839,7 +1813,19 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         try {
           const sid = input.sessionID;
           clearInterventionSnapshot(sid);
-          const payload = formatGuardianToast(input);
+          const runtime = runtimeForDirectory(runtimeDirectory);
+          const detailed =
+            runtime.config.enabled !== false &&
+            runtime.config.notifications?.transcript === true;
+          // OpenCode V2 `session.synthetic` always enqueues into `session_inbox`
+          // and triggers an LLM turn on the next drain (even with `resume: false`).
+          // Deliver detailed per-finding notices exclusively via the TUI
+          // `session.composer.top` intervention snapshot + RPC channel so
+          // conversation history and provider turns are never mutated.
+          const payload = formatGuardianToast(
+            input,
+            detailed ? { detailed: true, sanitizer: runtime.sanitizer } : undefined
+          );
           const ttlMs = payload.duration > 0 ? payload.duration : 5000;
           interventionSnapshots.set(sid, {
             payload,
@@ -1858,12 +1844,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           }
         } catch {}
       }
-      const runtimeDirectory =
-        typeof input.sessionID === "string"
-          ? sessionDirectories.get(input.sessionID) ?? directory
-          : directory;
       baseToastForDirectory(runtimeDirectory).notify(input);
-      postTranscriptNotice(input, runtimeDirectory);
     },
     clear(sessionID): void {
       clearInterventionSnapshot(sessionID);
@@ -2315,13 +2296,18 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (runtime.config.enabled === false) return runtime;
 
         if (Array.isArray(event.messages)) {
-          event.messages = event.messages.filter((message) =>
+          const filtered = event.messages.filter((message) =>
             !isTrustedGuardianMetadata(
               event.sessionID,
               (message as { metadata?: unknown }).metadata,
               "visible"
             )
           );
+          const lastBefore = event.messages[event.messages.length - 1] as { role?: unknown } | undefined;
+          const lastAfter = filtered[filtered.length - 1] as { role?: unknown } | undefined;
+          if (!(lastBefore?.role !== "assistant" && lastAfter?.role === "assistant")) {
+            event.messages = filtered;
+          }
         }
 
         if (!runtime.sanitizer) return runtime;
@@ -2515,7 +2501,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             foregroundHandoffs.delete(deletedSessionID);
             clearAgentCapability(deletedSessionID);
             forgetGuardianProvenance(deletedSessionID);
-            lastTranscriptNotice.delete(deletedSessionID);
             provenanceSessions.delete(deletedSessionID);
           }
           continue;
@@ -2580,7 +2565,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             foregroundHandoffs.delete(movedSessionID);
             clearAgentCapability(movedSessionID);
             forgetGuardianProvenance(movedSessionID);
-            lastTranscriptNotice.delete(movedSessionID);
             provenanceSessions.delete(movedSessionID);
           }
           continue;
@@ -2881,7 +2865,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     foregroundHandoffs.clear();
     backgroundSessions.clear();
     sessionBackgroundJobs.clear();
-    lastTranscriptNotice.clear();
     for (const timer of interventionExpiryTimers.values()) {
       clearTimeout(timer);
     }

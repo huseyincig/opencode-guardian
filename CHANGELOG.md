@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.7 — 2026-11-25
+
+### Fixed
+- **Prevented `TrailingAssistantHistoryError` session crashes when `notifications.transcript: true` is enabled:**
+  - In OpenCode `v2.4.1`, `context.session.synthetic({ resume: false })` still admits a row into `session_inbox`. When `SessionRunner.drain` finishes a turn (such as right after a remediation or on the next user turn), OpenCode promotes that queued synthetic row after the assistant's `finish: "stop"` message and launches a new LLM step; stripping the `visible` Guardian notice in `session.context` left `event.messages` ending on `role: "assistant"`, causing strict providers (such as Anthropic via `@cortexkit/opencode-anthropic-auth`) to refuse the request with `NativeAnthropicLocalRefusal` / `TrailingAssistantHistoryError`.
+  - Removed all `context.session.synthetic(...)` calls for display-only `visible` notices. `notifications.transcript: true` now delivers the same detailed, secret-redacted per-finding bullets (`ruleId`, `pattern`, `[filePath]`, `description`, `Action:`) exclusively through the sanctioned OpenCode V2 TUI `session.composer.top` RPC snapshot (with multi-line `<For>` rendering in `src/tui.tsx`, readable 15 s TTL, immediate clear on `[dismiss]` or human prompt, and compact corner toasts), never mutating `session_inbox` or triggering LLM steps.
+  - Added a trailing-assistant defense-in-depth guard in `session.context` so filtering any legacy `visible` message can never turn a non-assistant history tail into a trailing `assistant` message.
+  - Updated `/guardian config` output (`Detailed conversation notices: enabled|disabled`) and `tests/v0172-transcript-notice.test.mjs`.
+
 ## 0.17.6 — 2026-11-24
 
 - **Detailed, Secret-Safe Chat Transcript Notices (`src/toast.ts`, `src/index.ts`, `src/commands.ts`):**

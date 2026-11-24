@@ -61,6 +61,8 @@ export type GuardianToastClearListener = (
 export interface GuardianToastNotifierOptions extends GuardianToastScope {
   context?: unknown;
   enabled?: boolean | undefined;
+  detailed?: boolean | undefined;
+  sanitizer?: SanitizerOptions | null | undefined;
 }
 
 export interface GuardianToastNotifier {
@@ -104,47 +106,28 @@ function cleanTranscriptField(
   return redacted.length > maxLen ? `${redacted.slice(0, maxLen - 1)}…` : redacted;
 }
 
-/**
- * Formats a detailed, secret-safe, model-invisible chat transcript notice
- * for `notifications.transcript: true`.
- */
-export function formatGuardianTranscriptNotice(
+export interface GuardianToastFormatOptions {
+  detailed?: boolean | undefined;
+  sanitizer?: SanitizerOptions | null | undefined;
+}
+
+function buildGuardianFindingBullets(
   input: GuardianInterventionInput,
   sanitizer?: SanitizerOptions | null
-): string {
-  const headerByKind: Record<GuardianInterventionKind, { header: string; action: string }> = {
-    "preflight-blocked": {
-      header: "[Guardian] ⊘ BLOCKED — Preflight safety block",
-      action: "Execution was prevented before running.",
-    },
-    remediation: {
-      header: "[Guardian] ↻ REMEDIATION — Correction requested",
-      action: "Agent was asked to correct the issue.",
-    },
-    "stream-interrupt-requested": {
-      header: "[Guardian] ⏹ STREAM STOP — Repetition detected",
-      action: "A stream interruption was requested.",
-    },
-    warning: {
-      header: "[Guardian] ▲ WARNING — Advisory finding",
-      action: "Advisory notice recorded (execution allowed).",
-    },
-  };
-
-  const { header, action } = headerByKind[input.kind];
-  const lines: string[] = [header];
-
+): string[] {
   if (input.kind === "stream-interrupt-requested") {
-    lines.push("- runtime/circuit-breaker: Repetitive generation detected in output stream.");
-  } else if (input.kind === "preflight-blocked") {
+    return ["- runtime/circuit-breaker: Repetitive generation detected in output stream."];
+  }
+  if (input.kind === "preflight-blocked") {
     const safeRule = sanitizeToastRuleId(input.ruleId ?? input.ruleIds?.[0] ?? "preflight");
     const safeTool =
       typeof input.tool === "string" && /^[a-z0-9_.-]+$/i.test(input.tool.trim())
         ? input.tool.trim()
         : undefined;
     const toolSuffix = safeTool ? ` (tool: ${safeTool})` : "";
-    lines.push(`- preflight / ${safeRule}${toolSuffix}: Dangerous operation blocked by preflight policy.`);
-  } else if (Array.isArray(input.details) && input.details.length > 0) {
+    return [`- preflight / ${safeRule}${toolSuffix}: Dangerous operation blocked by preflight policy.`];
+  }
+  if (Array.isArray(input.details) && input.details.length > 0) {
     const seen = new Set<string>();
     const bullets: string[] = [];
     for (const detail of input.details) {
@@ -162,28 +145,71 @@ export function formatGuardianTranscriptNotice(
       bullets.push(entry);
     }
     const MAX_BULLETS = 6;
-    lines.push(...bullets.slice(0, MAX_BULLETS));
+    const result = bullets.slice(0, MAX_BULLETS);
     if (bullets.length > MAX_BULLETS) {
-      lines.push(`- ... (+${bullets.length - MAX_BULLETS} more findings)`);
+      result.push(`- ... (+${bullets.length - MAX_BULLETS} more findings)`);
     }
-  } else {
-    const rawRules =
-      Array.isArray(input.ruleIds) && input.ruleIds.length
-        ? input.ruleIds
-        : input.ruleId
-          ? [input.ruleId]
-          : ["quality/policy"];
-    const uniqueRules = Array.from(new Set(rawRules.map(sanitizeToastRuleId)));
-    for (const ruleId of uniqueRules.slice(0, 6)) {
-      lines.push(`- ${ruleId}`);
-    }
-    if (uniqueRules.length > 6) {
-      lines.push(`- ... (+${uniqueRules.length - 6} more rules)`);
-    }
+    return result;
   }
+  const rawRules =
+    Array.isArray(input.ruleIds) && input.ruleIds.length
+      ? input.ruleIds
+      : input.ruleId
+        ? [input.ruleId]
+        : ["quality/policy"];
+  const uniqueRules = Array.from(new Set(rawRules.map(sanitizeToastRuleId)));
+  const result = uniqueRules.slice(0, 6).map((ruleId) => `- ${ruleId}`);
+  if (uniqueRules.length > 6) {
+    result.push(`- ... (+${uniqueRules.length - 6} more rules)`);
+  }
+  return result;
+}
 
-  lines.push(`Action: ${action}`);
+const INTERVENTION_NOTICE_META: Record<GuardianInterventionKind, { header: string; action: string }> = {
+  "preflight-blocked": {
+    header: "[Guardian] ⊘ BLOCKED — Preflight safety block",
+    action: "Execution was prevented before running.",
+  },
+  remediation: {
+    header: "[Guardian] ↻ REMEDIATION — Correction requested",
+    action: "Agent was asked to correct the issue.",
+  },
+  "stream-interrupt-requested": {
+    header: "[Guardian] ⏹ STREAM STOP — Repetition detected",
+    action: "A stream interruption was requested.",
+  },
+  warning: {
+    header: "[Guardian] ▲ WARNING — Advisory finding",
+    action: "Advisory notice recorded (execution allowed).",
+  },
+};
+
+/**
+ * Formats a detailed, secret-safe intervention summary for UI display
+ * (`notifications.transcript: true`). Never writes to `session_inbox`.
+ */
+export function formatGuardianTranscriptNotice(
+  input: GuardianInterventionInput,
+  sanitizer?: SanitizerOptions | null
+): string {
+  const { header, action } = INTERVENTION_NOTICE_META[input.kind];
+  const lines = [
+    header,
+    ...buildGuardianFindingBullets(input, sanitizer),
+    `Action: ${action}`,
+  ];
   return lines.join("\n");
+}
+
+function formatDetailedInterventionBody(
+  input: GuardianInterventionInput,
+  sanitizer?: SanitizerOptions | null
+): string {
+  const { action } = INTERVENTION_NOTICE_META[input.kind];
+  return [
+    ...buildGuardianFindingBullets(input, sanitizer),
+    `Action: ${action}`,
+  ].join("\n");
 }
 
 export function sanitizeToastRuleId(raw: unknown): string {
@@ -205,13 +231,20 @@ function resolveToastDuration(defaultMs: number): number {
   return Number.isFinite(envVal) && envVal > 0 ? Math.floor(envVal) : defaultMs;
 }
 
-export function formatGuardianToast(input: GuardianInterventionInput): GuardianToastPayload {
+export function formatGuardianToast(
+  input: GuardianInterventionInput,
+  options?: GuardianToastFormatOptions
+): GuardianToastPayload {
+  const detailed = options?.detailed === true;
+  const detailedDuration = resolveToastDuration(15_000);
   switch (input.kind) {
     case "stream-interrupt-requested": return {
       title: "Guardian — Repetition detected",
-      message: "Repetitive generation detected. A stream interruption was requested.",
+      message: detailed
+        ? formatDetailedInterventionBody(input, options?.sanitizer)
+        : "Repetitive generation detected. A stream interruption was requested.",
       variant: "warning",
-      duration: resolveToastDuration(5000),
+      duration: detailed ? detailedDuration : resolveToastDuration(5000),
     };
     case "preflight-blocked": {
       const safeRule = sanitizeToastRuleId(input.ruleId ?? input.ruleIds?.[0] ?? "preflight");
@@ -219,14 +252,16 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         typeof input.tool === "string" && /^[a-z0-9_.-]+$/i.test(input.tool.trim())
           ? input.tool.trim()
           : undefined;
-      const message = safeTool
-        ? `[${safeRule}] Execution of "${safeTool}" was blocked for safety.`
-        : `[${safeRule}] Command execution was blocked for safety.`;
+      const message = detailed
+        ? formatDetailedInterventionBody(input, options?.sanitizer)
+        : safeTool
+          ? `[${safeRule}] Execution of "${safeTool}" was blocked for safety.`
+          : `[${safeRule}] Command execution was blocked for safety.`;
       return {
         title: "Guardian — Blocked",
         message,
         variant: "error",
-        duration: resolveToastDuration(5000),
+        duration: detailed ? detailedDuration : resolveToastDuration(5000),
       };
     }
     case "remediation": {
@@ -243,9 +278,11 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         remaining > 0 ? `${sliced.join(", ")} (+${remaining} more)` : sliced.join(", ");
       return {
         title: "Guardian — Remediation",
-        message: `Blocked: ${ruleText}\nAgent was asked to correct the issue.`,
+        message: detailed
+          ? formatDetailedInterventionBody(input, options?.sanitizer)
+          : `Blocked: ${ruleText}\nAgent was asked to correct the issue.`,
         variant: "error",
-        duration: resolveToastDuration(5000),
+        duration: detailed ? detailedDuration : resolveToastDuration(5000),
       };
     }
     case "warning": {
@@ -262,9 +299,11 @@ export function formatGuardianToast(input: GuardianInterventionInput): GuardianT
         remaining > 0 ? `${sliced.join(", ")} (+${remaining} more)` : sliced.join(", ");
       return {
         title: "Guardian — Warning",
-        message: `Advisory finding: ${ruleText}.`,
+        message: detailed
+          ? formatDetailedInterventionBody(input, options?.sanitizer)
+          : `Advisory finding: ${ruleText}.`,
         variant: "warning",
-        duration: resolveToastDuration(4000),
+        duration: detailed ? detailedDuration : resolveToastDuration(4000),
       };
     }
   }
@@ -447,7 +486,12 @@ export function createGuardianToastNotifier(
   return {
     notify(input: GuardianInterventionInput): void {
       try {
-        const payload = formatGuardianToast(input);
+        const payload = formatGuardianToast(
+          input,
+          options?.detailed === true
+            ? { detailed: true, sanitizer: options.sanitizer }
+            : undefined
+        );
         dispatchGuardianToast(payload, {
           ...options,
           ...(input.sessionID ? { sessionID: input.sessionID } : {}),

@@ -1,5 +1,5 @@
-import { createComponent as _$createComponent } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
+import { createComponent as _$createComponent } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
@@ -91,6 +91,7 @@ function GuardianConversationIntervention(props) {
       color: props.colors.error ?? props.colors.accent
     };
   };
+  const messageLines = () => (props.payload?.message ?? "").split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
   return _$createComponent(Show, {
     get when() {
       return props.payload;
@@ -105,10 +106,8 @@ function GuardianConversationIntervention(props) {
         _el$1 = _$createElement("text"),
         _el$10 = _$createElement("b"),
         _el$12 = _$createElement("text"),
-        _el$13 = _$createElement("text"),
-        _el$15 = _$createElement("text");
+        _el$13 = _$createElement("text");
       _$insertNode(_el$5, _el$6);
-      _$insertNode(_el$5, _el$15);
       _$setProp(_el$5, "width", "100%");
       _$setProp(_el$5, "flexDirection", "column");
       _$setProp(_el$5, "border", ["left"]);
@@ -135,22 +134,25 @@ function GuardianConversationIntervention(props) {
       _$insertNode(_el$10, _$createTextNode(` GUARDIAN`));
       _$insert(_el$12, () => ` · ${kindMeta().subtitle}`);
       _$insertNode(_el$13, _$createTextNode(`[dismiss]`));
-      _$insert(_el$15, () => props.payload?.message ?? "");
+      _$insert(_el$5, () => messageLines().map(line => (() => {
+        var _el$15 = _$createElement("text");
+        _$insert(_el$15, line);
+        _$effect(_$p => _$setProp(_el$15, "fg", line.startsWith("Action:") ? props.colors.muted : props.colors.text, _$p));
+        return _el$15;
+      })()), null);
       _$effect(_p$ => {
         var _v$3 = kindMeta().color,
           _v$4 = kindMeta().color,
           _v$5 = props.colors.background,
           _v$6 = kindMeta().color,
           _v$7 = props.colors.muted,
-          _v$8 = props.colors.muted,
-          _v$9 = props.colors.text;
+          _v$8 = props.colors.muted;
         _v$3 !== _p$.e && (_p$.e = _$setProp(_el$5, "borderColor", _v$3, _p$.e));
         _v$4 !== _p$.t && (_p$.t = _$setProp(_el$8, "backgroundColor", _v$4, _p$.t));
         _v$5 !== _p$.a && (_p$.a = _$setProp(_el$9, "fg", _v$5, _p$.a));
         _v$6 !== _p$.o && (_p$.o = _$setProp(_el$1, "fg", _v$6, _p$.o));
         _v$7 !== _p$.i && (_p$.i = _$setProp(_el$12, "fg", _v$7, _p$.i));
         _v$8 !== _p$.n && (_p$.n = _$setProp(_el$13, "fg", _v$8, _p$.n));
-        _v$9 !== _p$.s && (_p$.s = _$setProp(_el$15, "fg", _v$9, _p$.s));
         return _p$;
       }, {
         e: undefined,
@@ -158,8 +160,7 @@ function GuardianConversationIntervention(props) {
         a: undefined,
         o: undefined,
         i: undefined,
-        n: undefined,
-        s: undefined
+        n: undefined
       });
       return _el$5;
     }
@@ -643,10 +644,10 @@ function GuardianSidebar(props) {
             _$insertNode(_el$32, _$createTextNode(`Log`));
             _$insertNode(_el$34, _$createTextNode(`recent window`));
             _$effect(_p$ => {
-              var _v$0 = props.colors.muted,
-                _v$1 = props.colors.muted;
-              _v$0 !== _p$.e && (_p$.e = _$setProp(_el$32, "fg", _v$0, _p$.e));
-              _v$1 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$1, _p$.t));
+              var _v$9 = props.colors.muted,
+                _v$0 = props.colors.muted;
+              _v$9 !== _p$.e && (_p$.e = _$setProp(_el$32, "fg", _v$9, _p$.e));
+              _v$0 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$0, _p$.t));
               return _p$;
             }, {
               e: undefined,
@@ -659,14 +660,14 @@ function GuardianSidebar(props) {
       }
     }), null);
     _$effect(_p$ => {
-      var _v$10 = props.colors.muted,
-        _v$11 = props.colors.accent,
-        _v$12 = props.colors.background,
-        _v$13 = props.colors.muted;
-      _v$10 !== _p$.e && (_p$.e = _$setProp(_el$19, "fg", _v$10, _p$.e));
-      _v$11 !== _p$.t && (_p$.t = _$setProp(_el$20, "backgroundColor", _v$11, _p$.t));
-      _v$12 !== _p$.a && (_p$.a = _$setProp(_el$21, "fg", _v$12, _p$.a));
-      _v$13 !== _p$.o && (_p$.o = _$setProp(_el$24, "fg", _v$13, _p$.o));
+      var _v$1 = props.colors.muted,
+        _v$10 = props.colors.accent,
+        _v$11 = props.colors.background,
+        _v$12 = props.colors.muted;
+      _v$1 !== _p$.e && (_p$.e = _$setProp(_el$19, "fg", _v$1, _p$.e));
+      _v$10 !== _p$.t && (_p$.t = _$setProp(_el$20, "backgroundColor", _v$10, _p$.t));
+      _v$11 !== _p$.a && (_p$.a = _$setProp(_el$21, "fg", _v$11, _p$.a));
+      _v$12 !== _p$.o && (_p$.o = _$setProp(_el$24, "fg", _v$12, _p$.o));
       return _p$;
     }, {
       e: undefined,
@@ -933,11 +934,13 @@ const v2Plugin = {
       const toastConfig = v2UiConfig(toastDirectory, context.options);
       if (toastConfig.enabled !== false && toastConfig.notifications?.enabled !== false && typeof context.ui.toast?.show === "function") {
         try {
+          const toastLines = toast.message.split("\n").filter(line => line.trim().length > 0);
+          const compactMessage = toastLines.length > 2 ? `${toastLines[0]}\n${toastLines[toastLines.length - 1]}` : toast.message;
           context.ui.toast.show({
             title: toast.title,
-            message: toast.message,
+            message: compactMessage,
             variant: toast.variant,
-            duration: toast.duration,
+            duration: Math.min(toast.duration, 5000),
             ...(scope.sessionID ? {
               sessionID: scope.sessionID
             } : {})

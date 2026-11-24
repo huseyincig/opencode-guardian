@@ -102,6 +102,12 @@ function GuardianConversationIntervention(props: {
     };
   };
 
+  const messageLines = () =>
+    (props.payload?.message ?? "")
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+
   return (
     <Show when={props.payload}>
       <box
@@ -123,7 +129,11 @@ function GuardianConversationIntervention(props: {
           </box>
           <text fg={props.colors.muted}>{"[dismiss]"}</text>
         </box>
-        <text fg={props.colors.text}>{props.payload?.message ?? ""}</text>
+        {messageLines().map((line) => (
+          <text fg={line.startsWith("Action:") ? props.colors.muted : props.colors.text}>
+            {line}
+          </text>
+        ))}
       </box>
     </Show>
   );
@@ -759,11 +769,15 @@ const v2Plugin: Plugin.Definition = {
         typeof context.ui.toast?.show === "function"
       ) {
         try {
+          const toastLines = toast.message.split("\n").filter((line) => line.trim().length > 0);
+          const compactMessage = toastLines.length > 2
+            ? `${toastLines[0]}\n${toastLines[toastLines.length - 1]}`
+            : toast.message;
           context.ui.toast.show({
             title: toast.title,
-            message: toast.message,
+            message: compactMessage,
             variant: toast.variant,
-            duration: toast.duration,
+            duration: Math.min(toast.duration, 5000),
             ...(scope.sessionID ? { sessionID: scope.sessionID } : {}),
           });
         } catch {}

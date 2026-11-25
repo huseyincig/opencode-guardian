@@ -30,16 +30,14 @@ Sources:
 
 ## Reproducible Test Regressions
 
-The mappings above are continuously validated through automated test suites:
-- [`tests/security-benchmark.test.mjs`](../tests/security-benchmark.test.mjs): 17-case synthetic preflight benchmark.
-- [`tests/guardfall-regression.test.mjs`](../tests/guardfall-regression.test.mjs): Obfuscated shell rewrite regressions.
-- [`tests/full-audit-regressions.test.mjs`](../tests/full-audit-regressions.test.mjs): Recognized MCP shell tools, scoped Git destructive operations, and literal format/fork-bomb signatures.
-- [`tests/owasp-scope-regression.test.mjs`](../tests/owasp-scope-regression.test.mjs): Path scoping and `sudo` privilege escalation tests.
-- [`tests/review-hardening.test.mjs`](../tests/review-hardening.test.mjs): Git authorization boundaries, executed-code/literal distinctions and collection-error handling.
-- [`tests/verification-report.test.mjs`](../tests/verification-report.test.mjs): Supported counts, outcome semantics and verification claims.
-- [`tests/discipline-coverage.test.mjs`](../tests/discipline-coverage.test.mjs): One violation and one legitimate-negative case for each rule; a synthetic baseline, not an OWASP certification or real-world accuracy estimate.
+The mappings above are continuously validated through automated domain test suites:
+- [`tests/preflight.test.mjs`](../tests/preflight.test.mjs): 17-case synthetic preflight benchmark, GuardFall obfuscated shell rewrites, path scoping, `sudo` privilege escalation, and Windows/Node command preflight.
+- [`tests/rules-discipline.test.mjs`](../tests/rules-discipline.test.mjs): 28-case balanced 14-rule baseline (one violation and one legitimate-negative per rule), scoped Git authorization boundaries, recognized MCP shell tools, and literal format/fork-bomb signatures.
+- [`tests/rules-completion-and-evidence.test.mjs`](../tests/rules-completion-and-evidence.test.mjs): Supported test-runner counts, outcome semantics, aborted/interrupted tool classification, verification claims, and edit integrity.
+- [`tests/secrets-and-redaction.test.mjs`](../tests/secrets-and-redaction.test.mjs): Multi-layer secret redaction across tool outputs and model context, plus example-file credential rules.
+- [`tests/runtime-v2-lifecycle.test.mjs`](../tests/runtime-v2-lifecycle.test.mjs): V2 hook lifecycle, session/prompt cancellation, multi-location deduplication, Code Mode, and background job isolation.
 - [`sandbox/comprehensive-test.mjs`](../sandbox/comprehensive-test.mjs): 18 end-to-end failure mode and recovery scenarios.
 
-## v0.8.0 Operational Visibility
+## Operational Visibility
 
 The TUI adds project-scoped, redacted status, activity, diagnostics commands, and visible color-coded toast interventions. Reset requires confirmation and preserves audit events subject to normal rotation. These are operational features, not new cryptographic controls or proof of OWASP-wide protection; live-host V2 (`v2.4.1`) acceptance is independently verified and documented in [Verification Report](verification-report.md).

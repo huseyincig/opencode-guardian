@@ -1,306 +1,33 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.17.9 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **25 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**, and preserves the historical **four-part dual-mode live-host acceptance baseline from v0.6.0** (OpenCode V1 support ended in `v0.14.0`).
+This document reports the **v0.17.9 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **25 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**. (OpenCode V1 support ended in `v0.14.0`; historical release notes are preserved in [CHANGELOG.md](../CHANGELOG.md).)
 
 ---
 
 ## Executive Summary
 
 - **Package Version:** OpenCode Guardian `v0.17.9` (Pure OpenCode V2 `>=2.3.0`)
-- **Previous Package Version:** `v0.17.8` (OpenCode V1 support ended in `v0.14.0`; historical v0.6.0 host acceptance evidence retained below)
-- **Current Automated Source Suite:** **852 / 852 unit, security, mesh interoperability, scope isolation, telemetry, and regression tests passed**, zero failed, cancelled or skipped
+- **Automated Source Suite:** **852 / 852 tests passed** across 13 domain suites (`tests/*.test.mjs`), zero failed, cancelled, or skipped
 - **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode v2.4.1 (`/usr/bin/opencode`) + Bun `1.4.4` + packed `.tgz`
-- **Historical Live-Host Dual Acceptance (v0.6.0):** **4 / 4 — ACCEPTED** on both OpenCode V1 (`1.18.34`) and OpenCode V2 (`2.0.22`)
+- **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode `v2.4.1` (`/usr/bin/opencode`) + Bun `1.4.4` + packed `.tgz`
+- **Static & Supply-Chain Gates:** Strict TypeScript, Oxlint (`0 warnings, 0 errors` across 65 files), Markdown/SVG link validation, and `npm audit --omit=dev` (`0 vulnerabilities`)
 
 > v0.17.9 resolves GitHub Issue #4 by classifying OpenCode V2 aborted/interrupted tool outcomes (`{ type: "aborted", message: "Tool execution interrupted" }`, `opencode service restart`) as `status: "unknown"` (`outcomeReason: "cancelled"`) rather than unresolved command failures, and ensures attachment-only `type: "user"` prompts always establish a fresh human turn boundary.
 
 ---
 
-## Historical Live-Host Dual Acceptance Matrix (v0.6.0)
-
-Independent live-host acceptance tests were conducted on real host environments without mocks or simulated tool calls:
-
-| Acceptance Section | OpenCode V1 (`1.18.34`) | OpenCode V2 (`2.0.22`) | Verified Behavior |
-| :--- | :---: | :---: | :--- |
-| **1. Post-Turn & Remediation** | **PASS** | **PASS** | Automated violation interception, structured remediation injection, three-way classification (`verified` / `failed` / `unverified`), and budget capping preventing runaway loops. |
-| **2. Preflight & Security** | **PASS** | **PASS** | Pre-execution interception of destructive shell operations (`rm`), bit-level SHA-256 target preservation (0-byte modification), audit logging, and secret write blocking. |
-| **3. TUI & Commands** | **PASS** | **PASS** | Live sidebar slot registration (V1 order 600 / V2 append), reactive counters from JSONL telemetry, 7 Command Palette actions, slash dispatcher, and confirmed reset. |
-| **4. Lifecycle & Cleanup** | **PASS** | **PASS** | Clean teardown via `dispose()` and `AbortController`, reload idempotence without double registrations, timer leaks, or unhandled rejections. |
-| **Final Result** | **4/4 — ACCEPTED** | **4/4 — ACCEPTED** | **Dual-Mode Contract Fully Verified** |
-
-### Environment Details
-
-1. **OpenCode V1 Host Environment:**
-   - **Host Binary:** OpenCode `1.18.34` (`/usr/local/bin/opencode`)
-   - **Runtime:** Linux x86_64, Node.js `v24.21.0`
-   - **SDK Contract:** `@opencode-ai/plugin` (`1.18.34`)
-   - **Test Workspace:** Isolated sandbox (`/root/guard-live-sandbox`)
-
-2. **OpenCode V2 Host Environment:**
-   - **Host Binary:** OpenCode `2.0.22`
-   - **Runtime:** Linux x86_64, Node.js `v24.13.1`, Bun `1.3.10`
-   - **SDK Contract:** `@opencode/plugin` (`2.0.22`), `@opencode/plugin/tui`
-   - **Test Workspace:** Isolated sandbox (`/root/guardian_v2_audit_sandbox/test-project`)
-
----
-
-## Concrete Live-Host Acceptance Evidence
-
-### Section 1: Post-Turn & Remediation
-
-1. **Violation Interception & Automated Prompt:**
-   - In active agent turns, rules (`quality/no-shortcuts`, `discipline/no-apology`, `security/no-secrets`, `task/completion-gate`) triggered `decision: "block"` upon `session.idle`.
-   - Structured remediation message starting with `[opencode-guardian remediation]` was dispatched to the agent session via host synthetic/prompt APIs.
-   - Audit trail recorded `post-remediation` events in `.opencode/guardian-events.jsonl`.
-
-2. **Three-Way Re-Inspection Classification (`verified` / `failed` / `unverified`):**
-   - **`remediation-verified`:** When the agent modified disk files to correct the issue and supplied required execution proof (e.g. clean test run with exit code 0), re-inspection confirmed resolution (`remediationStatus: "verified"`, `status.verified++`).
-   - **`remediation-failed`:** When the agent acknowledged the prompt but repeated the violation or failed to remove shortcuts, re-inspection caught the remaining issue (`remediationStatus: "failed"`, `status.failed++`).
-   - **`remediation-unverified`:** When the agent claimed completion in text but produced no substantive tool-level proof for rules requiring verifiable evidence (`integrity/no-unverified-claims`), Guardian classified the outcome as unverified (`remediationStatus: "unverified"`, `status.unverified++`).
-
-3. **Loop Guard & Budget Capping:**
-   - Remediation turns (`isRemediationResponse: true`) enforce `remediationBudget` (default `1`).
-   - When the budget is exhausted, the engine yields `decision: "pass"` with the determined remediation status, preventing recursive remediation cycles and infinite prompt loops.
-
-### Section 2: Preflight & Security
-
-1. **Pre-Execution Shell Interception:**
-   - Under `preflight.enabled: true`, destructive shell actions (`rm canli_kabul_target.txt`, `rm -rf sensitive-target.txt`) were intercepted before process execution via `tool.execute.before` (V1) and `ctx.tool.hook("execute.before")` (V2).
-   - In both environments, `providerCall.executed` remained `false`.
-   - `GuardianPreflightError("destructive-command")` was thrown before the OS shell received the command.
-
-2. **Bit-Level Target File Integrity:**
-   - Target files retained bit-by-bit identical SHA-256 hashes before and after the attempted destructive execution:
-     - Sandbox V1 target: `85451b5326dd5932...` $\rightarrow$ Unchanged (0 byte drift)
-     - Sandbox V2 target: `1febda3694823474dbbbf4b4f78ce2086d7b5c4092200914a582b4588f4bb230` $\rightarrow$ Unchanged (0 byte drift)
-   - Files remained intact on the host filesystem.
-
-3. **Security Audit Logging & Safe Commands:**
-   - Audit entry recorded with POSIX permissions `0600`:
-     ```json
-     {"at":"2026-10-04T20:28:51.592Z","id":"e724f80f-dad0-4201-a4b4-0141f35eb4a7","kind":"preflight-blocked","action":"blocked-before-execution","outcome":"prevented","session":"1636fe8f151c4746","tool":"shell","rules":["destructive-command"],"reasons":[{"rule":"preflight","code":"destructive-command"}]}
-     ```
-   - Safe operations (`npm test`, `echo SAFE_PREFLIGHT_VERIFIED`) executed without impedance and were recorded as `preflight-allowed`.
-   - Supported file write tools (`write_to_file`, `replace_file_content`, MCP file mutators) attempting to persist hardcoded credentials (`sk-proj-...`) were blocked prior to disk mutation with `hardcoded-secret-in-file-write`.
-
-### Section 3: TUI & Commands
-
-1. **Sidebar Extension & Reactive Telemetry:**
-   - V1 host mounted the widget via `api.slots.register({ order: 600, slots: { sidebar_content } })`.
-   - V2 host mounted the widget via `ctx.ui.slot({ append: "sidebar.content" })`.
-   - Sidebar poll timer (2500 ms) and Solid signals reactively displayed counters from `.opencode/guardian-events.jsonl`.
-   - Header click smoothly toggled between collapsed (`▶ Guardian`) and expanded (`▼ Guardian`) diagnostic views.
-
-2. **7 Guardian Commands (Ctrl+P / Command Palette):**
-   - All 7 commands registered and produced validated, privacy-safe reports:
-     - `status` (`opencode-guardian.status`): Live counters, latest event, verified/failed/unverified totals.
-     - `activity` (`opencode-guardian.activity`): Redacted recent audit events.
-     - `doctor` (`opencode-guardian.doctor`): Configuration validation and event log health.
-     - `rules` (`opencode-guardian.rules`): Active severity configuration for all 14 rules.
-     - `config` (`opencode-guardian.config`): Safe, redacted configuration overview.
-     - `version` (`opencode-guardian.version`): Current v0.6.5 version and update status.
-     - `reset` (`opencode-guardian.reset`): Confirmed counter reset dialog.
-
-3. **Slash Commands & Dispatcher:**
-   - Direct slash shortcuts (`/guardian-status`, `/guardian-activity`, etc.) registered in both palettes.
-   - V2 general dispatcher (`/guardian <command>`) correctly executed subcommands and provided interactive guidance for invalid arguments.
-
-4. **Statistics Reset Safety:**
-   - Dialog cancellation left all counters and audit files unmodified.
-   - Confirmation appended a `statistics-reset` record to the audit log: live counters reset to 0, while all prior audit history remained intact subject to normal log rotation.
-
-### Section 4: Lifecycle & Cleanup
-
-1. **Graceful Teardown:**
-   - V1: `Guardian.server().dispose()` terminated active turn watchers and cleared verification caches.
-   - V2: `setup()` disposer triggered `controller.abort()`, releasing tool hooks, event subscriptions, and keymap layers in reverse registration order.
-   - TUI: `onCleanup` cleared background polling intervals (`clearInterval`), preventing memory and timer leaks.
-
-2. **Reload Idempotence:**
-   - Host reloads (`opencode reload`, service restart, and plugin re-instantiation) executed without duplicate event listeners, redundant interventions, or unhandled promise rejections.
-
----
-
-## v0.13.0 Streaming Loop Hardening & Degenerative Cycle Breaker
-
-- **Language-Agnostic Degenerative Cycle Detection:** Implemented `detectDegenerativeLoop` in `src/degeneration.ts` to detect repetitive token cascades and collapse states in assistant text and reasoning (including DeepSeek V4.1 Flash *"Hmm..."*, Kimi 2.7 Chinese/Japanese ideogram cascades, runaway punctuation, and code token repeats like *"None, None, None..."*).
-- **Post-Turn Circuit Breaker Integration:** Enhanced `runtime/circuit-breaker` to inspect assistant text and reasoning parts in `currentTurn`, producing structured findings and targeted remediation prompts instructing the model to clear stalled thoughts and proceed without repetition.
-- **Live In-Flight Streaming Inspection:** V1 inspects `message.part.updated` only for the active assistant message; V2 consumes native `session.text.delta` and `session.reasoning.delta` events. Inspection uses a bounded 2,048 UTF-16 code-unit tail and checks after at least 40 new code units following the initial inspection. `error` requests `client.session.abort` (V1) or `context.session.interrupt({ sessionID, resume: false })` (V2); `warn` records a warning and `off` disables intervention, including object-form settings. V2 event ingestion continues while project lookup and interruption are pending, allowing completion, deletion, moves, and newer responses to invalidate stale detections. Failed calls are recorded and explicitly rejected requests may retry on subsequent growth, at most three times per response. A three-second timeout records an error and suppresses overlapping stop retries; the V2 host API cannot cancel an already issued call. Disposal cancels inspection and discards late results. A successful API response is logged as `stream-interrupt-requested` with an unverified outcome, without claiming prevention, saved tokens, or delivery of a remediation prompt.
-- **Negative False-Positive Protections:** Excluded Markdown table rows, comment banners, horizontal rules, small fixture arrays, standard code loops, and quoted numeric/hex literals of 15–128 characters, including incomplete streaming prefixes. Periodic patterns up to 512 code units are supported within the bounded window. The character-diversity fallback is a heuristic, not a Shannon entropy or compression calculation. Intentional long repetition can still trigger the heuristic; this is not a universal decoding-collapse guarantee.
-- **Regression Suite:** The 24 cases in `tests/degenerative-loops.test.mjs` cover multilingual positives, negatives, post-turn rules, and adapter integration; `tests/stream-loop-hardening.test.mjs` adds lifecycle, settings, rejected requests, concurrency, project isolation, literal fixtures, and long-period regressions. These use mocked host contracts; real-host acceptance was not rerun.
-- **Measured Detector Cost (2026-10-23):** Node v24.22.0, 1,000 warm-up checks followed by 4,000 checks per input, using the default 2,048-code-unit window. Long English cycles: median 0.0060 ms / p95 0.0077 ms; CJK cycles: 0.0072 / 0.0081 ms; nonperiodic source code: 0.1854 / 0.2236 ms. These local measurements cover the detector only; they do not establish a universal latency or zero-overhead guarantee.
-
-## v0.12.4 Native Write Payloads & Multi-Directory Isolation
-
-- **Native Write Preflight & Telemetry:** Recognized native `write` tool payloads; blocked hardcoded secrets and truncation placeholders while allowing valid code writes.
-- **V2 Session Directory Resolution:** Resolved active project directories before preflight and edit observation in multi-directory environments.
-- **Auxiliary Model Guards Isolation:** Installed model hooks dynamically per request, supporting live config updates.
-- **Evidence Mutation Tracking:** Tracked replacement edits, deletions, and affected files to invalidate stale verifications.
-
-## v0.12.3 International Multilingual In-Progress Protection
-
-- **Full 13-locale in-progress classification:** Expands `REPORT_TERMS` in `locale-intents.ts` to include explicit `inProgress` terms across all 11 non-English/Turkish languages (Spanish, Portuguese, French, German, Russian, Arabic, Hindi, Chinese, Japanese, Korean, Indonesian) in addition to English and Turkish.
-- **Subagent language-neutral flow:** Subagents reporting ongoing progress in any supported language (*"en progreso"*, *"trabajo en curso"*, *"en cours"*, *"in Bearbeitung"*, *"в процессе"*, *"قيد التنفيذ"*, *"काम जारी है"*, *"进行中"*, *"進行中"*, *"진행 중"*, *"sedang berlangsung"*) are classified with `isInProgress === true` and `isClosing === false`, preventing false-positive completion gate blocking.
-- **Multilingual regression tests:** Added test suites in `tests/multilingual-task.test.mjs` and `tests/subagent-progress-completion-gate.test.mjs` verifying all 13 supported languages.
-
-## v0.12.2 Subagent In-Progress Protection and Actionable Remediation
-
-- **Subagent progress protection:** Subagents reporting intermediate work, tool outcomes, or step progress without claiming task completion (`!report.isClosing`) pass the completion gate cleanly without false-positive blocking.
-- **Multilingual in-progress detection:** Added `IN_PROGRESS_REGEX` and `normalizeReportText` with Turkish case and dotted/dotless (`İ`, `I`, `ı`, `i`) handling to recognize ongoing work phrases (*"işlem devam ediyor"*, *"çalışmaya devam ediyorum"*, *"ara rapor"*, *"durum güncellemesi"*, *"devredildi"*, *"work in progress"*, *"ongoing"*, etc.).
-- **Orchestrator delegation support:** Prevents completion gate blocks when an orchestrator delegates tasks to a child subagent or waits for child execution.
-- **Anti-distraction directive:** Injects `ANTI_DISTRACTION_DIRECTIVE` into remediation prompts to forbid agents from inspecting Guardian's plugin code, internal state or audit logs.
-- **Actionable remediation prompts:** Restructures all 14 rule remediation prompts to feature clear, numbered `ACTION REQUIRED:` blocks instructing agents to directly fix issues or report concrete blockers.
-- **Regression test coverage:** Adds dedicated tests in `subagent-progress-completion-gate.test.mjs` verifying subagent turns, ongoing progress, Turkish regex boundary handling, and completion-claim verification.
-
-## v0.12.0 Engine Evidence and Discipline Hardening
-
-- **Verification semantics:** bounded complete Node/pytest/Jest/Vitest summaries distinguish executed tests, skipped-only and zero-test outcomes. Actual host failures remain failures; explicit cancellation is distinct from collection errors. Fresh supported counts can contradict explicit current passed-test claims.
-- **Edit observations:** V1/V2 before/after callbacks capture bounded, project-confined whole-file facts. Suspicious definition loss is advisory; missing before hooks do not invent old content. Strict preflight rejects source truncation placeholders.
-- **Context and scope:** code checks distinguish executable code from literal examples. Runtime dev-only imports are advisory by default, with optional `productionOnly` enforcement. Credential formats are shared between write detection and output redaction. Research-only phrases, baseline targets, repository/refspec authorization and hook bypasses have focused regressions.
-- **Balanced regression baseline:** [28 labeled cases across fourteen rules](../tests/discipline-coverage.test.mjs), plus focused boundary tests. [Coverage and limitations](discipline-coverage.md) document the supported subsets. This synthetic corpus does not establish equal real-world accuracy across disciplines or languages.
-- **Adapter boundary:** simulated V1/V2 callbacks verify before/after observation delivery and the absent-before-hook negative case. Live-host compatibility and interactive TUI acceptance remain separate, unperformed checks for this release.
-
-## v0.11.2 Error Redaction, Session Cancellation and Mutation Permissions
-
-- **Secret sanitization:** All own Error properties are sanitized recursively, including non-enumerable `cause`, aggregate errors and provider metadata. Sanitization copies errors instead of modifying the originals. Executable `toJSON` callbacks are omitted, and reserved JSON keys remain own properties without changing prototypes.
-- **V1 session lifecycle:** Native `session.deleted` events read `properties.info.id`. Per-session cancellation stops stale idle work on deletion, disposal and new human messages, including attachment-only prompts. Previous task guidance is cleared on a new human turn.
-- **Capability cache:** Cancelled agent queries cannot restore deleted-session permission profiles, and cancellation is rechecked before engine inspection.
-- **Mutation authorization:** Enabling a V1 mutation tool does not override explicit `deny`/`ask` or the shared edit restriction. The previous test expecting enabled `apply_patch` to override an edit denial now checks that autonomous remediation is forbidden.
-- **Regression suite:** [19 debugging cases](../tests/debug-regressions.test.mjs) cover these paths; the v0.11.2 source suite passed 619 tests. These regressions remain included in the current suite.
-
-## v0.11.1 Post-Turn Inspection Counting and V2 Subagent Handoff Recognition
-
-The v0.11.1 release enhances telemetry precision and strengthens subagent handoff coordination:
-
-- **Accurate Post-Turn Inspection Telemetry Counting (`telemetry` & `index`):**
-  - Ensured `post-inspected` events accurately increment on completed non-duplicate rule evaluations without inflating counters on synthetic turns or failed message fetches.
-- **Robust V2 Subagent Handoff Recognition (`index` & `agent-capability`):**
-  - Enhanced `finalizeSubagentHandoff` to recognize subagent results across metadata, structured tool outputs, and child session ownership verification.
-- **Suite Expansion (`tests`):**
-  - Added dedicated telemetry regression tests, expanding the automated suite to 600 passing tests (100% pass).
-
----
-
-## v0.11.0 Evidence Trust Boundaries, Credential Redaction, Idle Queue Coalescing, and Lifecycle Cleanup
-
-The v0.11.0 release addresses comprehensive audit findings across evidence trust, data privacy, task lifecycle, and subagent capability:
-
-- **Evidence Trust Boundaries & Per-File Patch Attribution (`evidence` & `tool-input`):**
-  - Strict validation of tool execution evidence and per-file diff attribution ensuring patches map accurately to verified modified paths.
-- **Credential Redaction & Privacy Isolation (`secrets` & `telemetry`):**
-  - Hardened pattern matching and output masking in secret sanitization, preventing accidental exposure of tokens or keys in telemetry events or error states.
-- **Idle Queue Coalescing & V1 Turn Watcher (`idle-queue` & `index`):**
-  - Introduced `IdleQueue` to coalesce rapid successive idle notifications, preventing redundant evaluations and race conditions during high-turn agent executions.
-- **Subagent Capability Cache Integrity (`agent-capability`):**
-  - Ensured immutable capability evaluation and protected capability caches from poisoned child states.
-- **TUI Cleanup & Feedback Regression Suite (`tui` & `tests`):**
-  - Cleaned up TUI state transitions and added 48 new regression tests covering audit scenarios, bringing the test suite to 597 passing tests.
-
----
-
-## v0.10.0 Windows Command Parsing, Rollback Budget Preservation, and Synthetic Remediation Assertions
-
-The v0.10.0 release hardens cross-platform preflight and verification inspection:
-
-- **Windows Command Stage Parsing (`preflight` & `shell-risk`):**
-  - Robust recognition of literal Windows shell removal commands (`del`, `erase`, `rd`, `rmdir`, `remove-item`, `format`) across split command stages and nested `cmd /c` / `PowerShell -Command` wrappers while exempting quoted documentation examples.
-- **Rollback Budget Preservation (`engine`):**
-  - Preserves rollback and remediation budgets when operations are legitimately reset or rolled back without exhausting session quotas.
-- **Synthetic Remediation Assertions (`tests`):**
-  - Asserts actual synthetic remediation messages rather than visible transcript side effects, preventing race conditions and false negatives in automated test suites.
-- **Strict Typecheck Cleanliness (`evidence` & `index`):**
-  - Removed unused imports and strengthened strict typecheck invariants across dual-mode entrypoints.
-
-## v0.9.0 Preflight Hook Isolation, Finding Identity Hardening, and Circuit Breaker Tracking
-
-The v0.9.0 release resolves edge-case hook conflicts and strengthens continuous inspection resilience:
-
-- **Preflight & Verification Hook Isolation (`index`):**
-  - Completely decoupled V2 `execute.before` (strict preflight / subagent finalization) and `execute.after` (verification snapshotting & output secret redaction) registrations. Preflight failures no longer trigger false-positive secret errors, and optional evidence hook failures fail soft without suppressing active shell guards.
-- **Finding Identity Semantic Hardening (`engine`):**
-  - Standardized fallback finding fingerprints on `ruleId`, `filePath`, and core detected `pattern` while omitting non-deterministic prose snippets. Prevents agents from entering infinite remediation loops merely by rewording evasive responses across successive turns while reliably preserving distinct substantive findings.
-- **Circuit Breaker Streak Tracking (`circuit-breaker`):**
-  - Reset failure streaks and exact command counts cleanly across command families whenever successful forward progress occurs (e.g. successful verification tests resetting consecutive test runner failure streaks).
-- **Provenance & Synthetic Message Transparency (`provenance` & `index`):**
-  - Synchronized Guardian message metadata with SDK JsonValue contracts and ensured synthetic remediation messages are consistently recognized across turn extraction without interfering with user turn detection.
-
-## v0.8.0 Visible Color-Coded Toast Interventions, Rule Sanitization, and Multi-Channel Parity
-
-The v0.8.0 release restores immediate user visibility for Guardian runtime interventions:
-
-- **Visible Color-Coded Toast Notifications (`toast`):**
-  - **Red / Error:** Preflight blocks (`preflight-blocked`) and synthetic remediations (`remediation`), providing immediate notification that an unsafe action was prevented or agent corrected.
-  - **Yellow / Warning:** Advisory warnings (`warning`) on non-blocking policy findings.
-  - **Info:** Version announcements and system notices.
-- **Strict Rule Sanitization & Privacy Safety:**
-  - `sanitizeToastRuleId` whitelist-checks rule names, preventing raw terminal commands, code snippets, or secrets from being reflected in UI toasts.
-- **Dual-Host V1 & V2 Parity:**
-  - Dispatches across V1 `client.tui.showToast`, V2 `context.ui.toast.show`, `context.client.tui.showToast`, and active TUI in-memory listeners.
-  - 600ms deduplication window prevents spam during rapid tool calls.
-
-## v0.7.0 Lifecycle Reverse-Splice Disposal, Turn Budget Scope, and Preflight Parity
-
-The v0.7.0 release addresses line-by-line plugin contract findings and hardens runtime safety:
-
-- **Lifecycle Reverse-Splice Idempotent Disposal (`index`):**
-  - Replaced all in-place `registrations.reverse()` calls with `registrations.splice(0).reverse()` across all error and teardown blocks, adhering to the verified OpenCode plugin lifecycle specification.
-- **Accurately Scoped Turn Remediation Budgeting (`engine` & `state`):**
-  - Scoped the `remediationMessagesCount >= budget` check strictly behind `isRemediationResponse`, preventing premature `pass` decisions on new/unexhausted rules occurring later in the turn while preserving loop guard when retrying identical failures.
-  - Removed premature `state.fingerprints.has(fingerprint)` early-return in `canRemediate()`, allowing multi-attempt budgeting (`budget > 1`) to function properly.
-- **V2 Preflight Safety Parity (`index`):**
-  - Integrated `assessCommandPreflight` checks into V2 `execute.before` hook when `!strictPreflight`, ensuring shell safety evaluation parity with V1.
-
-## v0.6.9 Concrete Failure Invariants, Instruction Fidelity, and Fingerprint Remediation Budgeting
-
-The v0.6.9 release resolves softening regressions and restores uncompromising runtime safety:
-
-- **Concrete Failure Invariant (`task-completion`):**
-  - Completely eliminated the `(hasToolFailure && !report.isClosing)` early pass bypass. Write-capable agents with concrete tool errors or failed verification checks (`isFailedCheck`) must block and remediate; admitting failure without claiming completion is no longer a loophole.
-  - Read-only, approval-required, and unknown child subagents continue to fail-safe by reporting unresolved blockers to the parent without un-executable synthetic loops.
-- **Instruction Fidelity Confidence (`instruction-fidelity`):**
-  - Removed automatic downgrading to `advisory` (`pass`) when file mutations were observed. Refusals contradicting explicit user instructions consistently trigger `block` decisions with high confidence.
-- **Fingerprint and Rule Remediation Budgeting (`engine` & `state`):**
-  - Replaced flat global turn cutoffs (`remediationMessagesCount >= budget`) with per-rule fingerprint budget counters (`getRuleRemediationCount`, `hasExhaustedRule`).
-  - Repetition of the same violation continues to be bounded to avoid infinite loops, but new and distinct substantive errors occurring later in the same turn receive remediation up to the turn ceiling.
-
-## v0.6.8 Multi-Layer Secret Protection, Language-Agnostic Policy, and Subagent Topology Hardening
-
-The v0.6.8 release integrates comprehensive secret redaction and runtime safety:
-
-- **Multi-layer secret protection and post-execution redaction:** implements deterministic redaction across all surfaces:
-  - **PRE:** Command preflight flags high-risk environment dump commands (`docker exec ... env`, `printenv`, `docker inspect`).
-  - **POST:** Sanitizes tool results (`output`, `metadata`, `stdout`, `stderr`) and `Tool.Error` shapes (`message`, `stack`, `error`/raw defect, `metadata`) immediately upon execution.
-  - **FINAL:** Context gates intercept outgoing `messages` and `system` transforms before model context.
-  - **Fail-Closed:** Errors during sanitization suppress sensitive content (`[OUTPUT REDACTED: sanitization failure]`); missing V2 security hooks fail closed to ensure raw outputs never leak.
-- **Language-agnostic policy & verification:** policy decisions are made through structured runtime evidence, execution traces, and protocol markers rather than expanding brittle natural-language regexes.
-- **Authoritative subagent topology:** root vs subagent decisions rely exclusively on actual session parent relations (`parentID`), never inferring topology from agent names. Unknown topology fails safe without unauthorized root remediation.
-
-## v0.6.7 Handoff, Quality, and Capability-Aware Hardening
-
-The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 release baseline:
-
-- **Capability-aware subagent remediation policy:** resolves host-evaluated agent mutation profiles (`read_only`, `write_allowed`, `write_requires_approval`, `unknown`). Read-only subagents (reviewers, oracles, explorers) receive zero synthetic remediation prompts (`remediationCount: 0`) and never enter redundant review loops upon completing their analysis; write-allowed subagents (fixers, editors) retain bounded remediation support with controlled retry limits (`maxRounds: 6`).
-- **Foreground subagent finalization barrier:** synchronous V1 `task` and V2 `subagent` calls are tracked from execute-before through execute-after. Parent-facing results are withheld while required Guardian remediation runs on the child, and the latest child report replaces the stale first-pass result.
-- **Smart Questions handoff protocol:** decoupled, versioned `[OPENCODE_HANDOFF:v1]` protocol integration with strict native question tool validation and rule-delegated handoff requirements.
-- **Background behavior preserved:** background subagents remain on the independent idle-remediation path and are not converted into blocking foreground handoffs.
-- **Authoritative child identity:** when supported by the host, child classification uses `session.parentID` instead of relying only on agent-name heuristics.
-- **Redundant-confirmation guard:** an explicit current user action is no longer handed back as an unnecessary "should I proceed?" decision when no concrete blocker exists.
-- **Stricter static gates:** `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and Oxlint warnings-as-errors are part of the repository verification flow.
-- **Dependency audit hardening:** the lockfile resolves patched Seroval `1.6.8`; production and development audits report zero vulnerabilities.
-
 ## Automated Source Verification Results — v0.17.9
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 852 tests across all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), aborted/interrupted tool & `opencode service restart` classification (#4), attachment-only user turn boundary hardening, peer-wake turn scoping & restart-safe persisted remediation budget accounting, crash-free detailed TUI conversation banners (`notifications.transcript: true` via `session.composer.top` RPC, zero `session_inbox` synthetic mutations, trailing-assistant defense-in-depth in `session.context`), multi-location single-owner event arbitration & process-shared `(sessionID, assistantMessageID)` / in-flight deduplication, OpenCode `v2.4.1` execution lifecycle (`session.execution.succeeded` post-turn trigger, chronological background `subagent` start/completion & warm child reuse, TUI `session.execution.*` wakeups, clean sidebar version header & distinct intervention type badges, `manifest/no-ghost-deps` URI scheme filtering, canonical `experimental.job.updated` / `experimental.idle` keys, background Code Mode `execute`, dotted Code Mode calls, `ses_aut_*` automation subagent isolation, TUI `plugin.updated`/`config.updated` recovery), single-pass `sanitizeToolResultWithMeta`, nanosecond `statusFileCache`, adaptive TUI RPC polling, stream stop verification & counters, telemetry level reporting, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), local/global project scope isolation & `XDG_STATE_HOME` compliance, global config merging & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, `session.fork`/subagent isolation, evidence summaries, edit integrity, secret redaction, external per-project low-I/O & in-memory telemetry, and handoff protocol | **852 / 852 PASS** |
-| **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules | **18 / 18 PASS** |
-| **Smoke Test** | V2 `setup(ctx)` plugin initialization, idle inspection, and expected remediation | **PASS** |
-| **Typecheck** | Project TypeScript plus strict hardening (`noUnused`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
-| **Lint** | Oxlint (`src` + `tests`, warnings denied; 121 files) | **PASS** |
-| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator | **PASS** (repository documentation and SVG checks) |
+| **Unit & Regression Suite** | 852 tests across 13 domain suites covering all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), aborted/interrupted tool & `opencode service restart` classification (#4), attachment-only user turn boundary hardening, peer-wake turn scoping & restart-safe persisted remediation budget accounting, crash-free detailed TUI conversation banners (`notifications.transcript: true` via `session.composer.top` RPC, zero `session_inbox` synthetic mutations, trailing-assistant defense-in-depth in `session.context`), multi-location single-owner event arbitration & process-shared `(sessionID, assistantMessageID)` / in-flight deduplication, OpenCode `v2.4.1` execution lifecycle (`session.execution.succeeded`, background subagent & Code Mode tracking, `ses_aut_*` automation isolation, TUI `plugin.updated`/`config.updated` recovery), single-pass `sanitizeToolResultWithMeta`, nanosecond `statusFileCache`, adaptive TUI RPC polling, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), project scope isolation & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, evidence summaries, edit integrity, secret redaction, external low-I/O telemetry, and handoff protocol | **852 / 852 PASS** |
+| **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules (`sandbox/comprehensive-test.mjs`) | **18 / 18 PASS** |
+| **Smoke Test** | V2 `setup(ctx)` plugin initialization, idle inspection, and expected remediation (`sandbox/smoke-test.mjs`) | **PASS** |
+| **Typecheck** | Standard TypeScript + strict hardening (`noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
+| **Lint** | Oxlint (`src` + `tests`, warnings denied; 65 files) | **PASS** |
+| **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator (`scripts/check-docs.mjs`) | **PASS** |
 | **Production Audit** | `npm audit --omit=dev` | **PASS** (0 vulnerabilities) |
-| **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** (0 critical, tracked upstream chains) |
+| **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** |
 | **Packaging Dry Run** | `npm pack --dry-run` (`v0.17.9` metadata) | **PASS** |
 | **Live OpenCode V2 Acceptance** | Packed `.tgz` in Node `26.13.1` + Bun `1.4.4`, V2.4.1 server/RPC/TUI, and real `/usr/bin/opencode` (`v2.4.1`) (`sandbox/v2-live-acceptance.mjs`) | **10 / 10 PASS** |
 
@@ -310,7 +37,7 @@ The v0.6.7 source adds the following verified behaviors on top of the v0.6.0 rel
 
 1. **Opt-In Preflight:** Strict preflight is an opt-in safety net (`preflight.enabled: true`) designed to catch common accidental destructive commands and obvious secrets before execution. It is pattern-based and does not replace operating system user permissions, containers, or sandboxing.
 2. **Post-Turn Scope:** Post-turn rule violations guide agent behavior and trigger automated remediation, but cannot retroactively reverse an operation that already completed.
-3. **Log Rotation & Low-I/O Telemetry:** The per-project event log (`~/.local/state/opencode-guardian/projects/<projectHash>/guardian-events.jsonl`) is bounded by default to 512 KiB (configurable via `telemetry.maxBytes` or `OPENCODE_GUARDIAN_MAX_LOG_BYTES`), with one rotated archive (`guardian-events.jsonl.1`). In default `violations` mode, benign preflight-allowed and clean-turn events bypass disk I/O entirely, eliminating excessive disk churn without creating files inside `<project>/.opencode/`.
+3. **Log Rotation & Low-I/O Telemetry:** The per-project event log (`~/.local/state/opencode-guardian/projects/<projectHash>/guardian-events.jsonl`) is bounded by default to 512 KiB (configurable via `telemetry.maxBytes` or `OPENCODE_GUARDIAN_MAX_LOG_BYTES`), with one rotated archive (`guardian-events.jsonl.1`). In default `violations` mode, benign preflight-allowed and clean-turn events bypass disk I/O entirely without creating files inside `<project>/.opencode/`.
 
 ---
 
@@ -322,22 +49,16 @@ Run all local verification checks from the repository root:
 # Install dependencies
 npm ci
 
-# Typecheck, strict type safety, lint and test suite
-npm run typecheck
-npm run typecheck:strict
-npm run lint
-npm test
+# Combined typecheck, lint, tests, and docs gate
+npm run verify
 
-# Sandbox scenarios and smoke test
+# Sandbox scenarios and live host acceptance
 node sandbox/smoke-test.mjs
 node sandbox/comprehensive-test.mjs
-
-# Documentation link validation
-node scripts/check-docs.mjs
+node sandbox/v2-live-acceptance.mjs
 
 # Security and package integrity audits
 npm audit --omit=dev
-npm audit
 node scripts/check-dev-audit.mjs
 npm pack --dry-run
 ```

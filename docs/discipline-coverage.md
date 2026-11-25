@@ -62,9 +62,9 @@ Default production-dependency findings are advisory, including when the rule sev
 
 ## Evaluation
 
-`tests/discipline-coverage.test.mjs` exercises one violation and one legitimate-negative case for each of the fourteen rules: 28 labeled cases, plus a corpus-completeness check. Focused suites add format, cancellation, symlink, empty-write, authorization and lexical adversarial cases. This small synthetic corpus is a regression baseline, not a real-world accuracy estimate. It does not justify equal precision/recall across disciplines or languages.
+`tests/rules-discipline.test.mjs` includes a balanced baseline exercising one violation and one legitimate-negative case for each of the fourteen rules: 28 labeled cases, plus a corpus-completeness check. Focused suites add format, cancellation, symlink, empty-write, authorization and lexical adversarial cases. This small synthetic corpus is a regression baseline, not a real-world accuracy estimate. It does not justify equal precision/recall across disciplines or languages.
 
-Validation commands: `npm test`, `npm run typecheck`, `npm run typecheck:strict`, `npm run lint`, `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI. Existing published acceptance reports remain historical.
+Validation commands: `npm run verify` (`typecheck:strict`, `lint`, `test`, `check-docs`), `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI.
 
-Observed on 2026-11-25 for **v0.17.9**: **852 / 852 tests passed**, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 123 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
+Observed on 2026-11-25 for **v0.17.9**: **852 / 852 tests passed** across 13 domain suites, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 65 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
 

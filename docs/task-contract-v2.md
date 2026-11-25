@@ -31,7 +31,7 @@ Guardian implements a pure **OpenCode V2** (`@opencode/plugin >=2.3.0`) architec
 
 ## Task Contract Lifecycle
 
-A new human prompt via `ctx.session.hook("prompt", ...)` cancels any in-flight `idleQueue` inspection and clears stale `TaskContract` guidance before extracting the new text contract. Attachment-only or empty prompts also end the prior task. Native `session.deleted` clears cached capabilities, contracts, and pending idle work; cancelled capability queries cannot revive a deleted session's cache. These paths have dedicated [debugging regressions](../tests/debug-regressions.test.mjs) and [V2 Stage 2a regressions](../tests/v2-stage2a-regressions.test.mjs).
+A new human prompt via `ctx.session.hook("prompt", ...)` cancels any in-flight `idleQueue` inspection and clears stale `TaskContract` guidance before extracting the new text contract. Attachment-only or empty prompts also end the prior task. Native `session.deleted` clears cached capabilities, contracts, and pending idle work; cancelled capability queries cannot revive a deleted session's cache. These paths are verified in [`tests/runtime-v2-lifecycle.test.mjs`](../tests/runtime-v2-lifecycle.test.mjs).
 
 1. **Extraction on Human Turn:**
    - Filters out synthetic prompts and previous remediation cycles.

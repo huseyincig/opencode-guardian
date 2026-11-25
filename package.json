@@ -36,7 +36,8 @@
     "test": "npm run build && node --test tests/*.test.mjs",
     "prepack": "npm run build",
     "lint": "oxlint src tests --deny-warnings",
-    "typecheck:strict": "tsc --noEmit --noUnusedLocals --noUnusedParameters --noUncheckedIndexedAccess --exactOptionalPropertyTypes"
+    "typecheck:strict": "tsc --noEmit --noUnusedLocals --noUnusedParameters --noUncheckedIndexedAccess --exactOptionalPropertyTypes",
+    "verify": "npm run typecheck:strict && npm run lint && npm test && node scripts/check-docs.mjs"
   },
   "keywords": [
     "opencode",

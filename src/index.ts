@@ -2077,9 +2077,208 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const idleQueue = createIdleQueue(controller.signal, () => {
     recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
   });
+  const preIdleControllers = new Map<string, AbortController>();
   const forgetQueuedIdle = (sid: string): void => {
     idleQueue.forget(sid);
+    const activePreIdle = preIdleControllers.get(sid);
+    if (activePreIdle) {
+      preIdleControllers.delete(sid);
+      activePreIdle.abort();
+    }
     releasePreInspectionLease(sid);
+  };
+  const tryAcquirePreInspectionLease = (sid: string, eventLocationDir?: string): void => {
+    const candidateDir = eventLocationDir ?? sessionDirectories.get(sid);
+    const canPreLease =
+      candidateDir !== undefined
+        ? isDirectoryInGuardianScope(directory, candidateDir) &&
+          runtimeForDirectory(candidateDir).config.enabled !== false
+        : !projectLocalInstall && runtimeForDirectory(directory).config.enabled !== false;
+    if (canPreLease) {
+      acquirePreInspectionLease(sid);
+    }
+  };
+  const runV2SessionIdleInspection = async (
+    sessionID: string,
+    eventLocationDir: string | undefined,
+    idleSignal: AbortSignal
+  ): Promise<void> => {
+    try {
+      if (
+        idleSignal.aborted ||
+        typeof context.session.context !== "function" ||
+        typeof context.session.synthetic !== "function"
+      ) {
+        return;
+      }
+      let activeDirectory: string;
+      let directoryVerified = true;
+      if (eventLocationDir) {
+        activeDirectory = rememberSessionDirectory(sessionID, eventLocationDir);
+      } else {
+        const resolvedDir = await resolveSessionDirectoryDetailed(sessionID);
+        activeDirectory = resolvedDir.directory;
+        directoryVerified = resolvedDir.verified;
+      }
+      if (!directoryVerified || idleSignal.aborted) {
+        return;
+      }
+      let sessionIsSubagent: boolean | undefined;
+      let sessionParentID: string | undefined;
+      let sessionAgentName: string | undefined;
+      try {
+        if (typeof context.session.get === "function") {
+          const session = await context.session.get({ sessionID });
+          activeDirectory = rememberSessionDirectory(
+            sessionID,
+            session.location?.directory
+          );
+          sessionParentID =
+            typeof session.parentID === "string" && session.parentID.length > 0
+              ? session.parentID
+              : undefined;
+          const isForkedSession = Boolean(
+            (session as { fork?: unknown }).fork && typeof (session as { fork?: unknown }).fork === "object"
+          );
+          const isAutomationRunSession = sessionID.startsWith("ses_aut_");
+          sessionIsSubagent = (Boolean(sessionParentID) || isAutomationRunSession) && !isForkedSession;
+          const rawAgent = (session as { agent?: unknown }).agent;
+          if (typeof rawAgent === "string" && rawAgent.trim().length > 0) {
+            sessionAgentName = rawAgent.trim();
+          }
+        }
+      } catch {
+        // A transient/partial host must not disable the existing idle path.
+      }
+
+      if (!isGuardianOwnerForDirectory(instanceId, directory, activeDirectory)) {
+        return;
+      }
+
+      if (sessionParentID && sessionIsSubagent !== false && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
+        return;
+      }
+
+      const runtime = runtimeForDirectory(activeDirectory);
+      if (runtime.config.enabled === false || idleSignal.aborted) return;
+
+      pruneStaleBackgroundJobs(sessionID);
+      if (backgroundSessions.has(sessionID)) {
+        return;
+      }
+
+      const releaseProcessIdleSlot = acquireProcessIdleSlot(sessionID, instanceId);
+      if (!releaseProcessIdleSlot) {
+        return;
+      }
+
+      let fetchedNormalizedMessages: SessionMessage[] | undefined;
+      try {
+        await handleSessionIdle(
+          sessionID,
+          activeDirectory,
+          async () => {
+            const messages = await context.session.context({ sessionID });
+            const normalized = normalizeV2Messages(messages, sessionID);
+            fetchedNormalizedMessages = normalized;
+            const contract = extractTaskContract(normalized, sessionID);
+            if (contract) setSessionContract(sessionID, contract);
+            return normalized;
+          },
+          async (text) => {
+            if (idleSignal.aborted) return;
+            const remediationText = runtime.sanitizer
+              ? sanitizeString(text, runtime.sanitizer).sanitized
+              : text;
+            await context.session.synthetic({
+              sessionID,
+              text: remediationText,
+              description: "OpenCode Guardian remediation",
+              metadata: v2GuardianMetadata(sessionID, "remediation"),
+              delivery: "queue",
+              resume: true,
+            });
+          },
+          runtime.engine,
+          verificationStore.snapshots(sessionID),
+          idleSignal,
+          sessionIsSubagent,
+          (sessionIsSubagent ?? true)
+            ? async () => {
+                const cached = getCachedAgentCapability(sessionID);
+                if (cached) return cached;
+                const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
+                if (meshProfile && meshProfile.capability === "read-only") {
+                  const resolved: AgentMutationProfile = {
+                    capability: "read-only",
+                    evidence: {
+                      agentName: meshProfile.agentName ?? sessionAgentName,
+                      reasons: [`mesh:${meshProfile.managedBy}`],
+                    },
+                  };
+                  if (!idleSignal.aborted) cacheAgentCapability(sessionID, resolved);
+                  return resolved;
+                }
+                let agentName = sessionAgentName ?? meshProfile?.agentName;
+                if (!agentName) {
+                  try {
+                    const normalized =
+                      fetchedNormalizedMessages ??
+                      normalizeV2Messages(
+                        await context.session.context({ sessionID }),
+                        sessionID
+                      );
+                    agentName = extractAgentNameFromMessages(normalized);
+                  } catch {}
+                }
+                const hostProfile = await resolveV2AgentCapability(
+                  context,
+                  sessionID,
+                  agentName,
+                  undefined,
+                  activeDirectory
+                );
+                if (
+                  hostProfile.capability === "read-only" ||
+                  hostProfile.capability === "write-requires-approval"
+                ) {
+                  if (!idleSignal.aborted) cacheAgentCapability(sessionID, hostProfile);
+                  return hostProfile;
+                }
+                if (
+                  meshProfile &&
+                  meshProfile.capability === "write-allowed" &&
+                  !hasConcreteHostRestriction(hostProfile)
+                ) {
+                  const resolved: AgentMutationProfile = {
+                    capability: "write-allowed",
+                    evidence: {
+                      agentName,
+                      reasons: [`mesh:${meshProfile.managedBy}`, ...hostProfile.evidence.reasons],
+                    },
+                  };
+                  if (!idleSignal.aborted) cacheAgentCapability(sessionID, resolved);
+                  return resolved;
+                }
+                if (!idleSignal.aborted && hostProfile.capability !== "unknown") {
+                  cacheAgentCapability(sessionID, hostProfile);
+                }
+                return hostProfile;
+              }
+            : undefined,
+          toastNotifier,
+          instanceId
+        );
+      } finally {
+        releaseProcessIdleSlot();
+      }
+    } finally {
+      // Releases the short-TTL pre-inspection lease if inspection finished
+      // clean/skipped/aborted/read-only. If handleSessionIdle upgraded to a
+      // real remediation lease, the token no longer matches and the active
+      // remediation lease remains intact.
+      releasePreInspectionLease(sessionID);
+    }
   };
 
   if (typeof context.rpc?.register === "function") {
@@ -2931,7 +3130,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       modelRequestProtectionReady = true;
 
       try {
-        const expIdleReg = await context.session.hook("experimental.idle", (event) => {
+        const expIdleReg = await context.session.hook("experimental.idle", async (event) => {
           const bg = (event as { background?: unknown }).background;
           const ownBg = Array.isArray(bg)
             ? bg.filter((job) => {
@@ -2960,9 +3159,54 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               const oldest = backgroundSessions.values().next().value;
               if (oldest !== undefined) backgroundSessions.delete(oldest);
             }
-          } else {
-            sessionBackgroundJobs.delete(event.sessionID);
-            backgroundSessions.delete(event.sessionID);
+            return;
+          }
+          sessionBackgroundJobs.delete(event.sessionID);
+          backgroundSessions.delete(event.sessionID);
+          // OpenCode v2.3.0+ awaits `experimental.idle` JUST BEFORE transitioning
+          // a session to idle (and before delivering `<background-result>` to a parent).
+          // Inspecting and admitting remediation synthetics here keeps the child in
+          // the same execution so managers never receive premature un-remediated results.
+          if (
+            controller.signal.aborted ||
+            typeof event.sessionID !== "string" ||
+            event.sessionID.length === 0 ||
+            typeof context.session.context !== "function" ||
+            typeof context.session.synthetic !== "function"
+          ) {
+            return;
+          }
+          const sid = event.sessionID;
+          const prevPreIdle = preIdleControllers.get(sid);
+          if (prevPreIdle) {
+            preIdleControllers.delete(sid);
+            prevPreIdle.abort();
+          }
+          const preIdleAbort = new AbortController();
+          const onPluginAbort = () => preIdleAbort.abort();
+          if (controller.signal.aborted) {
+            preIdleAbort.abort();
+            return;
+          }
+          controller.signal.addEventListener("abort", onPluginAbort, { once: true });
+          preIdleControllers.set(sid, preIdleAbort);
+          while (preIdleControllers.size > 512) {
+            const oldestKey = preIdleControllers.keys().next().value;
+            if (oldestKey === undefined || oldestKey === sid) break;
+            const oldestCtrl = preIdleControllers.get(oldestKey);
+            preIdleControllers.delete(oldestKey);
+            oldestCtrl?.abort();
+          }
+          try {
+            tryAcquirePreInspectionLease(sid);
+            await runV2SessionIdleInspection(sid, undefined, preIdleAbort.signal);
+          } catch {
+            // Never propagate an unhandled error from experimental.idle into the host loop.
+          } finally {
+            controller.signal.removeEventListener("abort", onPluginAbort);
+            if (preIdleControllers.get(sid) === preIdleAbort) {
+              preIdleControllers.delete(sid);
+            }
           }
         });
         if (expIdleReg && typeof expIdleReg.dispose === "function") {
@@ -3292,186 +3536,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         // Acquire a short-TTL pre-inspection lease synchronously on turn completion so
         // sibling orchestrators cannot race ahead and close a child task during the
         // idleQueue coalescing / async context-fetch window.
-        const candidateDir = eventLocationDir ?? sessionDirectories.get(sessionID);
-        const canPreLease =
-          candidateDir !== undefined
-            ? isDirectoryInGuardianScope(directory, candidateDir) &&
-              runtimeForDirectory(candidateDir).config.enabled !== false
-            : !projectLocalInstall && runtimeForDirectory(directory).config.enabled !== false;
-        if (canPreLease) {
-          acquirePreInspectionLease(sessionID);
-        }
+        tryAcquirePreInspectionLease(sessionID, eventLocationDir);
 
         idleQueue.enqueue(sessionID, async (idleSignal) => {
-          try {
-          let activeDirectory: string;
-          let directoryVerified = true;
-          if (eventLocationDir) {
-            activeDirectory = rememberSessionDirectory(sessionID, eventLocationDir);
-          } else {
-            const resolvedDir = await resolveSessionDirectoryDetailed(sessionID);
-            activeDirectory = resolvedDir.directory;
-            directoryVerified = resolvedDir.verified;
-          }
-          if (!directoryVerified) {
-            return;
-          }
-          let sessionIsSubagent: boolean | undefined;
-          let sessionParentID: string | undefined;
-          let sessionAgentName: string | undefined;
-          try {
-            if (typeof context.session.get === "function") {
-              const session = await context.session.get({ sessionID });
-              activeDirectory = rememberSessionDirectory(
-                sessionID,
-                session.location?.directory
-              );
-              sessionParentID =
-                typeof session.parentID === "string" && session.parentID.length > 0
-                  ? session.parentID
-                  : undefined;
-              const isForkedSession = Boolean(
-                (session as { fork?: unknown }).fork && typeof (session as { fork?: unknown }).fork === "object"
-              );
-              const isAutomationRunSession = sessionID.startsWith("ses_aut_");
-              sessionIsSubagent = (Boolean(sessionParentID) || isAutomationRunSession) && !isForkedSession;
-              const rawAgent = (session as { agent?: unknown }).agent;
-              if (typeof rawAgent === "string" && rawAgent.trim().length > 0) {
-                sessionAgentName = rawAgent.trim();
-              }
-            }
-          } catch {
-            // A transient/partial host must not disable the existing idle path.
-          }
-
-          if (!isGuardianOwnerForDirectory(instanceId, directory, activeDirectory)) {
-            return;
-          }
-
-          if (sessionParentID && sessionIsSubagent !== false && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
-            return;
-          }
-
-          const runtime = runtimeForDirectory(activeDirectory);
-          if (runtime.config.enabled === false || idleSignal.aborted) return;
-
-          pruneStaleBackgroundJobs(sessionID);
-          if (backgroundSessions.has(sessionID)) {
-            return;
-          }
-
-          const releaseProcessIdleSlot = acquireProcessIdleSlot(sessionID, instanceId);
-          if (!releaseProcessIdleSlot) {
-            return;
-          }
-
-          let fetchedNormalizedMessages: SessionMessage[] | undefined;
-          try {
-            await handleSessionIdle(
-              sessionID,
-              activeDirectory,
-              async () => {
-                const messages = await context.session.context({ sessionID });
-                const normalized = normalizeV2Messages(messages, sessionID);
-                fetchedNormalizedMessages = normalized;
-                const contract = extractTaskContract(normalized, sessionID);
-                if (contract) setSessionContract(sessionID, contract);
-                return normalized;
-              },
-              async (text) => {
-                if (idleSignal.aborted) return;
-                const remediationText = runtime.sanitizer
-                  ? sanitizeString(text, runtime.sanitizer).sanitized
-                  : text;
-                await context.session.synthetic({
-                  sessionID,
-                  text: remediationText,
-                  description: "OpenCode Guardian remediation",
-                  metadata: v2GuardianMetadata(sessionID, "remediation"),
-                  delivery: "queue",
-                  resume: true,
-                });
-              },
-              runtime.engine,
-              verificationStore.snapshots(sessionID),
-              idleSignal,
-              sessionIsSubagent,
-              (sessionIsSubagent ?? true)
-                ? async () => {
-                    const cached = getCachedAgentCapability(sessionID);
-                    if (cached) return cached;
-                    const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
-                    if (meshProfile && meshProfile.capability === "read-only") {
-                      const resolved: AgentMutationProfile = {
-                        capability: "read-only",
-                        evidence: {
-                          agentName: meshProfile.agentName ?? sessionAgentName,
-                          reasons: [`mesh:${meshProfile.managedBy}`],
-                        },
-                      };
-                      if (!idleSignal.aborted) cacheAgentCapability(sessionID, resolved);
-                      return resolved;
-                    }
-                    let agentName = sessionAgentName ?? meshProfile?.agentName;
-                    if (!agentName) {
-                      try {
-                        const normalized =
-                          fetchedNormalizedMessages ??
-                          normalizeV2Messages(
-                            await context.session.context({ sessionID }),
-                            sessionID
-                          );
-                        agentName = extractAgentNameFromMessages(normalized);
-                      } catch {}
-                    }
-                    const hostProfile = await resolveV2AgentCapability(
-                      context,
-                      sessionID,
-                      agentName,
-                      undefined,
-                      activeDirectory
-                    );
-                    if (
-                      hostProfile.capability === "read-only" ||
-                      hostProfile.capability === "write-requires-approval"
-                    ) {
-                      if (!idleSignal.aborted) cacheAgentCapability(sessionID, hostProfile);
-                      return hostProfile;
-                    }
-                    if (
-                    meshProfile &&
-                    meshProfile.capability === "write-allowed" &&
-                    !hasConcreteHostRestriction(hostProfile)
-                  ) {
-                      const resolved: AgentMutationProfile = {
-                        capability: "write-allowed",
-                        evidence: {
-                          agentName,
-                          reasons: [`mesh:${meshProfile.managedBy}`, ...hostProfile.evidence.reasons],
-                        },
-                      };
-                      if (!idleSignal.aborted) cacheAgentCapability(sessionID, resolved);
-                      return resolved;
-                    }
-                    if (!idleSignal.aborted && hostProfile.capability !== "unknown") {
-                      cacheAgentCapability(sessionID, hostProfile);
-                    }
-                    return hostProfile;
-                  }
-                : undefined,
-              toastNotifier,
-              instanceId
-            );
-          } finally {
-            releaseProcessIdleSlot();
-          }
-          } finally {
-            // Releases the short-TTL pre-inspection lease if inspection finished
-            // clean/skipped/aborted/read-only. If handleSessionIdle upgraded to a
-            // real remediation lease, the token no longer matches and the active
-            // remediation lease remains intact.
-            releasePreInspectionLease(sessionID);
-          }
+          await runV2SessionIdleInspection(sessionID, eventLocationDir, idleSignal);
         });
         }
         if (controller.signal.aborted) return;
@@ -3529,6 +3597,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
   return async () => {
     controller.abort();
+    for (const preIdleCtrl of preIdleControllers.values()) {
+      preIdleCtrl.abort();
+    }
+    preIdleControllers.clear();
     streamWatcher.clear();
     await streamWatcher.drain();
     for (const sessionID of Array.from(activeRemediationLeases.keys())) {

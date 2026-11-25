@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.3 — 2026-11-25
+
+### Fixed
+- **Zero-race pre-idle inspection via OpenCode V2 `session.hook("experimental.idle")` (`src/index.ts`):**
+  - Refactored V2 session idle inspection into a shared `runV2SessionIdleInspection` pipeline and invoked it directly inside `session.hook("experimental.idle")` whenever the session has no own running background jobs (`ownBg.length === 0`).
+  - Because OpenCode V2 (`>=2.3.0`, verified live on `v2.4.1`) awaits `experimental.idle` *before* transitioning a session to idle and *before* delivering `<background-result kind="subagent">` to a parent session, Guardian now inspects all 14 rules and admits remediation synthetics (`delivery: "queue", resume: true`) synchronously before idle transition.
+  - Violating subagents now stay inside the same execution, remediate immediately, and deliver a **single, clean, remediated `<background-result>`** to their parent/manager—eliminating the post-idle 60–125ms async event race across every discipline rule, orchestrator, and standalone session.
+  - Preserved `session.execution.succeeded` / `session.idle` on `event.subscribe` as an idempotent fallback for older hosts without `experimental.idle` (deduplicated via `wasMessageInspectedInProcess`), kept active background-job deferral and foreground-handoff guards intact, and linked per-session pre-idle `AbortController`s cleanly to `forgetQueuedIdle` and plugin disposal.
+- **Verification:**
+  - Added TDD regression suite `tests/pre-idle-interception.test.mjs` (**926 / 926** tests passing across 16 suites, **21 / 21** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks).
+  - Verified live on real OpenCode `v2.4.1` (`opencode run --standalone` with `general` subagent): violating child reply intercepted inside `experimental.idle` in 10ms, remediated in-execution while parent continued waiting on the background job, and delivered only the single clean remediated result to parent.
+
 ## 0.18.2 — 2026-11-25
 
 ### Fixed

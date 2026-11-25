@@ -1,6 +1,6 @@
 # Engine discipline coverage and evidence boundaries
 
-Guardian v0.18.2 targets pure OpenCode V2 (`>=2.3.0`, verified through `v2.4.1`). It keeps the existing fourteen rule IDs and remediation budgets, adds the typed `./rpc` export, `shell.hook("create.before")` preflight (`"critical"` and `"strict"` modes), provider-agnostic dynamic MCP inspection, global config security floor protection (`allowProjectOverrides: false`), Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), and external per-project state isolation, and adds no runtime dependencies or installed skills. (OpenCode V1 support ended in `v0.14.0`.)
+Guardian v0.18.3 targets pure OpenCode V2 (`>=2.3.0`, verified through `v2.4.1`). It keeps the existing fourteen rule IDs and remediation budgets, runs pre-idle inspection directly inside `session.hook("experimental.idle")` so subagents remediate before emitting `<background-result>`, adds the typed `./rpc` export, `shell.hook("create.before")` preflight (`"critical"` and `"strict"` modes), provider-agnostic dynamic MCP inspection, global config security floor protection (`allowProjectOverrides: false`), Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), and external per-project state isolation, and adds no runtime dependencies or installed skills. (OpenCode V1 support ended in `v0.14.0`.)
 
 ## Evidence
 
@@ -66,5 +66,5 @@ Default production-dependency findings are advisory, including when the rule sev
 
 Validation commands: `npm run verify` (`typecheck:strict`, `lint`, `test`, `check-docs`), `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI.
 
-Observed on 2026-11-25 for **v0.18.2**: **922 / 922 tests passed** across 15 domain suites, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 66 files) passed. The isolated smoke scenario, all **21 / 21** comprehensive sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, and **21 / 21** live real-LLM scenarios (all 14 rules + preflight + secret redaction + combined batching) passed.
+Observed on 2026-11-25 for **v0.18.3**: **926 / 926 tests passed** across 16 domain suites, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 67 files) passed. The isolated smoke scenario, all **21 / 21** comprehensive sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, live OpenCode `v2.4.1` pre-idle subagent interception proof, and **21 / 21** live real-LLM scenarios (all 14 rules + preflight + secret redaction + combined batching) passed.
 

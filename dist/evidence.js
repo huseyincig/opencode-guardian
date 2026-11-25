@@ -241,8 +241,23 @@ function stripBenignCommandWrappers(stage) {
     }
     return current;
 }
+function stripHeredocBodiesForStageParsing(command) {
+    if (!command.includes("<<"))
+        return command;
+    const segments = splitTopLevelShellSegments(command);
+    return segments
+        .map((seg) => {
+        const nl = seg.text.indexOf("\n");
+        const text = nl >= 0 && /<<-?\s*(?:'[^'\r\n]+'|"[^"\r\n]+"|\\[^\s;&|\r\n]+|[A-Za-z0-9_.-]+)/.test(seg.text.slice(0, nl))
+            ? seg.text.slice(0, nl)
+            : seg.text;
+        return seg.followedBy ? `${text} ${seg.followedBy}` : text;
+    })
+        .join(" ");
+}
 function executableShellStages(command, depth = 0, preserveCase = false) {
-    const rawStages = splitShellStages(command).flat();
+    const sanitized = stripHeredocBodiesForStageParsing(command);
+    const rawStages = splitShellStages(sanitized).flat();
     const out = [];
     for (const raw of rawStages) {
         const normalized = normalizeCommand(raw);
@@ -274,12 +289,54 @@ const VERIFICATION_STAGE_PATTERNS = [
     /^(?:\.\/)?(?:gradle|gradlew)\b[^\n;&|]*(?:\btest\b|\bbuild\b)/,
     /^(?:tsc|mypy|pyright|eslint|oxlint|biome\s+(?:lint|check)|prettier\s+--check|stylelint|shellcheck|ruff|flake8|golangci-lint|pip-audit|govulncheck|bundle\s+audit)\b/,
 ];
+/**
+ * Recognize shell exit-code reporting echoes (`echo TC=$?`, `echo EXIT $?`, `echo EXIT ${PIPESTATUS[0]}`).
+ * NEVER matches hardcoded literals like `echo TC=0` or fake test summaries.
+ */
+function parseExitStatusEchoStage(stage) {
+    const trimmed = stage.trim();
+    const m = /^echo\s+(?:(?:"([A-Za-z_][A-Za-z0-9_-]{0,24})(?:[=:\s]+)(\$\?|\$\{PIPESTATUS\[0\]\})")|([A-Za-z_][A-Za-z0-9_-]{0,24})=(\$\?|\$\{PIPESTATUS\[0\]\})|([A-Za-z_][A-Za-z0-9_-]{0,24})\s+(\$\?|\$\{PIPESTATUS\[0\]\}))$/.exec(trimmed);
+    if (!m)
+        return undefined;
+    const label = m[1] ?? m[3] ?? m[5] ?? "";
+    const varExpr = m[2] ?? m[4] ?? m[6] ?? "";
+    if (!label || !varExpr)
+        return undefined;
+    return { label, usesPipestatus: varExpr.includes("PIPESTATUS") };
+}
+/**
+ * Recognize harmless static section dividers like `echo TEST_DONE`, `echo done`, `echo "---"`.
+ * Strictly forbids digits and pass/fail/warn/error/summary tokens so it can never spoof counts or summaries.
+ */
+function isBenignMarkerEchoStage(stage) {
+    const trimmed = stage.trim();
+    const m = /^echo\s+(?:"([A-Za-z_=:-]{1,32})"|'([A-Za-z_=:-]{1,32})'|([A-Za-z_=:-]{1,32}))$/.exec(trimmed);
+    if (!m)
+        return false;
+    const token = (m[1] ?? m[2] ?? m[3] ?? "").toLowerCase();
+    if (!token)
+        return false;
+    if (/\d/.test(token))
+        return false;
+    if (/(?:pass|fail|warn|error|ok|clean|suite|skip|todo|cancel|total|found)/i.test(token))
+        return false;
+    return true;
+}
 function isBenignSummaryPassthroughStage(stage) {
     const lowerStage = stage.toLowerCase();
     if (VERIFICATION_STAGE_PATTERNS.some((pattern) => pattern.test(lowerStage))) {
         return true;
     }
     if (/^(?:set|cd|export|unset)(?:\s|$)/i.test(lowerStage)) {
+        return true;
+    }
+    if (parseExitStatusEchoStage(stage) || isBenignMarkerEchoStage(stage)) {
+        return true;
+    }
+    // Silent heredoc/stdin file writes (`cat > file <<'EOF' ... EOF` / `cat >> file <<'EOF' ... EOF`)
+    // redirect stdout to a file and emit 0 bytes to stdout, so they cannot spoof verification summaries.
+    if (/^cat\s+(?:>>?|1>>?)\s*(?:"[^"]+"|'[^']+'|\S+)\s+<<-?\s*['"\\]?[A-Za-z0-9_.-]+['"]?(?:\s|\n|$)/i.test(stage) ||
+        /^cat\s+<<-?\s*['"\\]?[A-Za-z0-9_.-]+['"]?\s+(?:>>?|1>>?)\s*(?:"[^"]+"|'[^']+'|\S+)(?:\s|\n|$)/i.test(stage)) {
         return true;
     }
     // Allow stdin-only tail/head with non-zero counts (never `-n 0` / `-0` which discards all output).
@@ -368,13 +425,37 @@ function isBenignSummaryPassthroughStage(stage) {
     }
     return false;
 }
-function hasOutputSpoofingStage(command) {
+function hasOutputSpoofingStage(command, outputText = "") {
     if (!command)
         return false;
+    // Identify top-level `;`-separated `grep ...; echo <LABEL>=$?` pairs where output proves `<LABEL>=1`
+    // (grep matched 0 lines -> 0 bytes of stdout -> cannot spoof any summary).
+    const zeroOutputGrepStages = new Set();
+    if (outputText) {
+        const segs = splitTopLevelShellSegments(command);
+        for (let i = 0; i + 1 < segs.length; i++) {
+            const seg = segs[i];
+            const next = segs[i + 1];
+            if (seg.followedBy !== ";" && seg.followedBy !== "\n")
+                continue;
+            if (hasUnquotedSinglePipe(seg.text))
+                continue;
+            const stripped = stripBenignCommandWrappers(normalizeCommand(seg.text));
+            if (!/^(?:grep|egrep|fgrep|rg)\b/i.test(stripped))
+                continue;
+            const exitEcho = parseExitStatusEchoStage(next.text.trim());
+            if (!exitEcho)
+                continue;
+            const lbl = escapeEvidenceRegExp(exitEcho.label);
+            if (new RegExp(`^${lbl}[=:\\s]+1$`, "m").test(outputText) && !new RegExp(`^${lbl}[=:\\s]+0$`, "m").test(outputText)) {
+                zeroOutputGrepStages.add(stripped);
+            }
+        }
+    }
     const stages = executableShellStages(command, 0, true);
     if (stages.length === 0)
         return true;
-    return stages.some((stage) => !isBenignSummaryPassthroughStage(stage));
+    return stages.some((stage) => !zeroOutputGrepStages.has(stage) && !isBenignSummaryPassthroughStage(stage));
 }
 function classifyCommand(command, toolName) {
     const stages = executableShellStages(command);
@@ -629,6 +710,7 @@ function splitTopLevelShellSegments(command) {
     let current = "";
     let quote = null;
     let escaped = false;
+    const pendingHeredocs = [];
     for (let i = 0; i < command.length; i++) {
         const ch = command[i];
         if (escaped) {
@@ -656,6 +738,41 @@ function splitTopLevelShellSegments(command) {
         if (ch === "'" || ch === '"') {
             current += ch;
             quote = ch;
+            continue;
+        }
+        // Track unquoted heredocs (`<<EOF`, `<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<-EOF`; never `<<<` here-string)
+        // so newline/semicolon content inside the heredoc body is never split as top-level shell commands.
+        if (ch === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+            const rest = command.slice(i + 2);
+            const hd = /^(-?)\s*(?:'([^'\r\n]+)'|"([^"\r\n]+)"|\\([^\s;&|\r\n]+)|([A-Za-z0-9_.-]+))/.exec(rest);
+            if (hd) {
+                const delim = hd[2] ?? hd[3] ?? hd[4] ?? hd[5] ?? "";
+                if (delim) {
+                    pendingHeredocs.push({ delimiter: delim, stripTabs: hd[1] === "-" });
+                    current += "<<" + hd[0];
+                    i += 1 + hd[0].length;
+                    continue;
+                }
+            }
+        }
+        if (ch === "\n" && pendingHeredocs.length > 0) {
+            current += "\n";
+            let cursor = i + 1;
+            while (pendingHeredocs.length > 0 && cursor < command.length) {
+                const active = pendingHeredocs[0];
+                const nextNl = command.indexOf("\n", cursor);
+                const lineEnd = nextNl === -1 ? command.length : nextNl;
+                const line = command.slice(cursor, lineEnd).replace(/\r$/, "");
+                current += command.slice(cursor, nextNl === -1 ? command.length : nextNl + 1);
+                cursor = nextNl === -1 ? command.length : nextNl + 1;
+                const candidate = active.stripTabs ? line.replace(/^\t+/, "") : line;
+                if (candidate === active.delimiter) {
+                    pendingHeredocs.shift();
+                }
+            }
+            segments.push({ text: current.trim(), followedBy: "\n" });
+            current = "";
+            i = cursor - 1;
             continue;
         }
         if (ch === ";" || ch === "\n") {
@@ -1236,6 +1353,85 @@ function hasMultipleNonAndSegmentsOfKind(command, toolName, kind, depth = 0) {
     }
     return false;
 }
+function escapeEvidenceRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function hasUpstreamPipelineFailureNote(outputText) {
+    return /^note:\s+`[^`]+`\s+\(segment\s+\d+\s+of\s+\d+\)\s+exited\s+[1-9]\d*;/m.test(outputText);
+}
+/**
+ * Evaluate per-segment confirmation for a verification kind inside a compound/piped command:
+ * 1. Explicit live shell exit-code echo (`echo TC=$?`, `echo BUILD $?`, `echo EXIT ${PIPESTATUS[0]}`):
+ *    confirms `"success"` on `<LABEL>=0` (or `"failure"` on `<LABEL>=<nonzero>`).
+ * 2. Clean `tail -N` (N >= 5, or default 10) / `tee` pipe for `typecheck` or `build` with zero compiler/build error lines
+ *    and no upstream pipeline failure note.
+ */
+function inspectCompoundSegmentVerification(command, toolName, kind, outputText, exitCode, testReason) {
+    if (!command || exitCode !== 0)
+        return undefined;
+    if (hasMultipleNonAndSegmentsOfKind(command, toolName, kind))
+        return undefined;
+    const segments = splitTopLevelShellSegments(command);
+    const matchingIdx = [];
+    for (let i = 0; i < segments.length; i++) {
+        if (classifyCommand(segments[i].text, toolName).includes(kind)) {
+            matchingIdx.push(i);
+        }
+    }
+    if (matchingIdx.length !== 1)
+        return undefined;
+    const segIdx = matchingIdx[0];
+    const seg = segments[segIdx];
+    const nextSeg = segments[segIdx + 1];
+    const segPiped = hasUnquotedSinglePipe(seg.text);
+    // 1. Live shell exit-code capture immediately following the verification segment (`; echo TAG=$?`).
+    if (nextSeg && (seg.followedBy === ";" || seg.followedBy === "\n")) {
+        const exitEcho = parseExitStatusEchoStage(nextSeg.text.trim());
+        if (exitEcho && (!segPiped || exitEcho.usesPipestatus)) {
+            const escapedLabel = escapeEvidenceRegExp(exitEcho.label);
+            // Reject if any other echo/printf segment in the command mentions the same label (prevents `echo TC=0` spoofing).
+            const otherMentionsLabel = segments.some((s, idx) => idx !== segIdx + 1 &&
+                /^(?:echo|printf)\b/i.test(stripBenignCommandWrappers(normalizeCommand(s.text))) &&
+                new RegExp(`\\b${escapedLabel}\\b`).test(s.text));
+            if (!otherMentionsLabel) {
+                const nonZeroRe = new RegExp(`^${escapedLabel}[=:\\s]+[1-9]\\d*$`, "m");
+                if (nonZeroRe.test(outputText)) {
+                    return "failure";
+                }
+                const zeroRe = new RegExp(`^${escapedLabel}[=:\\s]+0$`, "m");
+                if (zeroRe.test(outputText) && (kind !== "test" || !testReason)) {
+                    return "success";
+                }
+            }
+        }
+    }
+    // 2. Clean tail (>= 5 lines) or tee passthrough for typecheck/build (which print errors at the tail on failure).
+    if ((kind === "typecheck" || kind === "build") && segPiped && !hasUpstreamPipelineFailureNote(outputText)) {
+        const pipeline = splitShellStages(seg.text)[0] ?? [];
+        if (pipeline.length >= 2) {
+            const filters = pipeline.slice(1).map((s) => stripBenignCommandWrappers(normalizeCommand(s)).toLowerCase());
+            const safeTailOrTee = filters.every((f) => {
+                if (/</.test(f))
+                    return false;
+                if (/^tee(?:\s+-[ai]+)*\s+[^<>\s]+(?:\s+[^<>\s]+)*$/i.test(f))
+                    return true;
+                if (!/^tail(?:\s|$)/i.test(f))
+                    return false;
+                if (!/^tail(?:\s+(?:-n\s+[+-]?\d+|-[a-z]*\d+|-[a-z]+|--(?:lines|quiet|silent|verbose)(?:=[+-]?\d+)?))*\s*$/i.test(f)) {
+                    return false;
+                }
+                const numMatch = /(?:-n\s*|--lines=|-)(\d+)\b/.exec(f);
+                const count = numMatch?.[1] ? Number(numMatch[1]) : 10;
+                return Number.isFinite(count) && count >= 2;
+            });
+            const hasBuildOrTsError = /(?:^|\n)\s*(?:.*error TS\d+:|Found [1-9]\d* errors?\.|npm (?:ERR!|error)\b|Build failed|Compilation failed|Command failed|SyntaxError:|TypeError:|ReferenceError:|ERR_MODULE_NOT_FOUND|✖\s+failing tests)/i.test(outputText);
+            if (safeTailOrTee && !hasBuildOrTsError && !hasOutputSpoofingStage(command, outputText)) {
+                return "success";
+            }
+        }
+    }
+    return undefined;
+}
 function recordFromPart(part, sequence, directory) {
     if (part.type !== "tool" || !part.state)
         return [];
@@ -1261,7 +1457,25 @@ function recordFromPart(part, sequence, directory) {
     const nonSequentialCompound = (verificationKindCount > 1 && hasNonAndSeparator) ||
         hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds);
     const pipedWithoutPipefail = hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds);
+    const topSegments = command ? splitTopLevelShellSegments(command) : [];
+    const lastShellMutationSegIdx = (() => {
+        let idx = -1;
+        for (let i = 0; i < topSegments.length; i++) {
+            const segText = topSegments[i].text;
+            if (!segText)
+                continue;
+            if (isLikelyShellFileDeletion(segText) || Boolean(extractLikelyShellMutation({ command: segText }))) {
+                idx = i;
+            }
+        }
+        return idx;
+    })();
     for (const kind of kinds) {
+        const firstVerificationSegIdx = lastShellMutationSegIdx >= 0 && verificationKinds.has(kind)
+            ? topSegments.findIndex((seg) => classifyCommand(seg.text, toolName).includes(kind))
+            : -1;
+        const runsAfterIntraCommandMutation = lastShellMutationSegIdx >= 0 && firstVerificationSegIdx > lastShellMutationSegIdx;
+        const recordSequence = runsAfterIntraCommandMutation ? sequence + 0.5 : sequence;
         const commandStatus = command &&
             outcome.status === "success" &&
             outcome.exitCode === undefined
@@ -1273,12 +1487,17 @@ function recordFromPart(part, sequence, directory) {
             isVerificationFailureMask(command);
         const testSummary = kind === "test" ? parseTestSummary(outputText) : undefined;
         const testReason = kind === "test" ? testOutcomeReason(command, outcome.exitCode, testSummary) : undefined;
+        const upstreamPipeFailed = hasUpstreamPipelineFailureNote(outputText);
+        const segmentConfirmation = isVerification && !maskedVerification && !foreignCwd
+            ? inspectCompoundSegmentVerification(command, toolName, kind, outputText, outcome.exitCode, testReason)
+            : undefined;
         const confirmedByStructuredSummary = isVerification &&
             commandStatus === "success" &&
             outcome.exitCode === 0 &&
             !maskedVerification &&
             !foreignCwd &&
-            !hasOutputSpoofingStage(command) &&
+            !upstreamPipeFailed &&
+            !hasOutputSpoofingStage(command, outputText) &&
             ((kind === "test" &&
                 Boolean(testSummary) &&
                 (testSummary?.total ?? 0) > 0 &&
@@ -1290,19 +1509,23 @@ function recordFromPart(part, sequence, directory) {
                     executableShellStages(command).some((stage) => /^oxlint\b/.test(stage)) &&
                     /^Found 0 warnings and 0 errors\.$/m.test(outputText) &&
                     !/^Found (?!0 warnings and 0 errors\.)\d+ warnings? and \d+ errors?\.$/m.test(outputText)));
+        const confirmedVerification = segmentConfirmation === "success" ||
+            (confirmedByStructuredSummary && !hasMultipleNonAndSegmentsOfKind(command, toolName, kind));
         const ambiguousVerification = isVerification &&
             (nonSequentialCompound || pipedWithoutPipefail) &&
-            !(confirmedByStructuredSummary && !hasMultipleNonAndSegmentsOfKind(command, toolName, kind));
+            !confirmedVerification;
         const cancelled = outcome.aborted === true ||
             ((outcome.exitCode === 130 || part.state.status === "error") &&
                 /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText)) ||
             part.state.metadata?.cancelled === true ||
             part.state.metadata?.canceled === true;
-        const evidenceStatus = maskedVerification || ambiguousVerification || (isVerification && foreignCwd)
-            ? "unknown"
-            : commandStatus === "success" && (testReason || cancelled)
+        const evidenceStatus = segmentConfirmation === "failure"
+            ? "failure"
+            : maskedVerification || ambiguousVerification || (isVerification && foreignCwd)
                 ? "unknown"
-                : commandStatus;
+                : commandStatus === "success" && (testReason || cancelled)
+                    ? "unknown"
+                    : commandStatus;
         const recordError = evidenceStatus === "unknown" && outcome.status === "success"
             ? isVerification && foreignCwd
                 ? "verification executed outside project directory"
@@ -1331,7 +1554,7 @@ function recordFromPart(part, sequence, directory) {
         records.push({
             kind,
             status: evidenceStatus,
-            sequence,
+            sequence: recordSequence,
             toolName,
             ...(genericTargetFile ? { filePath: genericTargetFile } : {}),
             ...(command ? { command } : {}),

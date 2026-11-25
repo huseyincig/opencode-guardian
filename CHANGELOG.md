@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.18.5 — 2026-11-26
+
+### Fixed
+- **Live Production False-Positive Closure across Verification Evidence, Claims, Test Integrity, Shortcuts, and Completion Gate (`opencode.db` live V2 replay):**
+  - **Compound & Piped Verification Evidence (`src/evidence.ts`):**
+    - Confirmed per-segment live exit-status echoes (`echo TC=$?`, `echo BUILD=$?`, `echo EXIT ${PIPESTATUS[0]}`) as `"success"` on `<LABEL>=0` and promoted non-zero `<LABEL>=1` captures directly to `"failure"` (closing masked-failure blind spots while still rejecting hardcoded `echo TC=0` literals).
+    - Recognized benign static markers (`echo TEST_DONE`, `echo "---"`), zero-output `; grep ...; echo grep=$?` (`grep=1`) stages, and clean `tail -N` (`N >= 2`) / `tee` passthrough on `typecheck` and `build` when zero compiler/build errors and zero AFT upstream pipeline failure notes appear (while still rejecting `tail -1`, `head`, and spoofing stages).
+    - Made `splitTopLevelShellSegments` and `executableShellStages` heredoc-aware (`<<'EOF' ... EOF`), exempted silent stdout-redirected `cat >> file <<'EOF'` writes from spoofing detection, and preserved intra-command mutation-before-verification ordering so `cat >> test.mjs <<'EOF' ... EOF\nnpm run typecheck; npm run build; node --test ...` stays fresh while post-verification mutations (`npm run typecheck && echo x >> src/app.ts`) remain stale.
+  - **Unverified Claims Precision (`src/rules/no-unverified-claims.ts`, `src/locale-intents.ts`):**
+    - Fixed `gitStatusSemanticEvidence` to strip `[task bash-...]` harness trailers and match genuine git porcelain status lines only, eliminating false blocking contradictions on compound `git status --short --branch && echo '---LOG---' && git log` commands while still blocking dirty working trees.
+    - Allowed non-compiled `.test.mjs`/`.spec.js` edits (including in-place `perl -pi`/`sed -i` test-file edits) without invalidating `typecheck`/`build`, supported qualified subset test claims (`"38 new/extended tests pass"` alongside transparent failure disclosure) and partial `X of Y` (`X < Y`) reports, ignored historical restatements (`"earlier report"`), recognized EN/TR verification delegation to manager (`"leave verification to manager"`, `"doğrulamayı yöneticiye devrediyorum"`), and accepted coordinator summaries of `<background-result>` / `subagent` verification when no local edits intervened.
+  - **Test Integrity, Shortcuts & Completion Gate (`src/rules/no-cheat.ts`, `src/rules/no-shortcuts.ts`, `src/rules/task-completion.ts`):**
+    - Exempted balanced `if (...) { assert... } else { assert... }` and guard-clause `if (...) { assert...; continue; } assert...;` loops from advisory `"conditional assertion"` findings.
+    - Exempted context-pruned prompt placeholder reports (`"Only the placeholder survived"`) and neutral/sanitized test fixture reports (`"nötr placeholder"`) from `quality/no-shortcuts`.
+    - Resolved non-shell structured tool retries (`subagent`, `todowrite`, `hi_task`, etc.), shell parameter-validation retries, `cd <sameDir> &&` retried commands, compound read-only existence probes (`ls -d`, `2>/dev/null`), and host/coordinator scope-policy refusals cleanly in `task/completion-gate`.
+- **Verification:**
+  - Added TDD regression suite `tests/live-production-fp-closure.test.mjs`: **973 / 973** tests passing across 23 test files (`80` suites), **0** Oxlint warnings/errors across 75 files, strict TypeScript clean, **21 / 21** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, and live replay across 31 real V2 worker sessions in `opencode.db` confirming **0** false positives across `integrity/no-unverified-claims`, `testing/no-cheat`, `quality/no-shortcuts`, and `task/completion-gate`.
+
 ## 0.18.4 — 2026-11-26
 
 ### Fixed

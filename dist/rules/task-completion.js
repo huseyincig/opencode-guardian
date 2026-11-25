@@ -120,26 +120,44 @@ export const taskCompletionRule = {
         if (writeCapable) {
             const commandIdentity = (value) => (value ?? "")
                 .toLowerCase()
+                .replace(/^(?:cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*)+/, "")
                 .replace(/\s+2>&1\b/g, "")
                 .replace(/\s+--verbose\b/g, "")
                 .replace(/\s+-v\b/g, "")
                 .replace(/\s+/g, " ")
                 .trim();
             const isBenignReadOnlyProbeFailure = (failure) => {
-                if (failure.kind !== "generic")
+                if (failure.kind !== "generic" && failure.kind !== "git-status")
                     return false;
                 const cmd = (failure.command ?? "").trim();
                 const errOut = `${failure.error ?? ""}\n${failure.output ?? ""}`;
                 if (cmd) {
                     const pipelines = splitShellStages(cmd);
                     const isSingleUnpipedStage = pipelines.length === 1 && (pipelines[0]?.length ?? 0) === 1;
-                    const isZeroMatchSearch = isSingleUnpipedStage &&
+                    const isZeroMatchSearch = failure.kind === "generic" &&
+                        isSingleUnpipedStage &&
                         failure.exitCode === 1 &&
                         /^(?:(?:sudo\s+)?(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:rg|grep|egrep|fgrep|git\s+grep|diff|cmp|test|\[))(?:\s|$)/i.test(cmd) &&
                         !/(?:no such file or directory|permission denied|invalid option|unrecognized option|command not found|fatal:|error:)/i.test(errOut);
                     if (isZeroMatchSearch)
                         return true;
+                    // Compound read-only inspection probes ending in `ls -d <deleted>` / `stat` / `test -e` / `grep`
+                    // where EVERY stage is strictly read-only (no mutations) and exit code is 1 or 2 (not-found / zero-match).
+                    const allStages = pipelines.flat().map((s) => s.trim()).filter(Boolean);
+                    const allReadOnlyProbeStages = allStages.length > 0 &&
+                        (failure.exitCode === 1 || failure.exitCode === 2) &&
+                        !/(?:permission denied|invalid option|unrecognized option|command not found|syntax error|fatal:)/i.test(errOut) &&
+                        allStages.every((s) => {
+                            const withoutNullStderr = s.replace(/\s+2>\s*\/dev\/null\b/g, "");
+                            return (!/[<>]/.test(withoutNullStderr) &&
+                                /^(?:cd|pwd|ls|stat|test|\[|rg|grep|egrep|fgrep|diff|cmp|echo|printf|head|tail|wc|git\s+(?:status|diff|log|show|grep|ls-files|check-ignore|rev-parse))(?:\s|$)/i.test(withoutNullStderr));
+                        }) &&
+                        allStages.some((s) => /^(?:ls|stat|test|\[|rg|grep|egrep|fgrep|git\s+(?:grep|check-ignore))(?:\s|$)/i.test(s));
+                    if (allReadOnlyProbeStages)
+                        return true;
                 }
+                if (failure.kind !== "generic")
+                    return false;
                 const toolLower = failure.toolName.toLowerCase();
                 const isReadTool = /^(?:read|read_file|view_file|file_read|read_text_file|glob|find|grep|search|list|ls|stat)$/.test(toolLower);
                 if (isReadTool &&
@@ -208,10 +226,47 @@ export const taskCompletionRule = {
                         (commandIdentity(failure.command) === commandIdentity(later.command) ||
                             isBroaderOrSameVerificationCommand(failure.command, later.command, failure.kind)));
                 }
+                // Non-shell structured tool retry (e.g. `subagent`, `todowrite`, `hi_task`, `aft_callers` failed
+                // schema/validation/ambiguity check and then succeeded on a subsequent call with fixed arguments).
+                if (!failure.command && !later.command && failure.toolName && later.toolName === failure.toolName) {
+                    if (failure.filePath && later.filePath) {
+                        return failure.filePath === later.filePath;
+                    }
+                    if (!failure.filePath) {
+                        return true;
+                    }
+                }
+                // Shell parameter-validation rejection before command execution (e.g. invalid `timeoutMs` or missing tool arg)
+                // resolved when a subsequent call to the same shell tool succeeds.
+                const failureText = `${failure.error ?? ""}\n${failure.output ?? ""}`;
+                if (failure.kind === "generic" &&
+                    later.toolName === failure.toolName &&
+                    /(?:invalid arguments for tool|timeoutms must be between|missing required (?:key|field|parameter|argument))/i.test(failureText)) {
+                    return true;
+                }
                 return later.signature === failure.signature;
+            };
+            const isPolicyRefusalOrRedirectFailure = (failure) => {
+                const errOut = `${failure.error ?? ""}\n${failure.output ?? ""}`;
+                // Host/plugin policy blocking shell grep/rg in favor of indexed search tools: resolved once
+                // a later non-shell search/read/grep/glob/code-nav tool succeeds.
+                if (/do not search code by running (?:grep|rg)|use the (?:grep|glob|search) tool instead/i.test(errOut) &&
+                    evidence.records.some((later) => later.sequence > failure.sequence &&
+                        later.status === "success" &&
+                        !later.command &&
+                        /(?:grep|glob|search|read|find|callers|outline|symbol|zoom|aft)/i.test(later.toolName))) {
+                    return true;
+                }
+                // Host/plugin scope or coordinator write refusal (cannot be fixed by retrying the forbidden write).
+                if (/(?:coordinator and cannot write|cannot write [^\n]* directly;\s*delegate|path not in task scope|outside (?:task|write) scope|edit denied[^\n]*scope)/i.test(errOut)) {
+                    return true;
+                }
+                return false;
             };
             const unresolvedFailures = evidence.failures.filter((failure) => {
                 if (isBenignReadOnlyProbeFailure(failure))
+                    return false;
+                if (isPolicyRefusalOrRedirectFailure(failure))
                     return false;
                 const hasLaterSuccess = evidence.records.some((later) => resolvesFailure(failure, later));
                 return !hasLaterSuccess;

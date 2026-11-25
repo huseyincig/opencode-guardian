@@ -550,7 +550,10 @@ export function deniedVerification(text: string, kind: VerificationKind): boolea
     `\\b(?:do\\s+not|don't|dont|must\\s+not|mustn't|should\\s+not|shouldn't|never)\\s+(?:(?:run(?:ning)?|execute|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
       `|(?<!\\b(?:do\\s+not|don't|dont|never|must\\s+not|should\\s+not|cannot|can't)\\s+)\\bskip\\s+(?:(?:running|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
       `|(?<!\\b(?:do\\s+not|don't|dont|never|must\\s+not|should\\s+not|cannot|can't)\\s+(?:[a-z']+\\s+){0,3})\\bwithout\\s+(?:(?:running|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
-      `|(?<!\\p{L})(?:${pmCommand}|${kind === "test" ? "testleri?" : kind})\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın|koşturma|koşturmayın)(?!\\p{L})`,
+      `|\\b(?:leave|defer|hand\\s+off)\\s+(?:full\\s+|final\\s+)?(?:verification|testing|checks?|${directTarget})\\s+to\\s+(?:the\\s+)?(?:manager|parent|orchestrator|caller)\\b` +
+      `|\\b(?:the\\s+)?(?:manager|parent|orchestrator|caller)\\s+will\\s+(?:run|handle|perform)\\s+(?:the\\s+)?(?:full\\s+|final\\s+)?(?:verification|testing|checks?|${directTarget})\\b` +
+      `|(?<!\\p{L})(?:${pmCommand}|${kind === "test" ? "testleri?" : kind})\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın|koşturma|koşturmayın)(?!\\p{L})` +
+      `|(?<!\\p{L})(?:doğrulamayı|testleri?)\\s+(?:manager|yönetici)(?:['’]?(?:ye|ya|e|a))?\\s+(?:bırak|bırakın|devret|devredin|yapacak)(?!\\p{L})`,
     "iu"
   );
   if (strongDenied.test(clean)) return true;

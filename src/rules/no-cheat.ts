@@ -463,12 +463,47 @@ export const noCheatRule: GuardRule = {
         );
       }
       if (isTestCode) {
-        const conditional = /\bif\s*\([^\n{};]{1,300}\)\s*\{?\s*(?:expect\s*\(|assert(?:\.|\s*\())/.exec(executable);
-        if (conditional) addFinding({ ruleId: "testing/no-cheat", pattern: "conditional assertion",
-          messageSnippet: extractSnippet(code, conditional.index, conditional[0].length),
-          description: "An assertion executes only conditionally; review that the test still fails when the behavior is broken.",
-          confidence: "medium", ...(filePath ? { filePath } : {}),
-        }, false);
+        const hasAssertingElseBranch = (src: string, matchIndex: number): boolean => {
+          const openBrace = src.indexOf("{", matchIndex);
+          const semiOrNewline = src.indexOf(";", matchIndex);
+          if (openBrace < 0 || (semiOrNewline >= 0 && semiOrNewline < openBrace)) return false;
+          let depth = 0;
+          let closeIdx = -1;
+          for (let i = openBrace; i < src.length; i++) {
+            if (src[i] === "{") depth++;
+            else if (src[i] === "}") {
+              depth--;
+              if (depth === 0) { closeIdx = i; break; }
+            }
+          }
+          if (closeIdx < 0) return false;
+          const body = src.slice(openBrace + 1, closeIdx);
+          const after = src.slice(closeIdx + 1);
+          const elseMatch = /^\s*else\b/.exec(after);
+          if (elseMatch) {
+            const elseTail = after.slice(elseMatch[0].length, elseMatch[0].length + 400);
+            return /(?:expect\s*\(|assert(?:\.|\s*\()|\bthrow\b|\bfail\s*\()/.test(elseTail);
+          }
+          // Balanced guard-clause pattern inside loop/function: `if (cond) { assert...; continue; } assert...;`
+          if (/\b(?:continue|return)\s*;?\s*$/.test(body.trim())) {
+            const nextTail = after.slice(0, 400);
+            return /(?:expect\s*\(|assert(?:\.|\s*\()|\bthrow\b|\bfail\s*\()/.test(nextTail);
+          }
+          return false;
+        };
+        const conditionalRe = /\bif\s*\([^\n{};]{1,300}\)\s*\{?\s*(?:expect\s*\(|assert(?:\.|\s*\())/g;
+        let conditional = conditionalRe.exec(executable);
+        while (conditional) {
+          if (!hasAssertingElseBranch(executable, conditional.index)) {
+            addFinding({ ruleId: "testing/no-cheat", pattern: "conditional assertion",
+              messageSnippet: extractSnippet(code, conditional.index, conditional[0].length),
+              description: "An assertion executes only conditionally; review that the test still fails when the behavior is broken.",
+              confidence: "medium", ...(filePath ? { filePath } : {}),
+            }, false);
+            break;
+          }
+          conditional = conditionalRe.exec(executable);
+        }
       }
     };
 

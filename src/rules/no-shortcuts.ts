@@ -432,6 +432,19 @@ export const noShortcutsRule: GuardRule = {
               searchFrom = idx + 1;
               continue;
             }
+            if (
+              lowerPattern === "placeholder" &&
+              source === "assistant response" &&
+              (/\b(?:pruned|omitted|all\s+i\s+can\s+see|can\s+only\s+see|only\s+the\s+placeholder|placeholder\s+survived|never\s+received|starting\s+with|i\s+can\s+fix|to\s+fix\s+in-scope|(?:neutral|anonymiz(?:ed|ing)|sanitiz(?:ed|ing)|redacted)\s+placeholder)\b|(?<!\p{L})nötr\s+placeholder/iu.test(
+                matchedSentence
+              )) &&
+              !/\b(?:i\s+(?:left|used|added|wrote|put|kept)\s+(?:a|an|this)?\s*placeholder|placeholder\s+(?:for\s+now|implementation\s+for\s+now))\b/i.test(
+                matchedSentence
+              )
+            ) {
+              searchFrom = idx + 1;
+              continue;
+            }
             seen.add(lowerPattern);
             const snippet = extractSnippet(text, idx, pattern.length);
             const shouldBlock =

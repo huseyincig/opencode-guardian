@@ -7,7 +7,8 @@ import type { MessagePart, PreflightMode, SessionMessage } from "./types.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
 import { evaluatePreflight, extractToolAction, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
-import { configureGuardianTelemetry, recordGuardianEvent, recordGuardianRedaction, sessionFingerprint } from "./telemetry.js";
+import { configureGuardianTelemetry, readGuardianStatus, recordGuardianEvent, recordGuardianRedaction, sessionFingerprint } from "./telemetry.js";
+import { guardianResetReport } from "./commands.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
 import { createIdleQueue } from "./idle-queue.js";
@@ -49,6 +50,8 @@ import {
   GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD,
   GUARDIAN_INTERVENTION_RPC_DEFINITION,
   GUARDIAN_INTERVENTION_RPC_METHOD,
+  GUARDIAN_RESET_RPC_METHOD,
+  GUARDIAN_STATUS_RPC_METHOD,
   activeGuardianIntervention,
   inactiveGuardianIntervention,
   readGuardianInterventionDirectory,
@@ -299,14 +302,19 @@ function normalizeV2AssistantParts(part: unknown): MessagePart[] {
       rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
         ? (rec.metadata as Record<string, unknown>)
         : {};
+    const parentErrored =
+      normalizedState.status === "error" ||
+      normalizedState.status === "aborted" ||
+      normalizedState.status === "cancelled" ||
+      normalizedState.status === "canceled";
+    const explicitNestedStatus = typeof rec.status === "string" ? rec.status : undefined;
     const callStatus =
-      typeof rec.status === "string"
-        ? rec.status
-        : rec.error !== undefined || recMeta.error === true
-          ? "error"
-          : normalizedState.status === "running" || normalizedState.status === "pending"
-            ? "running"
-            : "completed";
+      explicitNestedStatus ??
+      (rec.error !== undefined || recMeta.error === true
+        ? "error"
+        : normalizedState.status === "running" || normalizedState.status === "pending"
+          ? "running"
+          : "unknown");
     if (!toolName) continue;
     const callInput =
       rec.input && typeof rec.input === "object" && !Array.isArray(rec.input)
@@ -350,7 +358,8 @@ function normalizeV2AssistantParts(part: unknown): MessagePart[] {
         ...(rec.error !== undefined ? { error: rec.error } : {}),
         ...(explicitExitCode !== undefined
           ? { exitCode: explicitExitCode }
-          : callStatus === "completed" &&
+          : explicitNestedStatus === "completed" &&
+              !parentErrored &&
               (toolName === "shell" || toolName === "bash") &&
               !isBackgroundOrOutputExit
             ? { exitCode: 0 }
@@ -811,7 +820,7 @@ function recordInspectionOutcome(
   }
 
   if (result.remediationStatus === "verified") {
-    clearMeshIntervention(sessionID);
+    clearMeshIntervention(sessionID, "opencode-guardian");
     toastNotifier?.clear?.(sessionID);
     const verifiedRules = result.pendingRemediationRules?.length
       ? result.pendingRemediationRules
@@ -841,7 +850,7 @@ function recordInspectionOutcome(
   }
 
   if (result.results.length > 0 && result.decision === "pass" && result.remediationStatus !== "failed") {
-    clearMeshIntervention(sessionID);
+    clearMeshIntervention(sessionID, "opencode-guardian");
   }
 
   if (findings.length && !(result.decision === "block" && result.combinedRemediationPrompt)) {
@@ -939,13 +948,16 @@ export async function finalizeSubagentHandoff(input: {
 
     if (result.decision === "block" && result.combinedRemediationPrompt) {
       if (agentCapability !== "write-allowed") {
+        result.rollback?.();
         return latestAssistantText(messages);
       }
       if (getBlockingSessionLease(input.sessionID, "active_remediation", "opencode-guardian")) {
+        result.rollback?.();
         return latestAssistantText(messages);
       }
       if (round === MAX_SUBAGENT_HANDOFF_ROUNDS - 1) {
         result.rollback?.();
+        clearMeshIntervention(input.sessionID, "opencode-guardian");
         throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
       }
       const leaseTtlMs =
@@ -966,12 +978,15 @@ export async function finalizeSubagentHandoff(input: {
       const heartbeatMs = Math.max(30, Math.floor(leaseTtlMs / 3));
       const leaseHeartbeat = setInterval(() => {
         if (input.signal?.aborted) return;
-        renewSessionLease({
+        const renewed = renewSessionLease({
           sessionID: input.sessionID,
           owner: "opencode-guardian",
           kind: "active_remediation",
           ttlMs: leaseTtlMs,
         });
+        if (!renewed) {
+          clearInterval(leaseHeartbeat);
+        }
       }, heartbeatMs);
       leaseHeartbeat.unref?.();
       recordMeshIntervention({
@@ -987,24 +1002,61 @@ export async function finalizeSubagentHandoff(input: {
       });
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       let onAbortHandler: (() => void) | undefined;
+      let settled = false;
+      const awaitInterruptGrace = async (): Promise<void> => {
+        if (!input.interrupt) return;
+        let graceTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => input.interrupt?.()).catch(() => {}),
+            new Promise<void>((r) => {
+              graceTimer = setTimeout(r, 500);
+              graceTimer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (graceTimer !== undefined) clearTimeout(graceTimer);
+        }
+      };
       try {
-        const waitPromise = input.sendAndWait(result.combinedRemediationPrompt);
+        if (input.signal?.aborted) {
+          throw new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation.");
+        }
+        const waitPromise = Promise.resolve().then(() => input.sendAndWait(result.combinedRemediationPrompt!));
+        waitPromise.catch(() => {});
         const guardedWait = new Promise<void>((resolve, reject) => {
           deadlineTimer = setTimeout(() => {
-            void Promise.resolve(input.interrupt?.()).catch(() => {});
-            reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
+            if (settled) return;
+            settled = true;
+            void awaitInterruptGrace().finally(() => {
+              reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
+            });
           }, remediationTimeoutMs);
           deadlineTimer.unref?.();
           onAbortHandler = () => {
-            void Promise.resolve(input.interrupt?.()).catch(() => {});
-            reject(new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation."));
+            if (settled) return;
+            settled = true;
+            void awaitInterruptGrace().finally(() => {
+              reject(new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation."));
+            });
           };
           if (input.signal?.aborted) {
             onAbortHandler();
             return;
           }
           input.signal?.addEventListener("abort", onAbortHandler, { once: true });
-          waitPromise.then(resolve, reject);
+          waitPromise.then(
+            () => {
+              if (settled) return;
+              settled = true;
+              resolve();
+            },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              reject(err);
+            }
+          );
         });
         await guardedWait;
         remediated = true;
@@ -1023,7 +1075,7 @@ export async function finalizeSubagentHandoff(input: {
         });
       } catch {
         result.rollback?.();
-        clearMeshIntervention(input.sessionID);
+        clearMeshIntervention(input.sessionID, "opencode-guardian");
         recordGuardianEvent({
           kind: "inspection-error",
           session: sessionFingerprint(input.sessionID),
@@ -1043,19 +1095,19 @@ export async function finalizeSubagentHandoff(input: {
     }
 
     if (result.remediationStatus === "failed") {
-      clearMeshIntervention(input.sessionID);
+      clearMeshIntervention(input.sessionID, "opencode-guardian");
       throw new Error("[opencode-guardian handoff] unresolved Guardian findings; subagent result withheld.");
     }
 
     const latest = latestAssistantText(messages);
     if (remediated && !latest) {
-      clearMeshIntervention(input.sessionID);
+      clearMeshIntervention(input.sessionID, "opencode-guardian");
       throw new Error("[opencode-guardian handoff] remediated subagent produced no final text result.");
     }
     return latest;
   }
 
-  clearMeshIntervention(input.sessionID);
+  clearMeshIntervention(input.sessionID, "opencode-guardian");
   throw new Error("[opencode-guardian handoff] subagent finalization exceeded its bounded loop.");
 }
 
@@ -1249,7 +1301,7 @@ async function handleSessionIdle(
           releaseRemediationLease();
           result.rollback?.();
           rollbackProcessInspect?.();
-          clearMeshIntervention(sessionID);
+          clearMeshIntervention(sessionID, "opencode-guardian");
           return;
         }
         await sendPrompt(result.combinedRemediationPrompt);
@@ -1272,7 +1324,7 @@ async function handleSessionIdle(
         releaseRemediationLease();
         result.rollback?.();
         rollbackProcessInspect?.();
-        clearMeshIntervention(sessionID);
+        clearMeshIntervention(sessionID, "opencode-guardian");
         throw promptError;
       }
     } else if (result.results.length > 0) {
@@ -1303,10 +1355,11 @@ function inspectPreflight(
   tool: string, args: unknown, sessionID?: string, directory?: string,
   additionalTools: readonly string[] = [],
   toastNotifier?: GuardianToastNotifier,
-  mode: PreflightMode = "strict"
+  mode: PreflightMode = "strict",
+  secretOptions?: import("./secrets/types.js").SanitizerOptions
 ): void {
   if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool)) return;
-  const finding = evaluatePreflight(tool, args, additionalTools, mode);
+  const finding = evaluatePreflight(tool, args, additionalTools, mode, secretOptions);
   const session = sessionFingerprint(sessionID);
   const safeTool = extractToolAction(tool);
   recordGuardianEvent({
@@ -1337,7 +1390,7 @@ function inspectPreflight(
     throw new GuardianPreflightError(finding);
   }
   if (sessionID && getLatestMeshIntervention(sessionID)?.kind === "preflight-blocked") {
-    clearMeshIntervention(sessionID);
+    clearMeshIntervention(sessionID, "opencode-guardian");
   }
 }
 
@@ -1375,15 +1428,30 @@ function globalOpenCodeConfigDir(): string {
 }
 
 function openCodeConfigMentionsGuardian(dir: string): boolean {
+  const MAX_BYTES = 256 * 1024;
   for (const name of ["opencode.json", "opencode.jsonc"]) {
     const candidate = path.join(dir, name);
-    if (!fs.existsSync(candidate)) continue;
+    let fd: number | undefined;
     try {
-      const raw = fs.readFileSync(candidate, "utf8");
+      fd = fs.openSync(
+        candidate,
+        fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+      );
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > MAX_BYTES) continue;
+      const buf = Buffer.alloc(stat.size);
+      const read = fs.readSync(fd, buf, 0, stat.size, 0);
+      const raw = buf.toString("utf8", 0, read);
       if (raw.includes("opencode-guardian") && !raw.includes("-opencode-guardian")) {
         return true;
       }
-    } catch {}
+    } catch {
+      // Ignore missing, unreadable, symlinked, or non-regular config files.
+    } finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
   }
   return false;
 }
@@ -1808,8 +1876,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       return { directory, verified: false };
     }
   };
-  const resolveSessionDirectory = async (sessionID: string): Promise<string> =>
-    (await resolveSessionDirectoryDetailed(sessionID)).directory;
   const forgetSessionRuntime = (sessionID: string): void => {
     for (const runtime of runtimeByDirectory.values()) {
       runtime.engine.forgetSession(sessionID);
@@ -1836,10 +1902,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     if (typeof rec.jobID === "string" && rec.jobID.length > 0) return rec.jobID;
     if (typeof rec.shellID === "string" && rec.shellID.length > 0) return rec.shellID;
     if (typeof rec.childSessionID === "string" && rec.childSessionID.length > 0) return rec.childSessionID;
+    if (typeof rec.id === "string" && rec.id.length > 0) return rec.id;
     if (typeof rec.path === "string" && rec.path.length > 0) {
       return typeof rec.kind === "string" ? `${rec.kind}:${rec.path}` : rec.path;
     }
-    if (typeof rec.id === "string" && rec.id.length > 0) return rec.id;
     return typeof rec.kind === "string" && rec.kind.length > 0 ? rec.kind : undefined;
   };
   const contracts = new Map<string, TaskContract>();
@@ -1885,6 +1951,13 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           [GUARDIAN_INTERVENTION_RPC_METHOD]: async (input) => {
             const sessionID = readGuardianInterventionSessionID(input);
             if (!sessionID) return inactiveGuardianIntervention();
+            const resolved = await resolveSessionDirectoryDetailed(sessionID);
+            if (isProjectLocalPluginInstall(directory) && !resolved.verified) {
+              return inactiveGuardianIntervention();
+            }
+            if (!isDirectoryInGuardianScope(directory, resolved.directory)) {
+              return inactiveGuardianIntervention();
+            }
             const entry = interventionSnapshots.get(sessionID);
             if (!entry) return inactiveGuardianIntervention();
             const now = Date.now();
@@ -1900,7 +1973,14 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           [GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]: async (input, ...rest: unknown[]) => {
             const sessionID = readGuardianInterventionSessionID(input);
             if (sessionID) {
-              clearMeshIntervention(sessionID);
+              const resolved = await resolveSessionDirectoryDetailed(sessionID);
+              if (
+                (isProjectLocalPluginInstall(directory) && !resolved.verified) ||
+                !isDirectoryInGuardianScope(directory, resolved.directory)
+              ) {
+                return { cleared: false };
+              }
+              clearMeshIntervention(sessionID, "opencode-guardian");
               toastNotifier.clear?.(sessionID);
               return { cleared: true };
             }
@@ -1915,21 +1995,57 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               return { cleared: false };
             }
             for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
-              const sessionDir =
-                sessionDirectories.get(activeSessionID) ??
-                await resolveSessionDirectory(activeSessionID);
+              const cachedDir = sessionDirectories.get(activeSessionID);
+              let sessionDir = cachedDir;
+              if (!sessionDir) {
+                const resolved = await resolveSessionDirectoryDetailed(activeSessionID);
+                if (isProjectLocalPluginInstall(directory) && !resolved.verified) continue;
+                sessionDir = resolved.directory;
+              }
               if (sessionDir === targetDirectory) {
-                clearMeshIntervention(activeSessionID);
+                clearMeshIntervention(activeSessionID, "opencode-guardian");
                 toastNotifier.clear?.(activeSessionID);
               }
             }
             for (const [knownSessionID, knownDir] of sessionDirectories.entries()) {
               if (knownDir === targetDirectory) {
-                clearMeshIntervention(knownSessionID);
+                clearMeshIntervention(knownSessionID, "opencode-guardian");
               }
             }
             dispatchGuardianToastClear({ directory: targetDirectory });
             return { cleared: true };
+          },
+          [GUARDIAN_STATUS_RPC_METHOD]: async (input, ...rest: unknown[]) => {
+            const rpcContext = rest[0] as { location?: { directory?: unknown } } | undefined;
+            const contextDir =
+              typeof rpcContext?.location?.directory === "string" && rpcContext.location.directory.trim()
+                ? rpcContext.location.directory
+                : undefined;
+            const targetDirectory =
+              contextDir ?? readGuardianInterventionDirectory(input) ?? directory;
+            if (!isDirectoryInGuardianScope(directory, targetDirectory)) {
+              return { ok: false };
+            }
+            return { ok: true, status: readGuardianStatus(targetDirectory) };
+          },
+          [GUARDIAN_RESET_RPC_METHOD]: async (input, ...rest: unknown[]) => {
+            const rpcContext = rest[0] as { location?: { directory?: unknown } } | undefined;
+            const contextDir =
+              typeof rpcContext?.location?.directory === "string" && rpcContext.location.directory.trim()
+                ? rpcContext.location.directory
+                : undefined;
+            const targetDirectory =
+              contextDir ?? readGuardianInterventionDirectory(input) ?? directory;
+            if (!isDirectoryInGuardianScope(directory, targetDirectory)) {
+              return {
+                ok: false,
+                title: "Guardian: Reset Statistics",
+                message: "Reset failed: target project is outside Guardian scope.",
+              };
+            }
+            const report = guardianResetReport(targetDirectory);
+            const ok = !report.message.startsWith("Reset failed");
+            return { ok, title: report.title, message: report.message };
           },
         }
       );
@@ -2020,11 +2136,15 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     signal: controller.signal,
     directory,
     settings: async (sessionID) => {
-      const targetDirectory = await resolveSessionDirectory(sessionID);
-      const rt = runtimeForDirectory(targetDirectory);
-      if (!isGuardianOwnerForDirectory(instanceId, directory, targetDirectory)) {
-        return { config: { ...rt.config, enabled: false }, directory: targetDirectory };
+      const resolved = await resolveSessionDirectoryDetailed(sessionID);
+      const targetDirectory = resolved.directory;
+      if (
+        (isProjectLocalPluginInstall(directory) && !resolved.verified) ||
+        !isGuardianOwnerForDirectory(instanceId, directory, targetDirectory)
+      ) {
+        return { config: { enabled: false }, directory: targetDirectory };
       }
+      const rt = runtimeForDirectory(targetDirectory);
       return { config: rt.config, directory: targetDirectory };
     },
     interrupt: async (sessionID) => {
@@ -2052,6 +2172,17 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     }
     throw new Error("[opencode-guardian secrets] V2 execute.after hook is unavailable; POST redaction cannot be enabled safely.");
   }
+  const hasConcreteHostRestriction = (profile: AgentMutationProfile): boolean => {
+    const restrictedEffect = (effect?: string) =>
+      effect === "deny" || effect === "disabled" || effect === "restricted";
+    return (
+      restrictedEffect(profile.evidence.edit) ||
+      restrictedEffect(profile.evidence.bash) ||
+      (profile.evidence.unknownTools?.length ?? 0) > 0 ||
+      profile.evidence.reasons.some((r) => /agent\.list.*failed|agent-list-failed|host-denied/i.test(r))
+    );
+  };
+  const projectLocalInstall = isProjectLocalPluginInstall(directory);
   if (typeof context.tool?.hook === "function") {
     const toolRegistrations: Array<{ dispose(): Promise<void> | void }> = [];
     const canFinalizeSubagent =
@@ -2059,14 +2190,26 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       typeof context.session.context === "function" &&
       typeof context.session.synthetic === "function" &&
       typeof context.session.wait === "function";
+    const toolCallStartedAt = new Map<string, number>();
     {
       try {
         const before = await context.tool.hook("execute.before", async (event) => {
           if (controller.signal.aborted) return;
-          const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
+          const resolvedDir = await resolveSessionDirectoryDetailed(event.sessionID);
           if (controller.signal.aborted) return;
+          if (projectLocalInstall && !resolvedDir.verified) return;
+          const runtimeDirectory = resolvedDir.directory;
+          if (!isDirectoryInGuardianScope(directory, runtimeDirectory)) return;
           const runtime = runtimeForDirectory(runtimeDirectory);
           if (runtime.config.enabled === false) return;
+          if (event.id) {
+            toolCallStartedAt.set(event.id, Date.now());
+            while (toolCallStartedAt.size > 512) {
+              const oldest = toolCallStartedAt.keys().next().value;
+              if (oldest === undefined) break;
+              toolCallStartedAt.delete(oldest);
+            }
+          }
           if (toolAfterReady && event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
             verificationStore.observeBefore(event.sessionID, event.id, event.tool,
               event.input as Record<string, unknown>, runtimeDirectory);
@@ -2080,7 +2223,8 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               runtimeDirectory,
               runtime.config.preflight?.shellTools,
               toastNotifier,
-              runtime.config.preflight?.mode ?? "strict"
+              runtime.config.preflight?.mode ?? "strict",
+              runtime.config.secrets?.enabled === false ? undefined : (runtime.sanitizer ?? undefined)
             );
           }
 
@@ -2125,7 +2269,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           Boolean(pruneExpiredForegroundHandoffs(foregroundHandoffs, event.sessionID)?.has(event.id));
 
         try {
-          const observedDirectory = await resolveSessionDirectory(event.sessionID);
+          const resolvedDir = await resolveSessionDirectoryDetailed(event.sessionID);
+          if (projectLocalInstall && !resolvedDir.verified) return;
+          const observedDirectory = resolvedDir.directory;
+          if (!isDirectoryInGuardianScope(directory, observedDirectory)) return;
           const runtime = runtimeForDirectory(observedDirectory);
           if (runtime.config.enabled === false) return;
 
@@ -2139,10 +2286,14 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
           if (controller.signal.aborted) return;
 
+          const callStartMs = event.id ? toolCallStartedAt.get(event.id) : undefined;
+          if (event.id) toolCallStartedAt.delete(event.id);
+          const activeIntervention = event.sessionID ? getLatestMeshIntervention(event.sessionID) : undefined;
           if (
             event.status === "completed" &&
             event.sessionID &&
-            getLatestMeshIntervention(event.sessionID)?.kind === "preflight-blocked"
+            activeIntervention?.kind === "preflight-blocked" &&
+            (callStartMs === undefined || callStartMs >= activeIntervention.updatedAt)
           ) {
             clearMeshIntervention(event.sessionID, "opencode-guardian");
           }
@@ -2245,7 +2396,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                     cacheAgentCapability(childID, hostProfile);
                     return hostProfile;
                   }
-                  if (meshProfile && meshProfile.capability === "write-allowed") {
+                  if (
+                    meshProfile &&
+                    meshProfile.capability === "write-allowed" &&
+                    !hasConcreteHostRestriction(hostProfile)
+                  ) {
                     const resolved: AgentMutationProfile = {
                       capability: "write-allowed",
                       evidence: {
@@ -2407,14 +2562,21 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           typeof eventRecord.cwd === "string" && eventRecord.cwd.trim().length > 0
             ? eventRecord.cwd
             : undefined;
-        const runtimeDirectory = sid
-          ? await resolveSessionDirectory(sid)
-          : (typeof eventRecord.location?.directory === "string" && eventRecord.location.directory.trim()
+        let runtimeDirectory: string;
+        if (sid) {
+          const resolvedDir = await resolveSessionDirectoryDetailed(sid);
+          if (projectLocalInstall && !resolvedDir.verified) return;
+          runtimeDirectory = resolvedDir.directory;
+        } else {
+          runtimeDirectory =
+            typeof eventRecord.location?.directory === "string" && eventRecord.location.directory.trim()
               ? eventRecord.location.directory
               : candidateCwd && isDirectoryInGuardianScope(directory, candidateCwd)
                 ? candidateCwd
-                : directory);
+                : directory;
+        }
         if (controller.signal.aborted) return;
+        if (!isDirectoryInGuardianScope(directory, runtimeDirectory)) return;
         const runtime = runtimeForDirectory(runtimeDirectory);
         if (runtime.config.enabled === false) return;
         if (runtime.config.preflight?.enabled === true) {
@@ -2471,28 +2633,36 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         ) {
           return;
         }
-        idleQueue.forget(event.sessionID);
-        releaseRemediationLeaseForSession(event.sessionID);
+        const hadQueuedIdle = idleQueue.has(event.sessionID);
+        const resolvedDir = await resolveSessionDirectoryDetailed(event.sessionID);
+        if (isProjectLocalPluginInstall(directory) && !resolvedDir.verified) {
+          return;
+        }
+        const runtimeDirectory = resolvedDir.directory;
+        if (!isGuardianOwnerForDirectory(instanceId, directory, runtimeDirectory)) {
+          return;
+        }
+        const runtime = runtimeForDirectory(runtimeDirectory);
+        if (runtime.config.enabled === false) {
+          return;
+        }
+        if (hadQueuedIdle) idleQueue.forget(event.sessionID);
+        releaseRemediationLeaseForSession(event.sessionID, instanceId);
         invalidateActiveMeshHandoff(event.sessionID);
-        clearMeshIntervention(event.sessionID);
+        clearMeshIntervention(event.sessionID, "opencode-guardian");
         foregroundHandoffs.delete(event.sessionID);
         contracts.delete(event.sessionID);
         backgroundSessions.delete(event.sessionID);
         sessionBackgroundJobs.delete(event.sessionID);
         toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
         verificationStore.beginTurn(event.sessionID);
-        const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
-        const runtime = runtimeForDirectory(runtimeDirectory);
-        if (runtime.config.enabled === false) {
-          return;
-        }
 
         const text = typeof event.prompt?.text === "string" ? event.prompt.text : "";
         if (!text) return;
         const contract = extractTaskContract([{
           info: { id: event.messageID, role: "user" },
           parts: [{ type: "text", text }],
-        }]);
+        }], event.sessionID);
         if (contract) setSessionContract(event.sessionID, contract);
       });
       if (!promptRegistration || typeof promptRegistration.dispose !== "function") {
@@ -2503,8 +2673,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         sessionID: string;
         messages: unknown[];
         system: unknown[];
-      }): Promise<ReturnType<typeof runtimeForDirectory>> => {
-        const runtimeDirectory = await resolveSessionDirectory(event.sessionID);
+      }): Promise<ReturnType<typeof runtimeForDirectory> | undefined> => {
+        const resolved = await resolveSessionDirectoryDetailed(event.sessionID);
+        if (projectLocalInstall && !resolved.verified) return undefined;
+        const runtimeDirectory = resolved.directory;
+        if (!isDirectoryInGuardianScope(directory, runtimeDirectory)) return undefined;
         const runtime = runtimeForDirectory(runtimeDirectory);
         if (runtime.config.enabled === false) return runtime;
 
@@ -2543,7 +2716,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
       const contextRegistration = await context.session.hook("context", async (event) => {
         const runtime = await sanitizeV2ModelRequest(event);
-        if (runtime.config.enabled === false) return;
+        if (!runtime || runtime.config.enabled === false) return;
         const contract = contracts.get(event.sessionID);
         if (!contract) return;
         const guidance = taskGuidance(contract);
@@ -2636,8 +2809,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     if (!events) return;
     let activeEvents: AsyncIterable<unknown> | undefined = events;
     // A terminated stream must never disable session inspection silently.
-    // Retry a bounded number of times and keep strict tool hooks registered.
+    // Retry a bounded number of consecutive failures (resetting after a healthy
+    // run of >= 30s) and keep strict tool hooks registered.
+    const HEALTHY_STREAM_RESET_MS = 30_000;
     for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt++) {
+      const streamStartedAt = Date.now();
       try {
         if (!activeEvents) {
           const next = context.event.subscribe({ signal: controller.signal });
@@ -2850,20 +3026,30 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             ) {
               const set = sessionBackgroundJobs.get(jobSessionID);
               if (set) {
-                for (const candidate of [
-                  backgroundJobKey(jobInfo),
+                const specificCandidates = [
                   jobInfo?.jobID,
-                  jobInfo?.id,
                   jobInfo?.shellID,
                   jobInfo?.childSessionID,
-                  typeof jobInfo?.path === "string" && typeof jobInfo?.kind === "string"
-                    ? `${jobInfo.kind}:${jobInfo.path}`
-                    : undefined,
-                  typeof jobInfo?.path === "string" ? jobInfo.path : undefined,
-                  jobInfo?.kind,
-                ]) {
-                  if (typeof candidate === "string" && candidate.length > 0) {
-                    set.delete(candidate);
+                  jobInfo?.id,
+                ];
+                let deletedSpecific = false;
+                for (const candidate of specificCandidates) {
+                  if (typeof candidate === "string" && candidate.length > 0 && set.delete(candidate)) {
+                    deletedSpecific = true;
+                  }
+                }
+                if (!deletedSpecific) {
+                  for (const candidate of [
+                    backgroundJobKey(jobInfo),
+                    typeof jobInfo?.path === "string" && typeof jobInfo?.kind === "string"
+                      ? `${jobInfo.kind}:${jobInfo.path}`
+                      : undefined,
+                    typeof jobInfo?.path === "string" ? jobInfo.path : undefined,
+                    jobInfo?.kind,
+                  ]) {
+                    if (typeof candidate === "string" && candidate.length > 0) {
+                      set.delete(candidate);
+                    }
                   }
                 }
                 if (set.size === 0) {
@@ -2894,7 +3080,12 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               existing.sanitizer = resolveSanitizerOptions(nextConfig);
               existing.engine.updateConfig(nextConfig);
             } catch {
-              // Keep previous engine state intact if reload encounters a transient/invalid config read.
+              // Keep previous engine state intact, but record a visible audit error so operators know reload was rejected.
+              recordGuardianEvent({
+                kind: "inspection-error",
+                rules: ["config-reload-failed"],
+                reasons: [{ rule: "config-reload-failed", code: "config-reload-failed" }],
+              }, runtimeKey);
             }
           }
           toastNotifiersByDirectory.clear();
@@ -2985,7 +3176,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 const messages = await context.session.context({ sessionID });
                 const normalized = normalizeV2Messages(messages, sessionID);
                 fetchedNormalizedMessages = normalized;
-                const contract = extractTaskContract(normalized);
+                const contract = extractTaskContract(normalized, sessionID);
                 if (contract) setSessionContract(sessionID, contract);
                 return normalized;
               },
@@ -3049,7 +3240,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                       if (!idleSignal.aborted) cacheAgentCapability(sessionID, hostProfile);
                       return hostProfile;
                     }
-                    if (meshProfile && meshProfile.capability === "write-allowed") {
+                    if (
+                    meshProfile &&
+                    meshProfile.capability === "write-allowed" &&
+                    !hasConcreteHostRestriction(hostProfile)
+                  ) {
                       const resolved: AgentMutationProfile = {
                         capability: "write-allowed",
                         evidence: {
@@ -3084,6 +3279,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           reasons: [{ rule: "v2-event-stream-error", code: "v2-event-stream-error" }],
         }, directory);
         // Record only the redacted error; never write host exceptions to the TUI.
+      }
+
+      if (Date.now() - streamStartedAt >= HEALTHY_STREAM_RESET_MS) {
+        attempt = -1;
+        continue;
       }
 
       if (attempt === 2) {

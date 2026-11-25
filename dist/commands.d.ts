@@ -1,3 +1,4 @@
+import { readGuardianStatus } from "./telemetry.js";
 export declare const GUARDIAN_COMMANDS: readonly [{
     readonly id: "status";
     readonly title: "Guardian: Status";
@@ -32,6 +33,6 @@ export interface GuardianReport {
     title: string;
     message: string;
 }
-export declare function guardianCommandReport(command: Exclude<GuardianCommand, "reset">, directory: string, installedVersion: string, options?: unknown): Promise<GuardianReport>;
+export declare function guardianCommandReport(command: Exclude<GuardianCommand, "reset">, directory: string, installedVersion: string, options?: unknown, remoteStatus?: ReturnType<typeof readGuardianStatus>): Promise<GuardianReport>;
 /** Must only be invoked after explicit UI confirmation. */
 export declare function guardianResetReport(directory: string): GuardianReport;

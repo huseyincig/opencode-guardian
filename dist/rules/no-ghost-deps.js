@@ -106,7 +106,7 @@ function readManifestBounded(filePath, stopRoot, maxBytes = MAX_MANIFEST_FILE_BY
     }
     let fd;
     try {
-        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
         const stat = fs.fstatSync(fd);
         if (!stat.isFile() || stat.size > maxBytes) {
             return { rejected: true };
@@ -134,7 +134,7 @@ function nearestFile(directory, names, dynamicName, stopRoot) {
         resolvedStop = path.resolve(stopRoot);
         const rel = path.relative(resolvedStop, current);
         if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
-            resolvedStop = undefined;
+            return null;
         }
     }
     while (true) {
@@ -272,7 +272,7 @@ function parseRequirementsFile(filePath, root, seen = new Set(), budget = {
     let text = "";
     let fd;
     try {
-        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
         const stat = fs.fstatSync(fd);
         if (!stat.isFile() ||
             stat.size > MAX_REQUIREMENTS_FILE_BYTES ||
@@ -1210,6 +1210,7 @@ function resolveTargetFile(input) {
     const patch = input.patchText ?? input.patch;
     return (input.path ??
         input.targetFile ??
+        input.TargetFile ??
         input.filePath ??
         input.file ??
         extractFilePathFromPatch(patch));
@@ -1494,14 +1495,19 @@ export const noGhostDepsRule = {
                     continue;
                 const input = part.state.input;
                 const targetFile = resolveTargetFile(input);
-                if (typeof input.content === "string") {
-                    checkCode(input.content, "file content", targetFile);
-                }
-                if (typeof input.new_string === "string") {
-                    checkCode(input.new_string, "file edit", targetFile);
-                }
-                if (typeof input.newString === "string") {
-                    checkCode(input.newString, "file edit", targetFile);
+                for (const [key, label] of [
+                    ["content", "file content"],
+                    ["file_text", "file content"],
+                    ["CodeContent", "file content"],
+                    ["text", "file content"],
+                    ["new_string", "file edit"],
+                    ["newString", "file edit"],
+                    ["new_str", "file edit"],
+                    ["ReplacementContent", "file edit"],
+                ]) {
+                    if (typeof input[key] === "string") {
+                        checkCode(input[key], label, targetFile);
+                    }
                 }
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkCode(edit.text, "structured file edit", edit.filePath);

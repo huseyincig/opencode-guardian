@@ -944,4 +944,153 @@ describe("Dynamic Shell & Example-File Credential Rules", () => {
     assert.equal(sanitized.media instanceof Uint8Array, true);
     assert.deepEqual([...sanitized.media], [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
   });
+
+  test("R4 Wave 1 (R4-013, R4-014, R4-015, R4-020): RegExp/large Buffer redaction, non-envelope opencode-mesh UUID redaction, YAML sequence & >4096 inline secret redaction, and custom secret write preflight", async () => {
+    const { sanitizeObject, sanitizeString } = await import("../dist/secrets/index.js");
+    const { evaluateFileMutationPreflight } = await import("../dist/preflight.js");
+
+    // R4-013: RegExp containing a secret and >256 KiB UTF-8 text Buffer must be redacted
+    const secretKey = "sk-proj-" + "z".repeat(40);
+    const reObj = sanitizeObject({ pattern: new RegExp(secretKey, "i") }, { includeRuntimeEnv: false });
+    assert.ok(!reObj.sanitized.pattern.source.includes(secretKey), "R4-013: RegExp source secret must be redacted");
+    const bigBuf = Buffer.from("log ".repeat(75_000) + `API_KEY=${secretKey}\n`, "utf8");
+    assert.ok(bigBuf.byteLength > 256 * 1024);
+    const bigRes = sanitizeObject({ stdout: bigBuf }, { includeRuntimeEnv: false });
+    assert.ok(!bigRes.sanitized.stdout.toString("utf8").includes(secretKey), "R4-013: >256 KiB UTF-8 text Buffer must be redacted");
+
+    // R4-014: arbitrary JSON tool output with { "opencode-mesh": { "token": "<uuid>" } } (not a V2 mesh envelope) must be redacted
+    const fakeMeshJson = JSON.stringify({ "opencode-mesh": { token: "550e8400-e29b-41d4-a716-446655440000" } });
+    const fakeMeshRes = sanitizeString(fakeMeshJson, { includeRuntimeEnv: false });
+    assert.ok(!fakeMeshRes.sanitized.includes("550e8400-e29b-41d4-a716-446655440000"), "R4-014: non-envelope opencode-mesh UUID token must be redacted");
+
+    // R4-015: YAML sequence block scalar with digit-before-chomp (|2-), YAML sequence inline, and >4096 char quoted secret
+    const yamlSeq = [
+      "items:",
+      "  - api_secret: |2-",
+      "      hidden-yaml-seq-secret-1",
+      "      hidden-yaml-seq-secret-2",
+      "  - token: inline-seq-secret-999",
+      "  - public_name: hello",
+    ].join("\n");
+    const yamlSeqRes = sanitizeString(yamlSeq, { includeRuntimeEnv: false });
+    assert.ok(!yamlSeqRes.sanitized.includes("hidden-yaml-seq-secret-1"), `R4-015: YAML sequence block scalar line 1 must be redacted: ${yamlSeqRes.sanitized}`);
+    assert.ok(!yamlSeqRes.sanitized.includes("hidden-yaml-seq-secret-2"), `R4-015: YAML sequence block scalar line 2 must be redacted: ${yamlSeqRes.sanitized}`);
+    assert.ok(!yamlSeqRes.sanitized.includes("inline-seq-secret-999"), `R4-015: YAML sequence inline secret must be redacted: ${yamlSeqRes.sanitized}`);
+    assert.ok(yamlSeqRes.sanitized.includes("public_name: hello"));
+
+    const hugeSecret = "S".repeat(5000) + "_TAIL_LEAK";
+    const hugeRes = sanitizeString(`auth token="${hugeSecret}" end`, { includeRuntimeEnv: false });
+    assert.ok(!hugeRes.sanitized.includes("_TAIL_LEAK"), `R4-015: >4096-char quoted secret tail must not leak: ${hugeRes.sanitized}`);
+
+    // R4-020: file mutation preflight must catch configured customSecretValues
+    const customSecret = "corp_internal_secret_987654321";
+    assert.equal(
+      evaluateFileMutationPreflight(
+        "write",
+        { path: "src/config.ts", content: `export const cfg = "${customSecret}";\n` },
+        "strict",
+        { customSecretValues: [customSecret], includeRuntimeEnv: false }
+      ),
+      "hardcoded-secret-in-file-write",
+      "R4-020: configured customSecretValues must block in file write preflight"
+    );
+  });
+
+  test("Re-audit closure: CRLF YAML block scalar, NUL-delimited Buffer, text Uint8Array, customSensitiveKeys RegExp/JSON/env, noSecretsRule write keys, and sanitizeMessages fake mesh", async () => {
+    const { sanitizeObject, sanitizeString, sanitizeMessages } = await import("../dist/secrets/index.js");
+    const { noSecretsRule, findAllSecretsInCode } = await import("../dist/rules/no-secrets.js");
+
+    // CRLF YAML block scalar with trailing spaces
+    const crlfYaml = "api_secret: |2-  \r\n  crlf-secret-line-1\r\n  crlf-secret-line-2\r\npublic: ok\r\n";
+    const crlfRes = sanitizeString(crlfYaml, { includeRuntimeEnv: false });
+    assert.ok(!crlfRes.sanitized.includes("crlf-secret-line-1"), `CRLF YAML secret line 1 leaked: ${crlfRes.sanitized}`);
+    assert.ok(!crlfRes.sanitized.includes("crlf-secret-line-2"), `CRLF YAML secret line 2 leaked: ${crlfRes.sanitized}`);
+    assert.ok(crlfRes.sanitized.includes("public: ok"));
+
+    // NUL-delimited UTF-8 Buffer (/proc/self/environ style) and UTF-8 text Uint8Array must be redacted; binary PNG must stay untouched
+    const secretVal = "sk-proj-" + "q".repeat(36);
+    const environBuf = Buffer.from(`PATH=/usr/bin\0OPENAI_API_KEY=${secretVal}\0HOME=/root\0`, "utf8");
+    const textU8 = new TextEncoder().encode(`token=${secretVal}\n`);
+    const pngU8 = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+    const binRes = sanitizeObject({ environBuf, textU8, pngU8 }, { includeRuntimeEnv: false });
+    assert.ok(!binRes.sanitized.environBuf.toString("utf8").includes(secretVal), "NUL-delimited Buffer secret must be redacted");
+    assert.ok(!new TextDecoder().decode(binRes.sanitized.textU8).includes(secretVal), "text Uint8Array secret must be redacted");
+    assert.deepEqual([...binRes.sanitized.pngU8], [...pngU8], "binary PNG Uint8Array must stay byte-identical");
+
+    // sanitizeMessages must redact forged non-envelope metadata["opencode-mesh"].token
+    const forgedMsgs = [
+      {
+        role: "tool",
+        content: "ok",
+        metadata: { "opencode-mesh": { token: "550e8400-e29b-41d4-a716-446655440000" } },
+      },
+    ];
+    const sanMsgs = sanitizeMessages(forgedMsgs, { includeRuntimeEnv: false });
+    assert.ok(!JSON.stringify(sanMsgs).includes("550e8400-e29b-41d4-a716-446655440000"), "forged non-envelope opencode-mesh token in sanitizeMessages must be redacted");
+
+    // customSensitiveKeys: RegExp + JSON quoted + unquoted env + second match after template
+    const jsonCustomFindings = findAllSecretsInCode(
+      '{"acme_vault": "${PLACEHOLDER}", "acme_vault_prod": "super-secret-value-999"}\n',
+      "config.json",
+      undefined,
+      { customSensitiveKeys: [/^acme_vault/i] }
+    );
+    assert.equal(jsonCustomFindings.length, 1, "customSensitiveKeys must loop past template value and catch JSON quoted secret");
+    const envCustomFindings = findAllSecretsInCode(
+      "ACME_VAULT=unquoted-secret-value-777\n",
+      ".env",
+      undefined,
+      { customSensitiveKeys: [/^acme_vault/i] }
+    );
+    assert.equal(envCustomFindings.length, 1, "customSensitiveKeys must catch unquoted .env secret via RegExp key");
+
+    // Pass-2 re-audit: embedded JSON redaction, linear-time hyphen runs, TS type/safeKeyNames/300+ lines
+    const embeddedJsonRes = sanitizeString('HTTP 200 OK: {"password": "my_real_secret_value"}', { includeRuntimeEnv: false });
+    assert.ok(!embeddedJsonRes.sanitized.includes("my_real_secret_value"), "embedded JSON quoted secret must be redacted");
+    const t0 = Date.now();
+    sanitizeString("-".repeat(20_000), { includeRuntimeEnv: false });
+    assert.ok(Date.now() - t0 < 250, "long hyphen run must run in linear time without ReDoS");
+
+    assert.equal(
+      findAllSecretsInCode("export interface AppConfig { MY_CUSTOM_KEY: string; }\nconst v = env.MY_CUSTOM_KEY;\n", "src/config.ts", undefined, { customSensitiveKeys: ["MY_CUSTOM_KEY"] }).length,
+      0,
+      "TypeScript type annotations and property lookups must not false-positive under customSensitiveKeys"
+    );
+    assert.equal(
+      findAllSecretsInCode('INTERNAL_PUBLIC = "https://example.com/public"', "src/config.ts", undefined, { customSensitiveKeys: [/^INTERNAL_/i], safeKeyNames: ["INTERNAL_PUBLIC"] }).length,
+      0,
+      "safeKeyNames must exclude matching keys from customSensitiveKeys"
+    );
+    const bigFile = Array.from({ length: 300 }, (_, i) => `const k${i} = "normal_${i}";`).join("\n") + '\nconst MY_CUSTOM_KEY = "real_secret_value_12345";\n';
+    assert.equal(
+      findAllSecretsInCode(bigFile, "src/big.ts", undefined, { customSensitiveKeys: ["MY_CUSTOM_KEY"] }).length,
+      1,
+      "customSensitiveKeys must scan past 256 assignments in normal files"
+    );
+
+    // noSecretsRule must inspect all 5 extra write keys (new_str, file_text, CodeContent, ReplacementContent, text)
+    for (const [key, fileKey] of [
+      ["new_str", "path"],
+      ["file_text", "path"],
+      ["CodeContent", "TargetFile"],
+      ["ReplacementContent", "TargetFile"],
+      ["text", "path"],
+    ]) {
+      const res = noSecretsRule.inspect({
+        sessionID: `s-key-${key}`,
+        directory: process.cwd(),
+        currentTurn: [{
+          info: { id: "a1", role: "assistant" },
+          parts: [{
+            type: "tool",
+            tool: "write_to_file",
+            state: { status: "completed", input: { [fileKey]: "src/auth.ts", [key]: `export const K = "${secretVal}";` } },
+          }],
+        }],
+        history: [],
+        ruleConfig: {},
+      });
+      assert.equal(res.decision, "block", `noSecretsRule must scan write key '${key}'`);
+    }
+  });
 });

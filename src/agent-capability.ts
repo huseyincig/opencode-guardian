@@ -1,4 +1,6 @@
-import { extractToolAction, isFileMutationTool, isShellExecutionTool } from "./preflight.js";
+import { isFileMutationTool, isShellExecutionTool } from "./preflight.js";
+import { isKnownReadOnlyTool } from "./tool-input.js";
+export { KNOWN_READ_ONLY_TOOLS, isKnownReadOnlyTool } from "./tool-input.js";
 import type { SessionMessage } from "./types.js";
 
 export type AgentMutationCapability =
@@ -19,23 +21,6 @@ export interface AgentMutationEvidence {
 export interface AgentMutationProfile {
   capability: AgentMutationCapability;
   evidence: AgentMutationEvidence;
-}
-
-export const KNOWN_READ_ONLY_TOOLS = new Set([
-  "read_file", "view_file", "cat", "read", "file_read", "read_text_file",
-  "glob", "list", "file_list", "dir", "ls", "directory_list", "list_files", "file_search",
-  "grep", "search", "code_search", "find",
-  "webfetch", "web_fetch", "websearch", "web_search", "read_url_content", "fetch",
-  "ask_question", "question", "form", "form_create", "form_get", "form_reply", "form_list",
-  "subagent", "task",
-  "lsp", "definition", "hover", "references", "document_symbols",
-  "status", "git_status", "vcs", "diff", "git_diff", "log", "git_log", "show", "git_show",
-]);
-
-export function isKnownReadOnlyTool(toolName: string): boolean {
-  const normalized = toolName.toLowerCase().trim();
-  const last = extractToolAction(normalized);
-  return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
 }
 
 export interface V2PermissionRule {
@@ -399,6 +384,7 @@ export async function resolveV2AgentCapability(
   // Query the agent catalog in the active session/worktree location and merge
   // agent base permissions with session-scoped overrides (Permission.merge order).
   let foundAgent: any;
+  let agentListFailed = false;
   if (resolvedAgentName && typeof context.agent?.list === "function") {
     try {
       const agentList = await context.agent.list(
@@ -415,6 +401,7 @@ export async function resolveV2AgentCapability(
         );
       }
     } catch {
+      agentListFailed = true;
       if (!sessionPermissions || sessionPermissions.length === 0) {
         return {
           capability: "unknown",
@@ -440,11 +427,15 @@ export async function resolveV2AgentCapability(
       ...(foundAgent?.tools as Record<string, boolean> | undefined),
       ...messageTools,
     };
-    return evaluateAgentMutationProfile({
+    const profile = evaluateAgentMutationProfile({
       name: foundAgent?.name ?? foundAgent?.id ?? resolvedAgentName,
       v2Permissions: mergedPermissions,
       tools: mergedTools,
     });
+    if (agentListFailed && profile.capability === "unknown") {
+      profile.evidence.reasons.push("context.agent.list query failed");
+    }
+    return profile;
   }
 
   return {

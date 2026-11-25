@@ -1,4 +1,32 @@
 /**
+ * Canonical provider-agnostic shell tool action names shared across
+ * preflight enforcement and turn evidence collection.
+ */
+export const KNOWN_SHELL_TOOLS = new Set([
+    "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
+    "execute_command", "command", "run_command", "run_shell_command",
+    "run_terminal_cmd", "powershell", "pwsh", "cmd", "privileged_shell_exec",
+]);
+/**
+ * Canonical provider-agnostic read-only tool action names shared across
+ * agent capability classification and turn evidence collection.
+ */
+export const KNOWN_READ_ONLY_TOOLS = new Set([
+    "read_file", "view_file", "cat", "read", "file_read", "read_text_file",
+    "glob", "list", "file_list", "dir", "ls", "directory_list", "list_files", "file_search",
+    "grep", "search", "code_search", "find",
+    "webfetch", "web_fetch", "websearch", "web_search", "read_url_content", "fetch",
+    "ask_question", "question", "form", "form_create", "form_get", "form_reply", "form_list",
+    "subagent", "task",
+    "lsp", "definition", "hover", "references", "document_symbols",
+    "status", "git_status", "vcs", "diff", "git_diff", "log", "git_log", "show", "git_show",
+]);
+export function isKnownReadOnlyTool(toolName) {
+    const normalized = toolName.toLowerCase().trim();
+    const last = extractToolAction(normalized);
+    return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
+}
+/**
  * Extracts the provider-agnostic action name from built-in, dotted/colon/slash-namespaced,
  * or MCP-prefixed tool identifiers (e.g. `mcp__<provider>__<action>`, `mcp.<provider>.<action>`).
  * Never hardcodes or depends on any third-party MCP provider name.
@@ -23,11 +51,36 @@ export function quoteProcessArgument(value) {
         ? value
         : "'" + value.replace(/'/g, "'\\''") + "'";
 }
+export const FILE_WRITE_WHOLE_KEYS = [
+    "content",
+    "file_text",
+    "CodeContent",
+    "text",
+];
+export const FILE_WRITE_EDIT_KEYS = [
+    "new_string",
+    "newString",
+    "new_str",
+    "ReplacementContent",
+];
+export const FILE_WRITE_ALL_KEYS = [
+    ...FILE_WRITE_WHOLE_KEYS,
+    ...FILE_WRITE_EDIT_KEYS,
+];
+export function extractToolTargetFile(input) {
+    for (const key of ["path", "targetFile", "TargetFile", "filePath", "file"]) {
+        const val = input[key];
+        if (typeof val === "string" && val.length > 0)
+            return val;
+    }
+    return undefined;
+}
 /** Preserve per-file boundaries in unified and native apply_patch input. */
 export function splitFilePatches(value) {
     if (typeof value !== "string" || !value)
         return [];
-    const lines = value.split("\n");
+    const normalized = value.replace(/\r\n?/g, "\n");
+    const lines = normalized.split("\n");
     const sections = [];
     let current;
     let nativeSection = false;
@@ -52,7 +105,7 @@ export function splitFilePatches(value) {
         // of file headers. Only exhausted hunk counts permit a new file section.
         if (current && (oldRemaining > 0 || newRemaining > 0)) {
             current.patch += line + "\n";
-            if (line.startsWith(" ")) {
+            if (line.startsWith(" ") || line === "") {
                 oldRemaining--;
                 newRemaining--;
             }
@@ -102,7 +155,7 @@ export function splitFilePatches(value) {
     }
     if (current)
         sections.push(current);
-    return sections.length ? sections : [{ patch: value, deleted: false }];
+    return sections.length ? sections : [{ patch: normalized, deleted: false }];
 }
 export function extractToolCommand(input) {
     return typeof input.command === "string"
@@ -138,42 +191,64 @@ export function extractLikelyShellMutation(input) {
         /\b(?:python(?:3)?|node)\b[\s\S]*(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|open\s*\([^)]*,\s*["'][wax])/i.test(command);
     return mutatesFile ? command : "";
 }
+const STRUCTURED_EDIT_TEXT_KEYS = [
+    "content",
+    "text",
+    "new_text",
+    "newText",
+    "replacement",
+    "ReplacementContent",
+    "CodeContent",
+    "file_text",
+    "new_string",
+    "newString",
+    "new_str",
+];
+/**
+ * Normalizes replacement text embedded in structured edit arrays and reports
+ * whether any edit entry lacks a recognized inspectable text field.
+ */
+export function extractStructuredEditInspection(input, defaultFilePath) {
+    if (!Array.isArray(input.edits)) {
+        return { texts: [], hasUninspectableEdit: false };
+    }
+    const texts = [];
+    let hasUninspectableEdit = false;
+    for (const raw of input.edits) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            hasUninspectableEdit = true;
+            continue;
+        }
+        const edit = raw;
+        const filePath = (typeof edit.path === "string" ? edit.path : undefined) ??
+            (typeof edit.targetFile === "string" ? edit.targetFile : undefined) ??
+            (typeof edit.TargetFile === "string" ? edit.TargetFile : undefined) ??
+            (typeof edit.filePath === "string" ? edit.filePath : undefined) ??
+            (typeof edit.file === "string" ? edit.file : undefined) ??
+            defaultFilePath;
+        let extractedAny = false;
+        for (const key of STRUCTURED_EDIT_TEXT_KEYS) {
+            const value = edit[key];
+            // Empty replacements delete content and still represent real edits.
+            if (typeof value !== "string")
+                continue;
+            extractedAny = true;
+            texts.push({
+                text: value,
+                ...(filePath ? { filePath } : {}),
+            });
+        }
+        if (!extractedAny) {
+            hasUninspectableEdit = true;
+        }
+    }
+    return { texts, hasUninspectableEdit };
+}
 /**
  * Normalizes replacement text embedded in structured edit arrays.
  * Providers use several field aliases; rules should inspect the replacement
  * payload rather than treating the outer edits array as opaque.
  */
 export function extractStructuredEditTexts(input, defaultFilePath) {
-    if (!Array.isArray(input.edits))
-        return [];
-    const output = [];
-    for (const raw of input.edits) {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw))
-            continue;
-        const edit = raw;
-        const filePath = (typeof edit.path === "string" ? edit.path : undefined) ??
-            (typeof edit.targetFile === "string" ? edit.targetFile : undefined) ??
-            (typeof edit.filePath === "string" ? edit.filePath : undefined) ??
-            (typeof edit.file === "string" ? edit.file : undefined) ??
-            defaultFilePath;
-        for (const key of [
-            "content",
-            "text",
-            "new_text",
-            "newText",
-            "replacement",
-            "new_string",
-            "newString",
-        ]) {
-            const value = edit[key];
-            // Empty replacements delete content and still represent real edits.
-            if (typeof value !== "string")
-                continue;
-            output.push({
-                text: value,
-                ...(filePath ? { filePath } : {}),
-            });
-        }
-    }
-    return output;
+    return extractStructuredEditInspection(input, defaultFilePath).texts;
 }

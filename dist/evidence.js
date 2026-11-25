@@ -1,9 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
 import { captureBeforeEdit, finishEditObservation } from "./edit-integrity.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolAction, extractToolCommand, splitFilePatches } from "./tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolAction, extractToolCommand, isKnownReadOnlyTool, KNOWN_SHELL_TOOLS, splitFilePatches } from "./tool-input.js";
 import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
@@ -54,11 +55,7 @@ function isCommandExecutionToolName(toolName) {
         last === "tool" ||
         last === "execute" ||
         last === "process_start" ||
-        [
-            "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
-            "execute_command", "command", "run_command", "run_shell_command",
-            "powershell", "pwsh", "cmd", "privileged_shell_exec", "run_terminal_cmd",
-        ].includes(last));
+        KNOWN_SHELL_TOOLS.has(last));
 }
 function commandFromPart(part) {
     const input = part.state?.input;
@@ -423,10 +420,7 @@ function isLikelyShellFileDeletion(command, depth = 0) {
         ...literalShellScripts(command),
     ].some((nested) => isLikelyShellFileDeletion(nested, depth + 1));
 }
-function hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds) {
-    if (!command || !/;|\|\|/.test(command))
-        return false;
-    // Split top-level sequential separators while respecting single/double quotes and escapes.
+function splitTopLevelShellSegments(command) {
     const segments = [];
     let current = "";
     let quote = null;
@@ -454,8 +448,8 @@ function hasTrailingSeparatorAfterVerification(command, toolName, verificationKi
             quote = ch;
             continue;
         }
-        if (ch === ";") {
-            segments.push({ text: current.trim(), followedBy: ";" });
+        if (ch === ";" || ch === "\n") {
+            segments.push({ text: current.trim(), followedBy: ch });
             current = "";
             continue;
         }
@@ -471,27 +465,260 @@ function hasTrailingSeparatorAfterVerification(command, toolName, verificationKi
             i++;
             continue;
         }
+        // Single background '&' (exclude redirections like 2>&1, >&2, <&0, &>, &>>).
+        if (ch === "&") {
+            const prev = command[i - 1];
+            const next = command[i + 1];
+            const isRedirection = prev === ">" || prev === "<" || next === ">";
+            if (!isRedirection) {
+                segments.push({ text: current.trim(), followedBy: "&" });
+                current = "";
+                continue;
+            }
+        }
         current += ch;
     }
     if (current.trim())
         segments.push({ text: current.trim() });
-    for (let idx = 0; idx < segments.length - 1; idx++) {
-        const seg = segments[idx];
-        if (seg.followedBy !== ";" && seg.followedBy !== "||")
+    return segments;
+}
+function hasUnquotedSinglePipe(text) {
+    let quote = null;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (escaped) {
+            escaped = false;
             continue;
-        if (!segments[idx + 1]?.text)
+        }
+        if (ch === "\\" && quote !== "'") {
+            escaped = true;
             continue;
-        const segKinds = classifyCommand(seg.text, toolName);
-        if (segKinds.some((k) => verificationKinds.has(k))) {
+        }
+        if (quote) {
+            if (ch === quote)
+                quote = null;
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            quote = ch;
+            continue;
+        }
+        if (ch === "|") {
+            if (text[i + 1] === "|") {
+                i++;
+                continue;
+            }
             return true;
         }
     }
     return false;
 }
+function hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds) {
+    if (!command || !/[;\n&]|\|\|/.test(command))
+        return false;
+    const segments = splitTopLevelShellSegments(command);
+    let sawVerificationInAndChain = false;
+    for (let idx = 0; idx < segments.length; idx++) {
+        const seg = segments[idx];
+        const sep = seg.followedBy;
+        const isVerificationSeg = seg.text.length > 0 &&
+            classifyCommand(seg.text, toolName).some((k) => verificationKinds.has(k));
+        if (isVerificationSeg) {
+            sawVerificationInAndChain = true;
+        }
+        if (sep === "&&") {
+            continue;
+        }
+        if (sawVerificationInAndChain && (sep === ";" || sep === "||" || sep === "\n" || sep === "&")) {
+            const hasTrailing = sep === "&" || segments.slice(idx + 1).some((nextSeg) => nextSeg.text.length > 0);
+            if (hasTrailing) {
+                return true;
+            }
+        }
+        sawVerificationInAndChain = false;
+    }
+    return false;
+}
+function hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds) {
+    if (!command || !hasUnquotedSinglePipe(command))
+        return false;
+    const segments = splitTopLevelShellSegments(command);
+    let pipefailScope = "none";
+    let prevSep;
+    for (const seg of segments) {
+        const trimmed = seg.text.trim();
+        if (!trimmed) {
+            if (seg.followedBy && seg.followedBy !== "&&" && pipefailScope === "and-chain") {
+                pipefailScope = "none";
+            }
+            prevSep = seg.followedBy;
+            continue;
+        }
+        const isPiped = hasUnquotedSinglePipe(trimmed);
+        if (!isPiped && /^set\b/i.test(trimmed)) {
+            if (/(?:^|\s)-[a-z]*o\s+pipefail\b/i.test(trimmed) &&
+                seg.followedBy !== "&" &&
+                seg.followedBy !== "||") {
+                if (prevSep === undefined || prevSep === ";" || prevSep === "\n") {
+                    pipefailScope = "unconditional";
+                }
+                else if (prevSep === "&&" && seg.followedBy === "&&") {
+                    pipefailScope = "and-chain";
+                }
+            }
+            if (/(?:^|\s)\+[a-z]*o\s+pipefail\b/i.test(trimmed)) {
+                pipefailScope = "none";
+            }
+        }
+        if (isPiped) {
+            const segKinds = classifyCommand(trimmed, toolName);
+            if (segKinds.some((k) => verificationKinds.has(k)) && pipefailScope === "none") {
+                return true;
+            }
+        }
+        if (seg.followedBy && seg.followedBy !== "&&" && pipefailScope === "and-chain") {
+            pipefailScope = "none";
+        }
+        prevSep = seg.followedBy;
+    }
+    return false;
+}
+function analyzeCommandWorkingDirectory(input, command, toolName, verificationKinds, projectDirectory) {
+    const rawCwd = (typeof input?.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined) ??
+        (typeof input?.workdir === "string" && input.workdir.trim() ? input.workdir.trim() : undefined) ??
+        (typeof input?.workingDirectory === "string" && input.workingDirectory.trim() ? input.workingDirectory.trim() : undefined);
+    const expandTilde = (p) => {
+        if (p === "~")
+            return os.homedir();
+        if (p.startsWith("~/") || p.startsWith("~\\")) {
+            return path.join(os.homedir(), p.slice(2));
+        }
+        return p;
+    };
+    let resolved = rawCwd
+        ? (projectDirectory ? path.resolve(projectDirectory, expandTilde(rawCwd)) : path.resolve(expandTilde(rawCwd)))
+        : undefined;
+    let hasForeignVerificationCwd = false;
+    let sawVerificationSegment = false;
+    const cwdStack = [];
+    if (command) {
+        const segments = splitTopLevelShellSegments(command);
+        for (const seg of segments) {
+            const rawTrimmed = seg.text.trim();
+            if (!rawTrimmed)
+                continue;
+            // Handle leading subshell `(` and brace group `{` wrappers so `(cd /tmp && npm test)`
+            // tracks `cd /tmp` inside the subshell and restores outer cwd when `)` closes.
+            let inner = rawTrimmed;
+            while (inner.startsWith("(") || inner.startsWith("{")) {
+                if (inner.startsWith("(")) {
+                    cwdStack.push(resolved);
+                    inner = inner.slice(1).trimStart();
+                }
+                else {
+                    inner = inner.slice(1).trimStart();
+                }
+            }
+            const netUnmatchedCloseParens = (text) => {
+                let quote = null;
+                let escaped = false;
+                let balance = 0;
+                let unmatched = 0;
+                for (let i = 0; i < text.length; i++) {
+                    const ch = text[i];
+                    if (escaped) {
+                        escaped = false;
+                        continue;
+                    }
+                    if (ch === "\\" && quote !== "'") {
+                        escaped = true;
+                        continue;
+                    }
+                    if (quote) {
+                        if (ch === quote)
+                            quote = null;
+                        continue;
+                    }
+                    if (ch === "'" || ch === '"') {
+                        quote = ch;
+                        continue;
+                    }
+                    if (ch === "(")
+                        balance++;
+                    else if (ch === ")") {
+                        if (balance > 0)
+                            balance--;
+                        else
+                            unmatched++;
+                    }
+                }
+                return unmatched;
+            };
+            let closeSubshells = netUnmatchedCloseParens(inner);
+            let toStrip = closeSubshells;
+            while (toStrip > 0 && inner.endsWith(")")) {
+                inner = inner.slice(0, -1).trimEnd();
+                toStrip--;
+            }
+            while (inner.endsWith("}")) {
+                inner = inner.slice(0, -1).trimEnd();
+            }
+            if (inner) {
+                if (/^cd(?:\s|$)/i.test(inner)) {
+                    if (/^cd\s*$/i.test(inner)) {
+                        resolved = os.homedir();
+                    }
+                    else {
+                        const cdMatch = /^cd(?:\s+(?:-[LP]+|--))*\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*$/i.exec(inner);
+                        const target = cdMatch ? (cdMatch[1] ?? cdMatch[2] ?? cdMatch[3]) : undefined;
+                        if (target && target !== "-") {
+                            const expanded = expandTilde(target);
+                            const base = resolved ?? projectDirectory;
+                            resolved = base ? path.resolve(base, expanded) : path.resolve(expanded);
+                        }
+                    }
+                }
+                else {
+                    const segKinds = classifyCommand(inner, toolName);
+                    if (segKinds.some((k) => verificationKinds.has(k))) {
+                        sawVerificationSegment = true;
+                        if (projectDirectory && resolved && !isPathInsideDirectory(resolved, projectDirectory)) {
+                            hasForeignVerificationCwd = true;
+                        }
+                    }
+                }
+            }
+            while (closeSubshells > 0 && cwdStack.length > 0) {
+                resolved = cwdStack.pop();
+                closeSubshells--;
+            }
+        }
+    }
+    if (!sawVerificationSegment && projectDirectory && resolved && !isPathInsideDirectory(resolved, projectDirectory)) {
+        hasForeignVerificationCwd = true;
+    }
+    return { ...(resolved ? { finalCwd: resolved } : {}), hasForeignVerificationCwd };
+}
+function isPathInsideDirectory(targetDir, rootDir) {
+    try {
+        const realRoot = fs.existsSync(rootDir) ? fs.realpathSync(path.resolve(rootDir)) : path.resolve(rootDir);
+        const realTarget = fs.existsSync(targetDir) ? fs.realpathSync(path.resolve(targetDir)) : path.resolve(targetDir);
+        const rel = path.relative(realRoot, realTarget);
+        return rel === "" || (!rel.startsWith(".." + path.sep) && rel !== ".." && !path.isAbsolute(rel));
+    }
+    catch {
+        return false;
+    }
+}
 function hasFileMutation(part) {
     const input = part.state?.input;
     if (!input)
         return false;
+    const toolName = toolNameFromPart(part);
+    if (toolName && isKnownReadOnlyTool(toolName)) {
+        return false;
+    }
     const action = typeof input.action === "string" ? input.action.toLowerCase() : "";
     if (action === "delete" || action === "remove" || action === "move" || action === "copy")
         return true;
@@ -517,7 +744,7 @@ function hasFileMutation(part) {
     }
     return Boolean(extractLikelyShellMutation(input));
 }
-function recordFromPart(part, sequence) {
+function recordFromPart(part, sequence, directory) {
     if (part.type !== "tool" || !part.state)
         return [];
     const command = commandFromPart(part);
@@ -526,7 +753,6 @@ function recordFromPart(part, sequence) {
     const outcome = statusFromPart(part, outputText);
     const baseSignature = `${toolName}:${stableStringify(part.state.input ?? {})}`;
     const records = [];
-    const kinds = classifyCommand(command, toolName);
     const verificationKinds = new Set([
         "test",
         "build",
@@ -534,11 +760,19 @@ function recordFromPart(part, sequence) {
         "lint",
         "audit",
     ]);
+    const cwdAnalysis = analyzeCommandWorkingDirectory(part.state.input, command, toolName, verificationKinds, directory);
+    const executionCwd = cwdAnalysis.finalCwd;
+    const foreignCwd = cwdAnalysis.hasForeignVerificationCwd;
+    const kinds = classifyCommand(command, toolName);
     const verificationKindCount = kinds.filter((kind) => verificationKinds.has(kind)).length;
-    const nonSequentialCompound = (verificationKindCount > 1 && /;|\|\|/.test(command)) ||
+    const hasNonAndSeparator = Boolean(command) &&
+        splitTopLevelShellSegments(command).some((seg) => seg.followedBy === ";" ||
+            seg.followedBy === "\n" ||
+            seg.followedBy === "&" ||
+            seg.followedBy === "||");
+    const nonSequentialCompound = (verificationKindCount > 1 && hasNonAndSeparator) ||
         hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds);
-    const pipedWithoutPipefail = /(?:^|[^|])\|(?!\|)/.test(command) &&
-        !/\bset\s+-[a-z]*o\s+pipefail\b/i.test(command);
+    const pipedWithoutPipefail = hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds);
     for (const kind of kinds) {
         const commandStatus = command &&
             outcome.status === "success" &&
@@ -557,17 +791,19 @@ function recordFromPart(part, sequence) {
                 /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText)) ||
             part.state.metadata?.cancelled === true ||
             part.state.metadata?.canceled === true;
-        const evidenceStatus = maskedVerification || ambiguousVerification
+        const evidenceStatus = maskedVerification || ambiguousVerification || (isVerification && foreignCwd)
             ? "unknown"
             : commandStatus === "success" && (testReason || cancelled)
                 ? "unknown"
                 : commandStatus;
         const recordError = evidenceStatus === "unknown" && outcome.status === "success"
-            ? isVerificationFailureMask(command)
-                ? "verification exit status was masked"
-                : nonSequentialCompound || pipedWithoutPipefail
-                    ? "compound/piped command cannot prove each verification succeeded"
-                    : "command completed without an explicit exit code"
+            ? isVerification && foreignCwd
+                ? "verification executed outside project directory"
+                : isVerificationFailureMask(command)
+                    ? "verification exit status was masked"
+                    : nonSequentialCompound || pipedWithoutPipefail
+                        ? "compound/piped command cannot prove each verification succeeded"
+                        : "command completed without an explicit exit code"
             : outcome.errorText || undefined;
         const errorFingerprint = outcome.status === "failure"
             ? normalizeErrorFingerprint(outcome.errorText || outputText)
@@ -578,6 +814,7 @@ function recordFromPart(part, sequence) {
             sequence,
             toolName,
             ...(command ? { command } : {}),
+            ...(executionCwd ? { cwd: executionCwd } : {}),
             signature: `${baseSignature}:${kind}`,
             outcomeReason: maskedVerification || ambiguousVerification ? "masked" :
                 cancelled ? "cancelled" : testReason ?? (evidenceStatus === "success" ? "success" : evidenceStatus === "failure" ? "execution-failure" : "unknown"),
@@ -730,6 +967,7 @@ export function calculateProductFingerprint(directory, files) {
         }
         if (!stat.isFile() || stat.size > 2 * 1024 * 1024)
             return "unverified-state";
+        let fd;
         try {
             const realFile = fs.realpathSync(full);
             const realRelative = path.relative(realRoot, realFile);
@@ -738,13 +976,29 @@ export function calculateProductFingerprint(directory, files) {
                 path.isAbsolute(realRelative)) {
                 return "unverified-state";
             }
+            fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+            const fdStat = fs.fstatSync(fd);
+            if (!fdStat.isFile() || fdStat.size > 2 * 1024 * 1024)
+                return "unverified-state";
+            const buf = Buffer.alloc(fdStat.size + 1);
+            const bytesRead = fdStat.size > 0 ? fs.readSync(fd, buf, 0, buf.length, 0) : 0;
+            if (bytesRead !== fdStat.size)
+                return "unverified-state";
             hash.update(rel);
             hash.update("\0");
-            hash.update(createHash("sha256").update(fs.readFileSync(full)).digest());
+            hash.update(createHash("sha256").update(buf.subarray(0, bytesRead)).digest());
             hash.update("\0");
         }
         catch {
             return "unverified-state";
+        }
+        finally {
+            if (fd !== undefined) {
+                try {
+                    fs.closeSync(fd);
+                }
+                catch { }
+            }
         }
     }
     return hash.digest("hex");
@@ -762,6 +1016,7 @@ export class VerificationSnapshotStore {
                 snapshots: new Map(),
                 before: new Map(),
                 overflowed: false,
+                hasPathlessMutation: false,
             };
             this.sessions.set(sessionID, session);
             while (this.sessions.size > VerificationSnapshotStore.MAX_SESSIONS) {
@@ -794,7 +1049,7 @@ export class VerificationSnapshotStore {
             state: { status, input, output, metadata } };
         const evidence = collectTurnEvidence([
             { info: { id: callID, role: "assistant" }, parts: [part] },
-        ]);
+        ], directory);
         const session = this.getOrCreateSession(sessionID);
         const before = session.before.get(callID);
         session.before.delete(callID);
@@ -807,7 +1062,11 @@ export class VerificationSnapshotStore {
             });
         }
         for (const mutation of evidence.fileMutations) {
-            if (mutation.status === "success" && mutation.filePath) {
+            if (mutation.status === "success") {
+                if (!mutation.filePath) {
+                    session.hasPathlessMutation = true;
+                    continue;
+                }
                 if (session.paths.has(mutation.filePath))
                     continue;
                 if (session.paths.size < VerificationSnapshotStore.MAX_PATHS) {
@@ -818,9 +1077,9 @@ export class VerificationSnapshotStore {
                 }
             }
         }
-        if (session.paths.size && evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
+        if ((session.paths.size || session.hasPathlessMutation) && evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
             const existing = session.snapshots.get(callID);
-            if (session.overflowed) {
+            if (session.overflowed || session.hasPathlessMutation) {
                 session.snapshots.set(callID, {
                     ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
                     fingerprint: "unverified-state",
@@ -866,7 +1125,7 @@ export class VerificationSnapshotStore {
     forget(sessionID) { this.sessions.delete(sessionID); }
     clear() { this.sessions.clear(); }
 }
-export function collectTurnEvidence(currentTurn, _directory, snapshots) {
+export function collectTurnEvidence(currentTurn, directory, snapshots) {
     const records = [];
     const mutatedFiles = new Set();
     let sequence = 0;
@@ -887,7 +1146,7 @@ export function collectTurnEvidence(currentTurn, _directory, snapshots) {
                     mutatedFiles.add(filePath);
                 }
             }
-            const partRecords = recordFromPart(part, sequence++);
+            const partRecords = recordFromPart(part, sequence++, directory);
             for (const record of partRecords) {
                 const callID = typeof part.callID === "string" ? part.callID : undefined;
                 const observedEdit = callID ? snapshots?.get(callID)?.editIntegrity : undefined;

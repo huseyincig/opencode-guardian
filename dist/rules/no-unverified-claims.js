@@ -1,5 +1,6 @@
 import { calculateProductFingerprint, latestEvidence } from "../evidence.js";
 import { sanitizeProseForInspection } from "../prose.js";
+import { extractTaskContract } from "../task-contract.js";
 import { getClaimPatterns, isUncertaintyClaim } from "../locale-intents.js";
 const CLAIM_PATTERNS = getClaimPatterns();
 function sentenceAround(text, index) {
@@ -22,7 +23,8 @@ function latestMutationSequence(evidence) {
 function staleAfterMutation(evidence, record, directory) {
     if (!record)
         return false;
-    if (latestMutationSequence(evidence) > record.sequence) {
+    const lastMutation = latestMutationSequence(evidence);
+    if (lastMutation >= 0 && lastMutation >= record.sequence) {
         return true;
     }
     if (record.stateFingerprint === "unverified-state") {
@@ -119,7 +121,7 @@ export const noUnverifiedClaimsRule = {
             for (const part of message.parts) {
                 if (part.type !== "text" || typeof part.text !== "string")
                     continue;
-                const text = sanitizeProseForInspection(part.text);
+                const text = sanitizeProseForInspection(part.text, { preserveParagraphs: true });
                 if (!text)
                     continue;
                 // Compare explicit pass-count claims only to fresh, matching test evidence.
@@ -142,29 +144,42 @@ export const noUnverifiedClaimsRule = {
                     }
                 }
                 for (const claim of CLAIM_PATTERNS) {
-                    claim.regex.lastIndex = 0;
-                    const match = claim.regex.exec(text);
-                    if (!match)
+                    const flags = claim.regex.flags.includes("g") ? claim.regex.flags : `${claim.regex.flags}g`;
+                    const globalRegex = new RegExp(claim.regex.source, flags);
+                    let iterations = 0;
+                    let matchedFinding = false;
+                    let match = globalRegex.exec(text);
+                    while (match !== null && iterations < 64) {
+                        iterations++;
+                        const sentence = sentenceAround(text, match.index);
+                        if (!isUncertaintyClaim(sentence)) {
+                            const evidence = evidenceForClaim(claim, context.evidence, context.directory);
+                            if (evidence?.status === "success") {
+                                matchedFinding = true;
+                                break;
+                            }
+                            const finding = {
+                                ruleId: "integrity/no-unverified-claims",
+                                pattern: claim.name,
+                                messageSnippet: sentence || match[0],
+                                description: evidence?.status === "failure"
+                                    ? `Claim contradicts the latest ${evidence.kind} result`
+                                    : `Claim has no matching verification evidence in this turn`,
+                                evidence: evidence ? [evidenceSummary(evidence)] : [],
+                                confidence: evidence?.status === "failure" ? "high" : "medium",
+                            };
+                            findings.push(finding);
+                            if (evidence?.status === "failure")
+                                contradictions.push(finding);
+                            matchedFinding = true;
+                            break;
+                        }
+                        if (match[0].length === 0)
+                            globalRegex.lastIndex++;
+                        match = globalRegex.exec(text);
+                    }
+                    if (matchedFinding)
                         continue;
-                    const sentence = sentenceAround(text, match.index);
-                    if (isUncertaintyClaim(sentence))
-                        continue;
-                    const evidence = evidenceForClaim(claim, context.evidence, context.directory);
-                    if (evidence?.status === "success")
-                        continue;
-                    const finding = {
-                        ruleId: "integrity/no-unverified-claims",
-                        pattern: claim.name,
-                        messageSnippet: sentence || match[0],
-                        description: evidence?.status === "failure"
-                            ? `Claim contradicts the latest ${evidence.kind} result`
-                            : `Claim has no matching verification evidence in this turn`,
-                        evidence: evidence ? [evidenceSummary(evidence)] : [],
-                        confidence: evidence?.status === "failure" ? "high" : "medium",
-                    };
-                    findings.push(finding);
-                    if (evidence?.status === "failure")
-                        contradictions.push(finding);
                 }
             }
         }
@@ -191,6 +206,10 @@ export const noUnverifiedClaimsRule = {
             return `  - ${finding.messageSnippet} — ${finding.description}.${evidence}`;
         })
             .join("\n");
+        const prohibited = extractTaskContract(context.currentTurn, context.sessionID)?.prohibitedVerifications ?? [];
+        const step2 = prohibited.length > 0
+            ? `2. Do NOT run verification commands explicitly prohibited by the user (${prohibited.join(", ")}); instead retract any unverified pass claim and report only observed results.`
+            : `2. Run the actual verification command (e.g. tests, typecheck, build) to produce concrete evidence before claiming success.`;
         return {
             ruleId: "integrity/no-unverified-claims",
             decision: "block",
@@ -198,7 +217,7 @@ export const noUnverifiedClaimsRule = {
             remediationPrompt: `Unsupported or contradictory completion claim detected:\n${list}\n\n` +
                 `ACTION REQUIRED:\n` +
                 `1. State only what actual command/test tool output proves. Do not claim tests passed or work succeeded without executing verification commands.\n` +
-                `2. Run the actual verification command (e.g. tests, typecheck, build) to produce concrete evidence before claiming success.\n` +
+                `${step2}\n` +
                 `3. If verification was not possible, say so explicitly and explain what was verified and what remains unverified.`,
         };
     },

@@ -1,21 +1,21 @@
 import { deniedVerification, extractAdvisoryTaskSignals, isExploratoryPrompt, sanitizeUserInstruction, } from "./locale-intents.js";
 import { isTrustedMeshMessage } from "./bridge.js";
 export { isExploratoryPrompt } from "./locale-intents.js";
-function userText(message) {
-    if (isTrustedMeshMessage(message))
+function userText(message, sessionID) {
+    if (isTrustedMeshMessage({ ...message, parts: undefined }, sessionID))
         return "";
     return message.parts
         .filter((part) => part.type === "text" &&
         typeof part.text === "string" &&
         part.synthetic !== true &&
         part.ignored !== true &&
-        !isTrustedMeshMessage(part))
+        !isTrustedMeshMessage(part, sessionID))
         .map((part) => part.text ?? "")
         .join("\n");
 }
-export function currentHumanMessage(messages) {
+export function currentHumanMessage(messages, sessionID) {
     return messages.findLast((message) => message.info.role === "user" &&
-        userText(message).trim().length > 0);
+        userText(message, sessionID).trim().length > 0);
 }
 /** Only an exact first-line directive is accepted; examples in code do not count. */
 export function parseExplicitTaskDirective(text) {
@@ -49,16 +49,16 @@ export function parseExplicitTaskDirective(text) {
         return undefined;
     }
 }
-export function extractTaskContract(messages) {
-    const human = currentHumanMessage(messages);
+export function extractTaskContract(messages, sessionID) {
+    const human = currentHumanMessage(messages, sessionID);
     if (!human)
         return undefined;
-    const text = userText(human).trim();
+    const text = userText(human, sessionID).trim();
     if (!text)
         return undefined;
     // 1. Explicit machine-readable directive takes highest precedence
     const directive = parseExplicitTaskDirective(text);
-    const body = sanitizeUserInstruction(text.startsWith("@guardian-task ")
+    const body = sanitizeUserInstruction(directive
         ? text.slice(text.indexOf("\n") < 0 ? text.length : text.indexOf("\n") + 1).trim()
         : text);
     // 2. Advisory locale / semantic signals (compatibility layer)
@@ -76,7 +76,9 @@ export function extractTaskContract(messages) {
             ? directive.verify
             : advisory.requiredVerifications;
     // A natural-language prohibition cannot be overridden by a machine-readable header.
-    const requiredVerifications = requestedVerifications.filter((kind) => !deniedVerification(body, kind));
+    const allVerificationKinds = ["test", "build", "typecheck", "lint", "audit"];
+    const prohibitedVerifications = allVerificationKinds.filter((kind) => deniedVerification(body, kind));
+    const requiredVerifications = requestedVerifications.filter((kind) => !prohibitedVerifications.includes(kind));
     const signalLocale = directive ? "structured" : advisory.signalLocale;
     return {
         turnKey: human.info.id ?? "no-human-user",
@@ -86,6 +88,7 @@ export function extractTaskContract(messages) {
         requiresSourceReview: iterativeReview &&
             (directive ? directive.review === "source" : advisory.requiresSourceReview),
         requiredVerifications,
+        ...(prohibitedVerifications.length > 0 ? { prohibitedVerifications } : {}),
         requiresExplicitCompletion: iterativeReview || requiredVerifications.length > 0,
         ...(signalLocale ? { signalLocale } : {}),
     };

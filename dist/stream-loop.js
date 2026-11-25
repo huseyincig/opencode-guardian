@@ -192,7 +192,12 @@ export class StreamLoopWatcher {
                 return;
             }
             state.attempts++;
-            const signal = AbortSignal.any([this.options.signal, AbortSignal.timeout(3000)]);
+            const timeoutMs = typeof this.options.interruptTimeoutMs === "number" &&
+                Number.isFinite(this.options.interruptTimeoutMs) &&
+                this.options.interruptTimeoutMs > 0
+                ? this.options.interruptTimeoutMs
+                : 3000;
+            const signal = AbortSignal.any([this.options.signal, AbortSignal.timeout(timeoutMs)]);
             try {
                 const result = await cancellable(this.options.interrupt(sessionID, directory, signal), signal);
                 if (result === false || (result && typeof result === "object" && (result.error !== undefined || result.data === false || result.interrupted === false)))
@@ -207,9 +212,15 @@ export class StreamLoopWatcher {
             }
             catch {
                 // A timed-out host call may still be running (V2 has no cancellation
-                // option). Do not issue overlapping retries after an ambiguous timeout.
-                if (signal.aborted)
+                // option). Prevent overlapping retries during the verification window,
+                // but begin verification so continued deltas reopen loop detection.
+                if (signal.aborted && !this.options.signal.aborted && current()) {
                     state.stopped = true;
+                    this.beginVerification(sessionID, state, directory);
+                }
+                else if (signal.aborted) {
+                    state.stopped = true;
+                }
                 if (current())
                     recordGuardianEvent({ kind: "inspection-error", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, directory);
             }

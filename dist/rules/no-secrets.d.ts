@@ -1,4 +1,5 @@
 import type { GuardRule } from "../types.js";
+import type { SanitizerOptions } from "../secrets/types.js";
 export declare const SECRET_PATTERNS: {
     regex: RegExp;
     name: string;
@@ -15,6 +16,6 @@ export interface DetectedSecret {
     secretValue: string;
     masked: string;
 }
-export declare function findAllSecretsInCode(code: string, filePath?: string, alreadySeen?: Set<string>): DetectedSecret[];
-export declare function findSecretInCode(code: string, filePath?: string): DetectedSecret | undefined;
+export declare function findAllSecretsInCode(code: string, filePath?: string, alreadySeen?: Set<string>, secretOptions?: SanitizerOptions): DetectedSecret[];
+export declare function findSecretInCode(code: string, filePath?: string, secretOptions?: SanitizerOptions): DetectedSecret | undefined;
 export declare const noSecretsRule: GuardRule;

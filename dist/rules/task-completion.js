@@ -10,7 +10,7 @@ function latestAssistantProse(context) {
     return sanitizeProseForInspection(last.parts
         .filter((part) => part.type === "text" && typeof part.text === "string")
         .map((part) => part.text ?? "")
-        .join("\n"));
+        .join("\n\n"), { preserveParagraphs: true });
 }
 /**
  * Completion is checked against concrete, ordered tool evidence rather than
@@ -24,7 +24,7 @@ export const taskCompletionRule = {
     id: "task/completion-gate",
     description: "Checks explicit iterative-review and verification requirements before accepting completion.",
     inspect(context) {
-        const contract = extractTaskContract(context.currentTurn);
+        const contract = extractTaskContract(context.currentTurn, context.sessionID);
         const evidence = context.evidence;
         const prose = latestAssistantProse(context);
         const findings = [];
@@ -144,6 +144,9 @@ export const taskCompletionRule = {
                 if (later.kind !== failure.kind)
                     return false;
                 if (failure.command || later.command) {
+                    if ((failure.cwd || later.cwd) && failure.cwd !== later.cwd) {
+                        return false;
+                    }
                     return Boolean(failure.command &&
                         later.command &&
                         commandIdentity(failure.command) === commandIdentity(later.command));

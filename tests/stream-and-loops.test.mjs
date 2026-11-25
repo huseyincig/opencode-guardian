@@ -563,4 +563,77 @@ describe("Stream Interruption Verification", () => {
     await h.delta(loop);
     assert.equal(h.calls, 2, "R3-043: delayed delta must re-enable loop detection for subsequent runaway generation");
   });
+
+  test("R4 Wave 2 (R4-019): interrupt timeout begins verification so continued deltas reopen loop detection instead of permanently blinding watcher", async (t) => {
+    const { StreamLoopWatcher } = await import("../dist/stream-loop.js");
+    process.env.OPENCODE_GUARDIAN_STREAM_VERIFY_MS = "80";
+    t.after(() => { delete process.env.OPENCODE_GUARDIAN_STREAM_VERIFY_MS; });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-019-"));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const controller = new AbortController();
+    t.after(() => controller.abort());
+    let interruptCalls = 0;
+    const watcher = new StreamLoopWatcher({
+      signal: controller.signal,
+      directory,
+      interruptTimeoutMs: 50,
+      settings: async () => ({ config: { enabled: true }, directory }),
+      interrupt: async (_sid, _dir, sig) => {
+        interruptCalls++;
+        if (interruptCalls === 1) {
+          // Hang until timeout aborts the signal
+          return await new Promise((_res, rej) => {
+            sig.addEventListener("abort", () => rej(new Error("timed out")), { once: true });
+          });
+        }
+        return true;
+      },
+      notifier: { notify() {} },
+    });
+    watcher.dispatch({
+      type: "session.text.delta",
+      data: { sessionID: "s-timeout", assistantMessageID: "m1", ordinal: 0, delta: loop },
+    });
+    // Wait for interrupt timeout (50ms) + verify window (80ms)
+    await new Promise((r) => setTimeout(r, 220));
+    assert.equal(interruptCalls, 1);
+    // Stream keeps generating after timed-out interrupt -> must reopen and trigger a second interrupt
+    watcher.dispatch({
+      type: "session.text.delta",
+      data: { sessionID: "s-timeout", assistantMessageID: "m1", ordinal: 0, delta: "still running" },
+    });
+    watcher.dispatch({
+      type: "session.text.delta",
+      data: { sessionID: "s-timeout", assistantMessageID: "m1", ordinal: 0, delta: loop },
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(interruptCalls, 2, "R4-019: continued deltas after interrupt timeout must reopen loop detection");
+  });
+
+  test("R4 Wave 3 (R4-042): trivial --version/--help probes do not reset single-token command failure streaks", async () => {
+    const { circuitBreakerRule } = await import("../dist/rules/circuit-breaker.js");
+    const { collectTurnEvidence } = await import("../dist/evidence.js");
+    const turn = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the script." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "node failing.mjs" }, output: "SyntaxError: bad", exitCode: 1, metadata: { exit: 1 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "node --version" }, output: "v26.13.1", exitCode: 0, metadata: { exit: 0 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "node failing.mjs" }, output: "SyntaxError: bad", exitCode: 1, metadata: { exit: 1 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "node --help" }, output: "Usage: node", exitCode: 0, metadata: { exit: 0 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "node failing.mjs" }, output: "SyntaxError: bad", exitCode: 1, metadata: { exit: 1 } } },
+        ],
+      },
+    ];
+    const res = circuitBreakerRule.inspect({
+      sessionID: "s-r4-042",
+      directory: process.cwd(),
+      currentTurn: turn,
+      history: turn,
+      evidence: collectTurnEvidence(turn, process.cwd()),
+      ruleConfig: {},
+    });
+    assert.equal(res.decision, "block", "R4-042: node --version / --help probes must not reset failing node streak");
+  });
 });

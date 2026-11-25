@@ -49,6 +49,9 @@ export function createIdleQueue(signal: AbortSignal, onError: () => void) {
       // inspection indefinitely by repeatedly resetting the timer.
       if (!entry.running && !entry.timer) arm(sessionID, entry);
     },
+    has(sessionID: string): boolean {
+      return entries.has(sessionID);
+    },
     forget,
     clear,
   };

@@ -134,6 +134,7 @@ export interface EvidenceRecord {
   sequence: number;
   toolName: string;
   command?: string;
+  cwd?: string;
   signature: string;
   output?: string;
   error?: string;
@@ -163,6 +164,7 @@ export interface TurnInspectionContext {
   currentTurn: SessionMessage[];
   isSubagent?: boolean;
   agentCapability?: AgentMutationCapability | undefined;
+  secretOptions?: import("./secrets/types.js").SanitizerOptions | undefined;
   ruleConfig: GuardRuleConfig;
   evidence?: TurnEvidence;
 }

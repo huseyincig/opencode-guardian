@@ -130,7 +130,10 @@ function readManifestBounded(
   }
   let fd: number | undefined;
   try {
-    fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    fd = fs.openSync(
+      realFile,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+    );
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > maxBytes) {
       return { rejected: true };
@@ -159,7 +162,7 @@ function nearestFile(
     resolvedStop = path.resolve(stopRoot);
     const rel = path.relative(resolvedStop, current);
     if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
-      resolvedStop = undefined;
+      return null;
     }
   }
   while (true) {
@@ -305,7 +308,10 @@ function parseRequirementsFile(
   let text = "";
   let fd: number | undefined;
   try {
-    fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    fd = fs.openSync(
+      realFile,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+    );
     const stat = fs.fstatSync(fd);
     if (
       !stat.isFile() ||
@@ -1299,6 +1305,7 @@ function resolveTargetFile(
   return (
     (input.path as string) ??
     (input.targetFile as string) ??
+    (input.TargetFile as string) ??
     (input.filePath as string) ??
     (input.file as string) ??
     extractFilePathFromPatch(patch)
@@ -1626,14 +1633,19 @@ export const noGhostDepsRule: GuardRule = {
         const input = part.state.input as Record<string, unknown>;
         const targetFile = resolveTargetFile(input);
 
-        if (typeof input.content === "string") {
-          checkCode(input.content, "file content", targetFile);
-        }
-        if (typeof input.new_string === "string") {
-          checkCode(input.new_string, "file edit", targetFile);
-        }
-        if (typeof input.newString === "string") {
-          checkCode(input.newString, "file edit", targetFile);
+        for (const [key, label] of [
+          ["content", "file content"],
+          ["file_text", "file content"],
+          ["CodeContent", "file content"],
+          ["text", "file content"],
+          ["new_string", "file edit"],
+          ["newString", "file edit"],
+          ["new_str", "file edit"],
+          ["ReplacementContent", "file edit"],
+        ] as const) {
+          if (typeof input[key] === "string") {
+            checkCode(input[key] as string, label, targetFile);
+          }
         }
         for (const edit of extractStructuredEditTexts(input, targetFile)) {
           checkCode(edit.text, "structured file edit", edit.filePath);

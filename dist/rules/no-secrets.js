@@ -1,5 +1,6 @@
 import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
 import { KNOWN_CREDENTIAL_PATTERNS } from "../secrets/patterns.js";
+import { defaultRuntimeSecrets } from "../secrets/runtime-secrets.js";
 export const SECRET_PATTERNS = [
     // Clone regex instances so write scans cannot alter output redaction state.
     ...KNOWN_CREDENTIAL_PATTERNS.map(({ name, regex }) => ({ name, regex: new RegExp(regex.source, regex.flags) })),
@@ -43,11 +44,12 @@ export function isDocumentedLocalPasswordSample(filePath, value, password) {
     // A plausible password on a real database host must still be reported.
     return /@(?:localhost|127\.0\.0\.1|\[::1\]|(?:db\.)?example\.(?:com|org|net))(?::[0-9]+)?\//i.test(value);
 }
-export function findAllSecretsInCode(code, filePath, alreadySeen) {
+export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions) {
     if (!code || typeof code !== "string")
         return [];
     const results = [];
     const seen = alreadySeen ?? new Set();
+    const safeValueSet = secretOptions?.safeValues?.length ? new Set(secretOptions.safeValues) : undefined;
     for (const pattern of SECRET_PATTERNS) {
         if (seen.has(pattern.name))
             continue;
@@ -64,7 +66,7 @@ export function findAllSecretsInCode(code, filePath, alreadySeen) {
                 ? isExplicitTemplateValue(password) ||
                     isDocumentedLocalPasswordSample(filePath, value, password)
                 : isExplicitTemplateValue(value);
-            if (!isSample) {
+            if (!isSample && !safeValueSet?.has(value)) {
                 match = next;
                 break;
             }
@@ -76,10 +78,87 @@ export function findAllSecretsInCode(code, filePath, alreadySeen) {
         seen.add(pattern.name);
         results.push({ name: pattern.name, secretValue, masked: maskSecret(secretValue) });
     }
+    if (secretOptions) {
+        const runtimeSecrets = secretOptions.includeRuntimeEnv !== false
+            ? defaultRuntimeSecrets.getSecrets()
+            : [];
+        const literalCandidates = [
+            ...(secretOptions.customSecretValues ?? []),
+            ...runtimeSecrets,
+        ];
+        for (const secretVal of literalCandidates) {
+            if (!secretVal || secretVal.length < 6 || safeValueSet?.has(secretVal))
+                continue;
+            if (isExplicitTemplateValue(secretVal))
+                continue;
+            const key = "Configured/Runtime Secret Value";
+            if (seen.has(key))
+                break;
+            if (code.includes(secretVal)) {
+                seen.add(key);
+                results.push({ name: key, secretValue: secretVal, masked: maskSecret(secretVal) });
+                break;
+            }
+        }
+        if (secretOptions.customSensitiveKeys?.length && !seen.has("Custom Sensitive Key Assignment")) {
+            const stringKeys = secretOptions.customSensitiveKeys
+                .filter((k) => typeof k === "string")
+                .map((k) => k.trim())
+                .filter((k) => k.length > 0 && /^[A-Za-z0-9_.-]+$/.test(k));
+            const regexKeys = secretOptions.customSensitiveKeys.filter((k) => k instanceof RegExp);
+            const safeStringKeys = (secretOptions.safeKeyNames ?? [])
+                .filter((k) => typeof k === "string")
+                .map((k) => k.trim().toLowerCase())
+                .filter((k) => k.length > 0);
+            const isSafeKey = (candidateKey) => safeStringKeys.includes(candidateKey.toLowerCase());
+            const keyMatcher = (candidateKey) => {
+                if (isSafeKey(candidateKey))
+                    return false;
+                const lower = candidateKey.toLowerCase();
+                if (stringKeys.some((k) => k.toLowerCase() === lower))
+                    return true;
+                return regexKeys.some((re) => {
+                    re.lastIndex = 0;
+                    return re.test(candidateKey);
+                });
+            };
+            const TS_OR_CODE_UNQUOTED_VALUE = /^(?:string|number|boolean|unknown|any|void|never|object|undefined|null|symbol|bigint|true|false|readonly|partial|required|record|promise|buffer|uint8array|array|set|map|date|regexp|error|function)$/i;
+            const isCodeReference = (unquotedVal) => TS_OR_CODE_UNQUOTED_VALUE.test(unquotedVal) ||
+                /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\([^)]*\))?$/.test(unquotedVal) ||
+                /^[A-Za-z_$][\w$]*\([^)]*\)$/.test(unquotedVal);
+            // Scan quoted/unquoted key assignments across JS/TS, JSON, YAML, and .env formats.
+            const scanSource = code.length > 512 * 1024 ? code.slice(0, 512 * 1024) : code;
+            const assignmentRe = /(?:["'])?([A-Za-z0-9_.-]{2,80})(?:["'])?\s*[:=]\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([^\s"'`,;)}\]\r\n]{6,}))/g;
+            let m = assignmentRe.exec(scanSource);
+            let iter = 0;
+            while (m !== null && iter < 20_000) {
+                iter++;
+                const k = m[1] ?? "";
+                const quotedVal = m[2] ?? m[3];
+                const unquotedVal = m[4];
+                const val = quotedVal ?? unquotedVal ?? "";
+                if (k &&
+                    val &&
+                    keyMatcher(k) &&
+                    (quotedVal !== undefined || !isCodeReference(val)) &&
+                    !isExplicitTemplateValue(val) &&
+                    !safeValueSet?.has(val)) {
+                    seen.add("Custom Sensitive Key Assignment");
+                    results.push({
+                        name: "Custom Sensitive Key Assignment",
+                        secretValue: val,
+                        masked: maskSecret(val),
+                    });
+                    break;
+                }
+                m = assignmentRe.exec(scanSource);
+            }
+        }
+    }
     return results;
 }
-export function findSecretInCode(code, filePath) {
-    return findAllSecretsInCode(code, filePath)[0];
+export function findSecretInCode(code, filePath, secretOptions) {
+    return findAllSecretsInCode(code, filePath, undefined, secretOptions)[0];
 }
 export const noSecretsRule = {
     id: "security/no-secrets",
@@ -94,7 +173,7 @@ export const noSecretsRule = {
                 seen = new Set();
                 seenByFile.set(scopeKey, seen);
             }
-            const detected = findAllSecretsInCode(code, filePath, seen);
+            const detected = findAllSecretsInCode(code, filePath, seen, context.secretOptions);
             for (const item of detected) {
                 findings.push({
                     ruleId: "security/no-secrets",
@@ -115,15 +194,24 @@ export const noSecretsRule = {
                 const patchRaw = input.patchText ?? input.patch;
                 const targetFile = input.path ??
                     input.targetFile ??
+                    input.TargetFile ??
                     input.filePath ??
                     input.file ??
                     extractFilePathFromPatch(patchRaw);
-                if (typeof input.content === "string")
-                    checkCode(input.content, targetFile);
-                if (typeof input.new_string === "string")
-                    checkCode(input.new_string, targetFile);
-                if (typeof input.newString === "string")
-                    checkCode(input.newString, targetFile);
+                for (const key of [
+                    "content",
+                    "new_string",
+                    "newString",
+                    "new_str",
+                    "file_text",
+                    "CodeContent",
+                    "ReplacementContent",
+                    "text",
+                ]) {
+                    if (typeof input[key] === "string") {
+                        checkCode(input[key], targetFile);
+                    }
+                }
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkCode(edit.text, edit.filePath);
                 }

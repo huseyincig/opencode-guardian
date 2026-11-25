@@ -1,4 +1,4 @@
-import { extractLikelyShellMutation, extractStructuredEditTexts, splitFilePatches } from "../tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolTargetFile, FILE_WRITE_EDIT_KEYS, FILE_WRITE_WHOLE_KEYS, splitFilePatches, } from "../tool-input.js";
 import { findTruncationPlaceholder, TRUNCATION_PLACEHOLDERS } from "../edit-integrity.js";
 /**
  * Regex patterns that detect lazy file truncation comments like:
@@ -71,16 +71,16 @@ export const noTruncationRule = {
             for (const part of msg.parts) {
                 if (part.type === "tool" && part.state?.input) {
                     const input = part.state.input;
-                    const target = input.path ?? input.filePath ?? input.file ?? input.targetFile;
-                    const filePath = typeof target === "string" ? target : undefined;
-                    if (typeof input.content === "string") {
-                        checkCode(input.content, "file write content", filePath);
+                    const filePath = extractToolTargetFile(input);
+                    for (const key of FILE_WRITE_WHOLE_KEYS) {
+                        if (typeof input[key] === "string") {
+                            checkCode(input[key], "file write content", filePath);
+                        }
                     }
-                    if (typeof input.new_string === "string") {
-                        checkCode(input.new_string, "file edit", filePath);
-                    }
-                    if (typeof input.newString === "string") {
-                        checkCode(input.newString, "file edit", filePath);
+                    for (const key of FILE_WRITE_EDIT_KEYS) {
+                        if (typeof input[key] === "string") {
+                            checkCode(input[key], "file edit", filePath);
+                        }
                     }
                     for (const edit of extractStructuredEditTexts(input)) {
                         checkCode(edit.text, "structured file edit", edit.filePath ?? filePath);

@@ -373,32 +373,28 @@ export const noShortcutsRule: GuardRule = {
           const targetFile =
             (input.path as string) ??
             (input.targetFile as string) ??
+            (input.TargetFile as string) ??
             (input.filePath as string) ??
             (input.file as string) ??
             extractFilePathFromPatch(patchRaw);
-          if (typeof input.content === "string") {
-            checkText(
-              extractCodeComments(input.content),
-              "file write comments",
-              true,
-              targetFile
-            );
-          }
-          if (typeof input.new_string === "string") {
-            checkText(
-              extractCodeComments(input.new_string),
-              "file edit comments",
-              true,
-              targetFile
-            );
-          }
-          if (typeof input.newString === "string") {
-            checkText(
-              extractCodeComments(input.newString),
-              "file edit comments",
-              true,
-              targetFile
-            );
+          for (const [key, label] of [
+            ["content", "file write comments"],
+            ["file_text", "file write comments"],
+            ["CodeContent", "file write comments"],
+            ["text", "file write comments"],
+            ["new_string", "file edit comments"],
+            ["newString", "file edit comments"],
+            ["new_str", "file edit comments"],
+            ["ReplacementContent", "file edit comments"],
+          ] as const) {
+            if (typeof input[key] === "string") {
+              checkText(
+                extractCodeComments(input[key] as string),
+                label,
+                true,
+                targetFile
+              );
+            }
           }
           for (const edit of extractStructuredEditTexts(input, targetFile)) {
             checkText(

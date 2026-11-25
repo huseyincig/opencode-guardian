@@ -809,6 +809,10 @@ export function isTrustedMeshMessage(
     typeof meta?.["hi-internal"] === "string" ||
     typeof meta?.["hi-message"] === "string";
 
+  if (meshEnv && meshEnv.synthetic === false && expectedKind === undefined) {
+    return false;
+  }
+
   if (
     meshEnv &&
     typeof meshEnv.token === "string" &&
@@ -825,14 +829,42 @@ export function isTrustedMeshMessage(
     return true;
   }
 
-  if (
-    isHostSynthetic &&
-    (meta?.["opencode-guardian"] === true ||
-      meta?.["opencode-smart-questions"] === true ||
-      meta?.["opencode-hi"] === true ||
-      isRecord(meta?.hi))
-  ) {
-    return true;
+  if (isHostSynthetic) {
+    const allowed =
+      expectedKind === undefined
+        ? undefined
+        : Array.isArray(expectedKind)
+          ? expectedKind
+          : [expectedKind];
+    const isLegacyVisible =
+      meta?.["opencode-guardian-visible"] === true ||
+      meta?.["opencode-guardian-kind"] === "visible";
+    if (meta?.["opencode-guardian"] === true) {
+      if (isLegacyVisible) {
+        if (!allowed || (allowed as readonly string[]).includes("visible")) return true;
+      } else if (
+        !allowed ||
+        allowed.some((k) => k === "remediation" || k === "handoff" || k === "task-contract")
+      ) {
+        return true;
+      }
+    }
+    if (meta?.["opencode-smart-questions"] === true) {
+      if (
+        !allowed ||
+        allowed.some((k) => k === "handoff" || k === "wake" || k === "question-continuation")
+      ) {
+        return true;
+      }
+    }
+    if (meta?.["opencode-hi"] === true || isRecord(meta?.hi)) {
+      if (
+        !allowed ||
+        allowed.some((k) => k === "wake" || k === "skill-injection" || k === "handoff")
+      ) {
+        return true;
+      }
+    }
   }
 
   const parts = Array.isArray(value.parts)
@@ -1399,24 +1431,38 @@ export async function resolveMeshAgentProfile(
   const matching = Array.from(state.roleResolversByKey.values()).filter(
     (entry) => targetDir === "*" || entry.directory === "*" || entry.directory === targetDir
   );
-  // Exact directory resolvers always take precedence over wildcard "*" resolvers.
-  matching.sort((a, b) => {
-    const aExact = a.directory === targetDir && targetDir !== "*" ? 0 : 1;
-    const bExact = b.directory === targetDir && targetDir !== "*" ? 0 : 1;
-    return aExact - bExact;
-  });
-  for (const entry of matching) {
-    try {
-      const profile = await entry.resolve(sessionID, targetDir);
-      if (profile && profile.capability !== "unknown") {
-        if (profile.sessionID && profile.sessionID !== sessionID) {
-          continue;
-        }
-        return profile;
-      }
-    } catch {
-      // Resolver errors must never break the caller
+  const capabilityRank = (cap: string): number => {
+    switch (cap) {
+      case "read-only": return 3;
+      case "write-requires-approval": return 2;
+      case "write-allowed": return 1;
+      default: return 0;
     }
+  };
+  const exactResolvers = matching.filter((entry) => entry.directory === targetDir && targetDir !== "*");
+  const wildcardResolvers = matching.filter((entry) => !(entry.directory === targetDir && targetDir !== "*"));
+  const tiers = exactResolvers.length > 0 ? [exactResolvers, wildcardResolvers] : [wildcardResolvers];
+
+  for (const tier of tiers) {
+    let mostRestrictive: MeshAgentProfile | undefined;
+    for (const entry of tier) {
+      try {
+        const profile = await entry.resolve(sessionID, targetDir);
+        if (profile && profile.capability !== "unknown") {
+          const rank = capabilityRank(profile.capability);
+          if (rank === 0) continue;
+          if (profile.sessionID && profile.sessionID !== sessionID) {
+            continue;
+          }
+          if (!mostRestrictive || rank > capabilityRank(mostRestrictive.capability)) {
+            mostRestrictive = profile;
+          }
+        }
+      } catch {
+        // Resolver errors must never break the caller
+      }
+    }
+    if (mostRestrictive) return mostRestrictive;
   }
   return undefined;
 }
@@ -1694,6 +1740,19 @@ export async function registerMeshStateRpc(input: {
             ttlMs: arg.ttlMs,
             reason: arg.reason,
           });
+          if (state.remoteInteractionLeases.size >= MAX_BOUNDED_SESSIONS) {
+            const now = Date.now();
+            for (const [candidateKey, candidateRelease] of Array.from(state.remoteInteractionLeases.entries())) {
+              const parts = candidateKey.split("::");
+              const candidateSid = parts[1] ?? "";
+              const candidateOwner = parts[2] ?? "";
+              const active = candidateSid ? pruneExpiredLeases(state, candidateSid, now) : undefined;
+              if (!active?.has(`${candidateOwner}::user_interaction`)) {
+                state.remoteInteractionLeases.delete(candidateKey);
+                try { candidateRelease(); } catch {}
+              }
+            }
+          }
           while (state.remoteInteractionLeases.size >= MAX_BOUNDED_SESSIONS) {
             const oldestKey = state.remoteInteractionLeases.keys().next().value;
             if (oldestKey === undefined) break;

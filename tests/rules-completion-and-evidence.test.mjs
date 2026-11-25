@@ -1754,4 +1754,194 @@ describe("Aborted Tools & Service Restart Handling", () => {
     assert.equal(ir2.decision, "pass");
     assert.equal(ir2.remediationStatus, "failed", "R3-012: exhausted iterative review with unresolved blocking finding must report remediationStatus: failed");
   });
+
+  test("R4 Wave 1 (R4-004, R4-005, R4-006, R4-007, R4-030): freshness parity, shell newline/bg/pipefail, foreign cwd, pathless snapshot incomplete, and multi-sentence claims", async (t) => {
+    const { collectTurnEvidence, VerificationSnapshotStore } = await import("../dist/evidence.js");
+    const { noUnverifiedClaimsRule } = await import("../dist/rules/no-unverified-claims.js");
+
+    // R4-006: same-sequence bash call combining verification + mutation must be stale in no-unverified-claims too
+    const sameSeqTurn = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix and test." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            tool: "bash",
+            state: { status: "completed", input: { command: "npm test && echo broken > src/app.ts" }, output: "5 passing", exitCode: 0, metadata: { exit: 0 } },
+          },
+          { type: "text", text: "All tests pass." },
+        ],
+      },
+    ];
+    const sameSeqEvidence = collectTurnEvidence(sameSeqTurn, process.cwd());
+    const sameSeqClaim = noUnverifiedClaimsRule.inspect({
+      sessionID: "s-r4-006",
+      directory: process.cwd(),
+      currentTurn: sameSeqTurn,
+      history: sameSeqTurn,
+      evidence: sameSeqEvidence,
+      ruleConfig: { blockUnverified: true },
+      isSubagent: false,
+    });
+    assert.equal(sameSeqClaim.decision, "block", "R4-006: same-sequence mutation+verification must be treated as stale by no-unverified-claims");
+
+    // R4-007: newline separator, background '&', and trailing/quoted pipefail must produce status: unknown
+    for (const cmd of [
+      "npm test\necho done",
+      "npm test & echo done",
+      "npm test | cat; set -o pipefail",
+      "npm test | cat && echo 'set -o pipefail'",
+    ]) {
+      const ev = collectTurnEvidence([
+        {
+          info: { id: "a1", role: "assistant" },
+          parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: cmd }, output: "ok", exitCode: 0, metadata: { exit: 0 } } }],
+        },
+      ], process.cwd());
+      const rec = ev.records.find((r) => r.kind === "test");
+      assert.equal(rec?.status, "unknown", `R4-007: '${cmd}' must not classify as verified success`);
+    }
+    const validPipefail = collectTurnEvidence([
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: "set -o pipefail; npm test | tee test.log" }, output: "5 passing", exitCode: 0, metadata: { exit: 0 } } }],
+      },
+    ], process.cwd());
+    assert.equal(validPipefail.records.find((r) => r.kind === "test")?.status, "success", "valid leading set -o pipefail must remain success");
+
+    // R4-004: foreign cwd / leading cd outside project root must not count as verified success for this project
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-004-proj-"));
+    const foreignDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-004-other-"));
+    t.after(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      fs.rmSync(foreignDir, { recursive: true, force: true });
+    });
+    for (const input of [
+      { command: "npm test", cwd: foreignDir },
+      { command: `cd ${foreignDir} && npm test` },
+    ]) {
+      const ev = collectTurnEvidence([
+        {
+          info: { id: "a1", role: "assistant" },
+          parts: [{ type: "tool", tool: "bash", state: { status: "completed", input, output: "5 passing", exitCode: 0, metadata: { exit: 0 } } }],
+        },
+      ], projectDir);
+      assert.equal(ev.records.find((r) => r.kind === "test")?.status, "unknown", "R4-004: verification in foreign cwd must be unknown");
+    }
+
+    // R4-005: pathless mutation after a tracked file edit must mark VerificationSnapshotStore snapshot incomplete
+    fs.writeFileSync(path.join(projectDir, "a.ts"), "export const a = 1;\n");
+    const store = new VerificationSnapshotStore();
+    store.observe("s-r4-005", "c1", "write", { path: "a.ts", content: "export const a = 2;\n" }, "ok", {}, projectDir, "completed");
+    store.observe("s-r4-005", "c2", "bash", { command: "node -e \"require('fs').writeFileSync('b.ts','x')\"" }, "ok", { exit: 0 }, projectDir, "completed");
+    store.observe("s-r4-005", "c3", "bash", { command: "npm test" }, "5 passing", { exit: 0 }, projectDir, "completed");
+    const snap = store.snapshots("s-r4-005").get("c3");
+    assert.equal(snap?.incomplete, true, "R4-005: snapshot after untracked pathless mutation must be marked incomplete");
+    assert.equal(snap?.fingerprint, "unverified-state");
+
+    // R4-030: earlier hedged sentence must not mask a later contradictory explicit claim in the same turn
+    const multiClaimTurn = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Run tests." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "1 failing", exitCode: 1, metadata: { exit: 1 } } },
+          { type: "text", text: "I think tests might pass eventually. All tests pass." },
+        ],
+      },
+    ];
+    const multiClaimRes = noUnverifiedClaimsRule.inspect({
+      sessionID: "s-r4-030",
+      directory: projectDir,
+      currentTurn: multiClaimTurn,
+      history: multiClaimTurn,
+      evidence: collectTurnEvidence(multiClaimTurn, projectDir),
+      ruleConfig: {},
+      isSubagent: false,
+    });
+    assert.equal(multiClaimRes.decision, "block", "R4-030: later contradictory claim must not be hidden by an earlier uncertain match");
+  });
+
+  test("R4 Wave 2 (R4-027): read-only tools with text/content input are never classified as file-mutation", async () => {
+    const { collectTurnEvidence } = await import("../dist/evidence.js");
+    const ev = collectTurnEvidence([
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            tool: "grep",
+            state: { status: "completed", input: { pattern: "foo", text: "sample query", content: "needle" }, output: "match" },
+          },
+          {
+            type: "tool",
+            tool: "read_file",
+            state: { status: "completed", input: { path: "src/app.ts", content: "ignored" }, output: "code" },
+          },
+        ],
+      },
+    ], process.cwd());
+    assert.equal(ev.fileMutations.length, 0, "R4-027: read-only tools must not produce file-mutation evidence");
+  });
+
+  test("Re-audit closure: trailing blank-newline / &&+trailing-; separators, pipefail edge cases, multi-segment cd, and pathless-only snapshot", async (t) => {
+    const { collectTurnEvidence, VerificationSnapshotStore } = await import("../dist/evidence.js");
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-reaudit-ev-proj-"));
+    const foreignDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-reaudit-ev-other-"));
+    t.after(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      fs.rmSync(foreignDir, { recursive: true, force: true });
+    });
+
+    for (const cmd of [
+      "npm test\n\necho done",
+      "npm test && echo ran; echo done",
+      "set -o pipefail | true; npm test | cat",
+      "set -o pipefail; set -x +o pipefail; npm test | cat",
+      "true || set -o pipefail; npm test | tail -n 5",
+      "set -o pipefail & npm test | tail -n 5",
+      "set -o pipefail || echo nope; npm test | cat",
+      `true && cd ${foreignDir} && npm test`,
+      `cd ${foreignDir} && npm test && cd ${projectDir}`,
+      `(cd ${foreignDir} && npm test)`,
+      `(cd ${foreignDir} && echo $(pwd) && npm test)`,
+      "cd ~/definitely-outside-tmp-project && npm test",
+    ]) {
+      const ev = collectTurnEvidence([{
+        info: { id: "a1", role: "assistant" },
+        parts: [{
+          type: "tool",
+          tool: "bash",
+          state: { status: "completed", input: { command: cmd }, output: "5 passing", exitCode: 0, metadata: { exit: 0 } },
+        }],
+      }], projectDir);
+      assert.equal(ev.records.find((r) => r.kind === "test")?.status, "unknown", `command '${cmd}' must not pass as verified success`);
+    }
+
+    // Conversely, `npm test && cd /foreign` ran npm test inside projectDir, and `true && set -o pipefail && npm test | cat` had active pipefail
+    for (const cmd of [
+      `npm test && cd ${foreignDir}`,
+      `(cd ${foreignDir} && echo $(pwd)) && npm test`,
+      "true && set -o pipefail && npm test | cat",
+    ]) {
+      const ev = collectTurnEvidence([{
+        info: { id: "a1", role: "assistant" },
+        parts: [{
+          type: "tool",
+          tool: "bash",
+          state: { status: "completed", input: { command: cmd }, output: "5 passing", exitCode: 0, metadata: { exit: 0 } },
+        }],
+      }], projectDir);
+      assert.equal(ev.records.find((r) => r.kind === "test")?.status, "success", `command '${cmd}' should pass as verified success`);
+    }
+
+    // Pathless-only mutation (no tracked file paths yet) must STILL mark snapshot incomplete!
+    const store = new VerificationSnapshotStore();
+    store.observe("s-pathless-only", "c1", "bash", { command: "node -e \"require('fs').writeFileSync('b.ts','x')\"" }, "ok", { exit: 0 }, projectDir, "completed");
+    store.observe("s-pathless-only", "c2", "bash", { command: "npm test" }, "5 passing", { exit: 0 }, projectDir, "completed");
+    const snap = store.snapshots("s-pathless-only").get("c2");
+    assert.equal(snap?.incomplete, true, "pathless-only mutation must produce incomplete verification snapshot");
+    assert.equal(snap?.fingerprint, "unverified-state");
+  });
 });

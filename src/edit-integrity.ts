@@ -50,7 +50,10 @@ function fileState(directory: string, target: string): Omit<BeforeEditState, "fi
     const real = fs.realpathSync(candidate);
     const relative = path.relative(root, real);
     if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return {};
-    fd = fs.openSync(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    fd = fs.openSync(
+      real,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+    );
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return {};
     const buffer = Buffer.alloc(stat.size + 1);
@@ -70,7 +73,7 @@ function fileState(directory: string, target: string): Omit<BeforeEditState, "fi
 
 export function captureBeforeEdit(tool: string, input: Record<string, unknown>, directory: string): BeforeEditState | undefined {
   const action = extractToolAction(tool);
-  if (!/^(?:write|write_file|write_to_file|create_file|save_file|replace_file_content|file_write|file_mutate|file_edit|edit|edit_file|str_replace_editor)$/.test(action)) return undefined;
+  if (!/^(?:write|write_file|write_to_file|create_file|save_file|replace_file_content|file_write|file_mutate|file_edit|file_editor|edit|edit_file|str_replace_editor)$/.test(action)) return undefined;
   const hasFullContent =
     (Object.hasOwn(input, "content") && typeof input.content === "string") ||
     (Object.hasOwn(input, "CodeContent") && typeof input.CodeContent === "string") ||

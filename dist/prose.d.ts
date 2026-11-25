@@ -3,4 +3,6 @@
  * assistant prose so that meta-discussions, citations, and rule explanations do
  * not trigger false positive detections.
  */
-export declare function sanitizeProseForInspection(text: string): string;
+export declare function sanitizeProseForInspection(text: string, options?: {
+    preserveParagraphs?: boolean;
+}): string;

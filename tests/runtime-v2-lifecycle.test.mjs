@@ -4442,4 +4442,317 @@ describe("Deep Runtime & Config Merge Regressions", () => {
       await cleanup2();
     }
   });
+
+  test("R4 Wave 1 (R4-003): nested Code Mode tool call with missing status or failed parent must not synthesize completed exitCode 0", async () => {
+    const { normalizeV2Messages } = await import("../dist/index.js");
+    const msgs = normalizeV2Messages([
+      {
+        id: "a1",
+        type: "assistant",
+        content: [
+          {
+            type: "tool",
+            name: "execute",
+            id: "c-parent",
+            state: {
+              status: "completed",
+              input: { code: "tools.shell({ command: 'npm test' })" },
+              output: "done",
+              metadata: {
+                toolCalls: [
+                  { tool: "shell", input: { command: "npm test" }, output: "ok" },
+                ],
+              },
+            },
+          },
+          {
+            type: "tool",
+            name: "execute",
+            id: "c-parent-err",
+            state: {
+              status: "error",
+              input: { code: "tools.shell({ command: 'npm test' })" },
+              error: "script threw",
+              metadata: {
+                toolCalls: [
+                  { tool: "shell", status: "completed", input: { command: "npm test" }, output: "ok" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+    const toolParts = msgs[0].parts.filter((p) => p.type === "tool" && p.tool === "shell");
+    assert.equal(toolParts.length, 2);
+    assert.notEqual(toolParts[0].state.status, "completed", "R4-003: nested call with missing status must stay unknown, not completed");
+    assert.equal(toolParts[0].state.exitCode, undefined, "R4-003: nested call with missing status must not synthesize exitCode 0");
+    assert.equal(toolParts[1].state.exitCode, undefined, "R4-003: nested call under errored parent must not synthesize exitCode 0");
+  });
+
+  test("R4 Wave 2 (R4-009, R4-017, R4-018, R4-022, R4-025): RPC owner clear, post-restart remediationStatus failed, interrupt grace await, prompt scope guard, and config reload error event", async (t) => {
+    const { GuardEngine, REMEDIATION_MARKER } = await import("../dist/engine.js");
+    const { finalizeSubagentHandoff, default: Guardian } = await import("../dist/index.js");
+    const { recordMeshIntervention, getLatestMeshIntervention, forgetMeshSession } = await import("../dist/bridge.js");
+    const { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD } = await import("../dist/intervention-rpc.js");
+
+    // R4-017: post-restart budget exhaustion with unresolved blocking finding must report remediationStatus: "failed" even when pendingRules is empty
+    const engine17 = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    const postRestartMsgs = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix bug" }] },
+      { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "This failure is unrelated to this change." }] },
+      { info: { id: "g1", role: "user" }, parts: [{ type: "text", text: REMEDIATION_MARKER + "\nResolve evasion.", synthetic: true, metadata: { "opencode-guardian": true } }] },
+      { info: { id: "a2", role: "assistant" }, parts: [{ type: "text", text: "Still unrelated to this change." }] },
+    ];
+    const res17 = await engine17.inspect("s-r4-017", process.cwd(), postRestartMsgs);
+    assert.equal(res17.decision, "pass");
+    assert.equal(res17.remediationStatus, "failed", "R4-017: post-restart budget exhaustion with unresolved blocking results must report remediationStatus: failed");
+
+    // R4-018: timeout must await async interrupt (bounded grace) before rejecting & releasing lease
+    let interruptResolved = false;
+    await assert.rejects(
+      finalizeSubagentHandoff({
+        sessionID: "s-r4-018",
+        directory: process.cwd(),
+        engine: new GuardEngine({ enabled: true, remediationBudget: 1 }),
+        leaseTtlMs: 500,
+        remediationTimeoutMs: 40,
+        interrupt: async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          interruptResolved = true;
+        },
+        resolveCapability: async () => ({ capability: "write-allowed", evidence: { reasons: ["test"] } }),
+        fetchMessages: async () => [
+          { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix bug" }] },
+          { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "This failure is unrelated to this change." }] },
+        ],
+        sendAndWait: () => new Promise(() => {}),
+      }),
+      /could not complete subagent remediation/i
+    );
+    assert.equal(interruptResolved, true, "R4-018: deadline timeout must await bounded interrupt completion before rejecting");
+
+    // R4-009, R4-022, R4-025: RPC clear owner-scope, prompt hook scope order, and invalid config.updated audit event
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-w2-"));
+    const stateDir = path.join(dir, "state");
+    const cfgPath = path.join(dir, "opencode-guardian.json");
+    fs.writeFileSync(cfgPath, JSON.stringify({ enabled: true, preflight: { enabled: false }, secrets: { enabled: false }, telemetry: { enabled: true, level: "violations" } }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = stateDir;
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const rpcHandlers = {};
+    let promptHook;
+    let emitEvent;
+    const cleanup = await Guardian.setup({
+      location: { directory: dir },
+      rpc: {
+        async register(_def, handlers) {
+          Object.assign(rpcHandlers, handlers);
+          return { dispose() {} };
+        },
+      },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              const ev = await new Promise((resolve) => {
+                emitEvent = resolve;
+                signal.addEventListener("abort", () => resolve(null), { once: true });
+              });
+              if (!ev) break;
+              yield ev;
+            }
+          })();
+        },
+      },
+      session: {
+        async get({ sessionID }) {
+          if (sessionID === "sess-disabled-proj") {
+            return { id: sessionID, location: { directory: path.join(dir, "disabled-child") } };
+          }
+          return { id: sessionID, location: { directory: dir } };
+        },
+        async context() { return []; },
+        async synthetic() {},
+        async hook(name, fn) {
+          if (name === "prompt") promptHook = fn;
+          return { dispose() {} };
+        },
+      },
+    });
+    t.after(async () => { await cleanup?.(); });
+
+    // R4-009: Guardian RPC clear for sessionID must NOT wipe sibling peer's intervention
+    const sid09 = "sess-r4-009";
+    t.after(() => forgetMeshSession(sid09));
+    recordMeshIntervention({
+      sessionID: sid09,
+      directory: dir,
+      owner: "opencode-hi",
+      kind: "post-warning",
+      ruleIds: ["hi/test"],
+      deterministic: false,
+      active: true,
+      updatedAt: Date.now(),
+    });
+    await rpcHandlers[GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD]({ sessionID: sid09 });
+    assert.equal(getLatestMeshIntervention(sid09)?.owner, "opencode-hi", "R4-009: Guardian RPC clear must be owner-scoped");
+
+    // R4-022: prompt hook on a disabled project must NOT wipe sibling peer intervention
+    const disabledChild = path.join(dir, "disabled-child");
+    fs.mkdirSync(disabledChild, { recursive: true });
+    fs.writeFileSync(path.join(disabledChild, "opencode-guardian.json"), JSON.stringify({ enabled: false }));
+    const sid22 = "sess-disabled-proj";
+    t.after(() => forgetMeshSession(sid22));
+    recordMeshIntervention({
+      sessionID: sid22,
+      directory: disabledChild,
+      owner: "opencode-hi",
+      kind: "post-warning",
+      ruleIds: ["hi/test"],
+      deterministic: false,
+      active: true,
+      updatedAt: Date.now(),
+    });
+    await promptHook({ sessionID: sid22, messageID: "u-dis", prompt: { text: "hello" } });
+    assert.equal(getLatestMeshIntervention(sid22)?.owner, "opencode-hi", "R4-022: prompt hook must check scope/enabled before mutating mesh state");
+
+    // R4-025: invalid config.updated must record inspection-error config-reload-failed event
+    fs.writeFileSync(cfgPath, "{ invalid json");
+    emitEvent({ type: "config.updated", data: {} });
+    await new Promise((r) => setTimeout(r, 40));
+    const logFile = path.join(stateDir, "guardian-events.jsonl");
+    assert.ok(fs.existsSync(logFile), "R4-025: invalid config.updated must write audit log");
+    const logContent = fs.readFileSync(logFile, "utf8");
+    assert.ok(logContent.includes("config-reload-failed"), `R4-025: expected config-reload-failed in audit log, got: ${logContent}`);
+  });
+
+  test("Re-audit closure: sanitizeV2ModelRequest enforces project-local scope and finalizeSubagentHandoff guards aborted signal & unhandled rejections", async (t) => {
+    const { finalizeSubagentHandoff } = await import("../dist/index.js");
+    const { GuardEngine } = await import("../dist/engine.js");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-reaudit-scope-"));
+    const proj = path.join(root, "proj");
+    const foreign = path.join(root, "foreign");
+    fs.mkdirSync(path.join(proj, ".opencode", "plugins", "opencode-guardian"), { recursive: true });
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(proj, "opencode-guardian.json"), JSON.stringify({
+      enabled: true, preflight: { enabled: false }, secrets: { enabled: true }, updateNotice: { enabled: false },
+    }));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+    let contextHook;
+    const cleanup = await Guardian.setup({
+      location: { directory: proj },
+      event: { subscribe: () => (async function* () {})() },
+      tool: { async hook() { return { dispose() {} }; } },
+      shell: { async hook() { return { dispose() {} }; } },
+      session: {
+        async get({ sessionID }) {
+          if (sessionID === "ses-unverified") throw new Error("lookup failed");
+          return { id: sessionID, location: { directory: foreign } };
+        },
+        async context() { return []; },
+        async synthetic() {},
+        async hook(kind, cb) {
+          if (kind === "context") contextHook = cb;
+          return { dispose() {} };
+        },
+      },
+    });
+    t.after(async () => { await cleanup?.(); });
+    assert.equal(typeof contextHook, "function");
+
+    // Foreign & unverified sessions must NOT be modified by project-local Guardian instance
+    const secret = "sk-proj-" + "m".repeat(36);
+    const foreignEvent = { sessionID: "ses-foreign", messages: [{ role: "user", content: secret }], system: [] };
+    await contextHook(foreignEvent);
+    assert.equal(foreignEvent.messages[0].content, secret, "project-local Guardian must not mutate foreign project session.context");
+
+    const unverifiedEvent = { sessionID: "ses-unverified", messages: [{ role: "user", content: secret }], system: [] };
+    await contextHook(unverifiedEvent);
+    assert.equal(unverifiedEvent.messages[0].content, secret, "project-local Guardian must not mutate unverified session.context");
+
+    // finalizeSubagentHandoff: late rejection after deadline must not trigger unhandledRejection
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled++; };
+    process.on("unhandledRejection", onUnhandled);
+    t.after(() => process.off("unhandledRejection", onUnhandled));
+
+    const engine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    await assert.rejects(
+      finalizeSubagentHandoff({
+        sessionID: "ses-handoff-deadline",
+        directory: proj,
+        engine,
+        remediationTimeoutMs: 25,
+        resolveCapability: async () => ({ capability: "write-allowed", evidence: { reasons: ["test"] } }),
+        fetchMessages: async () => [
+          { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the bug." }] },
+          { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+        ],
+        sendAndWait: () => new Promise((_res, rej) => {
+          setTimeout(() => rej(new Error("late host error")), 60);
+        }),
+      }),
+      /could not complete subagent remediation|exceeded deadline/i
+    );
+    await new Promise((r) => setTimeout(r, 90));
+    assert.equal(unhandled, 0, "late sendAndWait rejection after deadline must be absorbed without unhandledRejection");
+
+    // Pass-2 re-audit: resolveV2AgentCapability must retain "context.agent.list query failed" even when sessionPermissions is non-empty
+    const { resolveV2AgentCapability } = await import("../dist/agent-capability.js");
+    const capProfile = await resolveV2AgentCapability(
+      {
+        session: {
+          async get() {
+            return { id: "ses-cap-fail", agent: "explore", permissions: [{ permission: "read", effect: "allow" }] };
+          },
+        },
+        agent: {
+          async list() {
+            throw new Error("agent list down");
+          },
+        },
+      },
+      "ses-cap-fail",
+      []
+    );
+    assert.equal(capProfile.capability, "unknown");
+    assert.ok(
+      capProfile.evidence.reasons.some((r) => /agent\.list.*failed/i.test(r)),
+      `expected context.agent.list query failed in reasons, got: ${JSON.stringify(capProfile.evidence.reasons)}`
+    );
+
+    // Pass-2 re-audit: finalizeSubagentHandoff must rollback remediationBudget when blocked by a mesh user_interaction lease
+    const { acquireSessionLease } = await import("../dist/bridge.js");
+    const releaseLease = acquireSessionLease({
+      sessionID: "ses-lease-rb",
+      owner: "opencode-smart-questions",
+      kind: "user_interaction",
+      ttlMs: 30_000,
+    });
+    t.after(() => releaseLease());
+    const leaseEngine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    await finalizeSubagentHandoff({
+      sessionID: "ses-lease-rb",
+      directory: proj,
+      engine: leaseEngine,
+      resolveCapability: async () => ({ capability: "write-allowed", evidence: { reasons: ["test"] } }),
+      fetchMessages: async () => [
+        { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the bug." }] },
+        { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+      ],
+      sendAndWait: async () => { throw new Error("must not send while leased"); },
+    });
+    assert.equal(
+      leaseEngine.sessionState.getTurnRemediationCount("ses-lease-rb", "u1"),
+      0,
+      "lease-blocked finalizeSubagentHandoff must roll back consumed remediation budget"
+    );
+  });
 });

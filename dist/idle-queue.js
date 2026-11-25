@@ -60,6 +60,9 @@ export function createIdleQueue(signal, onError) {
             if (!entry.running && !entry.timer)
                 arm(sessionID, entry);
         },
+        has(sessionID) {
+            return entries.has(sessionID);
+        },
         forget,
         clear,
     };

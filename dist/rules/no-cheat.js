@@ -345,20 +345,22 @@ export const noCheatRule = {
                 const patchRaw = input.patchText ?? input.patch;
                 const targetFile = input.path ??
                     input.targetFile ??
+                    input.TargetFile ??
                     input.filePath ??
                     input.file ??
                     extractFilePathFromPatch(patchRaw);
-                if (typeof input.content === "string") {
-                    // Whole-file writes may preserve pre-existing skips/ignores. Treat
-                    // them as advisory unless failed-test evidence or strict structural
-                    // mode makes the intent suspicious.
-                    checkTestCode(input.content, targetFile, blockStructuralTestChanges);
+                for (const key of ["content", "file_text", "CodeContent", "text"]) {
+                    if (typeof input[key] === "string") {
+                        // Whole-file writes may preserve pre-existing skips/ignores. Treat
+                        // them as advisory unless failed-test evidence or strict structural
+                        // mode makes the intent suspicious.
+                        checkTestCode(input[key], targetFile, blockStructuralTestChanges);
+                    }
                 }
-                if (typeof input.new_string === "string") {
-                    checkTestCode(input.new_string, targetFile);
-                }
-                if (typeof input.newString === "string") {
-                    checkTestCode(input.newString, targetFile);
+                for (const key of ["new_string", "newString", "new_str", "ReplacementContent"]) {
+                    if (typeof input[key] === "string") {
+                        checkTestCode(input[key], targetFile);
+                    }
                 }
                 for (const edit of extractStructuredEditTexts(input, targetFile)) {
                     checkTestCode(edit.text, edit.filePath);

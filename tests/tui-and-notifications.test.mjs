@@ -1761,4 +1761,95 @@ describe("Version Update Notice", () => {
       clearToastListeners();
     }
   });
+
+  test("R4 Wave 3 (R4-033): server RPC exposes directory-scoped status and reset methods for remote TUI clients", async (t) => {
+    const rpcMod = await import("../dist/intervention-rpc.js");
+    const { default: Guardian } = await import("../dist/index.js");
+    assert.ok(rpcMod.GUARDIAN_STATUS_RPC_METHOD, "R4-033: GUARDIAN_STATUS_RPC_METHOD must be exported");
+    assert.ok(rpcMod.GUARDIAN_RESET_RPC_METHOD, "R4-033: GUARDIAN_RESET_RPC_METHOD must be exported");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-033-"));
+    const stateDir = path.join(dir, "state");
+    fs.writeFileSync(path.join(dir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true, preflight: { enabled: false }, secrets: { enabled: false }, telemetry: { enabled: true, level: "all" },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = stateDir;
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const handlers = {};
+    const cleanup = await Guardian.setup({
+      location: { directory: dir },
+      rpc: {
+        async register(_def, map) {
+          Object.assign(handlers, map);
+          return { dispose() {} };
+        },
+      },
+      event: { subscribe: () => (async function* () {})() },
+      session: { async context() { return []; }, async synthetic() {} },
+    });
+    t.after(async () => { await cleanup?.(); });
+
+    const statusRes = await handlers[rpcMod.GUARDIAN_STATUS_RPC_METHOD]({ directory: dir });
+    assert.equal(statusRes.ok, true);
+    assert.equal(statusRes.status.preflight, "disabled");
+
+    const resetRes = await handlers[rpcMod.GUARDIAN_RESET_RPC_METHOD]({ directory: dir });
+    assert.equal(resetRes.ok, true);
+    assert.match(resetRes.title, /Reset/i);
+  });
+
+  test("Re-audit closure: /guardian status uses server RPC status when available", async (t) => {
+    const rpcMod = await import("../dist/intervention-rpc.js");
+    const { registerGuardianV2Commands } = await import("../dist/tui.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-reaudit-status-rpc-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    let commands = [];
+    const alerts = [];
+    registerGuardianV2Commands({
+      keymap: { layer(factory) { commands = factory().commands; } },
+      ui: { dialog: { async alert(r) { alerts.push(r); }, async confirm() { return false; } } },
+      client: {
+        rpc() {
+          return {
+            async [rpcMod.GUARDIAN_STATUS_RPC_METHOD]() {
+              return {
+                ok: true,
+                status: {
+                  preflight: "active",
+                  inspected: 42,
+                  blocked: 3,
+                  warnings: 1,
+                  remediations: 2,
+                  errors: 0,
+                  verified: 2,
+                  failed: 0,
+                  unverified: 0,
+                  streamStops: 0,
+                  streamVerified: 0,
+                  streamIneffective: 0,
+                  redacted: 7,
+                  telemetryLevel: "violations",
+                  truncated: false,
+                  lastKind: "post-inspected",
+                },
+              };
+            },
+          };
+        },
+      },
+    }, () => dir);
+
+    const statusCmd = commands.find((c) => c.id === "opencode-guardian.status");
+    assert.ok(statusCmd);
+    await statusCmd.run();
+    assert.match(alerts[0]?.message ?? "", /Inspections \(tool \+ turn\): 42/);
+    assert.match(alerts[0]?.message ?? "", /Secret redactions \(in-memory\): 7/);
+  });
 });

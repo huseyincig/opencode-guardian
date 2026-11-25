@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![OpenCode: V2 (>=2.3.0)](https://img.shields.io/badge/OpenCode-V2%20(%3E%3D2.3.0)-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
 [![V2 host baseline](https://img.shields.io/badge/Host%20baseline-v2.4.1%20verified-10b981?logo=checkmarx&logoColor=white)](docs/acceptance-v2.md)
-[![Tests: 892/892 Passing](https://img.shields.io/badge/Tests-892%2F892%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
+[![Tests: 911/911 Passing](https://img.shields.io/badge/Tests-911%2F911%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -23,10 +23,10 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 > Guardian **v0.17.9** was verified on **25 November 2026** against live **OpenCode v2.4.1** on Node **26.13.1** and Bun **1.4.4**.
 
-- **Current Automated Verification:** **892 / 892** unit, security, mesh interoperability, project scope isolation, toast notification, and regression tests passing.
+- **Current Automated Verification:** **911 / 911** unit, security, mesh interoperability, project scope isolation, toast notification, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
 - **Live V2 Host Acceptance:** **10 / 10** real-host checks verified (packed `.tgz` in Node 26.13.1 + Bun 1.4.4, full V2.4.1 server hooks + `./rpc` + TUI slots/commands, and live `opencode v2.4.1` CLI host).
-- **Static Analysis:** standard and strict TypeScript gates pass (`--strict --exactOptionalPropertyTypes`); Oxlint reports **0 warnings / 0 errors** across 119 files.
+- **Static Analysis:** standard and strict TypeScript gates pass (`--strict --exactOptionalPropertyTypes`); Oxlint reports **0 warnings / 0 errors** across 65 files.
 - **Low-I/O & Zero-Pollution Telemetry Architecture:** Default `violations` mode eliminates 90–95% of disk syscalls while tracking live in-memory inspection and secret-redaction counters, caching directory verification and nanosecond file stats (`statusFileCache`), bounding logs to 512 KiB, and isolating per-project audit logs in `~/.local/state/opencode-guardian/projects/<projectHash>/guardian-events.jsonl` (or `$XDG_STATE_HOME/opencode-guardian/...`) without polluting project `.opencode/` directories.
 
 Read the comprehensive [V2 Acceptance Report](docs/acceptance-v2.md) and [Verification and Acceptance Report](docs/verification-report.md) for reproduction steps, methodology, and full test matrices.

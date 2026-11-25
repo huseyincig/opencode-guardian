@@ -2661,4 +2661,180 @@ describe("Multi-Project & Audit Regressions", () => {
       "string"
     );
   });
+
+  test("R4 Wave 3 (R4-036, R4-040, R4-044): per-file stub dedup, bounded >2 MiB code masking, and doctor critical preflight reporting", async (t) => {
+    const { noStubsRule } = await import("../dist/rules/no-stubs.js");
+    const { maskCodeLiterals } = await import("../dist/code-context.js");
+    const { guardianCommandReport } = await import("../dist/commands.js");
+
+    // R4-040: same stub pattern across two different files must produce findings for BOTH files
+    const stubTurn = [
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/a.ts", content: "export function a() { throw new NotImplementedError('todo'); }" } } },
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/b.ts", content: "export function b() { throw new NotImplementedError('todo'); }" } } },
+        ],
+      },
+    ];
+    const stubRes = noStubsRule.inspect({
+      sessionID: "s-r4-040",
+      directory: process.cwd(),
+      currentTurn: stubTurn,
+      history: stubTurn,
+      ruleConfig: {},
+    });
+    assert.equal(stubRes.decision, "block");
+    assert.equal(stubRes.findings.length, 2, "R4-040: identical stub patterns in two distinct files must both be reported");
+    assert.deepEqual(stubRes.findings.map((f) => f.filePath).sort(), ["src/a.ts", "src/b.ts"]);
+
+    // R4-036: >2 MiB source must still scan bounded prefix rather than silently returning ""
+    const hugeCode = "export function f() { throw new NotImplementedError(); }\n" + " ".repeat(2 * 1024 * 1024 + 100);
+    const masked = maskCodeLiterals(hugeCode, false, "src/huge.ts");
+    assert.ok(masked.includes("NotImplementedError"), "R4-036: >2 MiB source must scan bounded prefix instead of returning empty string");
+
+    // R4-044: /guardian-doctor must accurately report Critical preflight mode, not Autonomous (Strict)
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r4-044-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(dir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: true, mode: "critical" },
+    }));
+    const doc = await guardianCommandReport("doctor", dir, "0.17.9");
+    assert.match(doc.message, /Autonomous \(Critical Preflight\)/, `R4-044: doctor must report Critical Preflight, got:\n${doc.message}`);
+    assert.ok(!doc.message.includes("Autonomous (Strict)"), "R4-044: doctor must not misreport critical mode as Autonomous (Strict)");
+  });
+
+  test("Re-audit closure: multiple stubs in same file, circuit-breaker probe redirection/subcommands, and disabled doctor report", async (t) => {
+    const { noStubsRule } = await import("../dist/rules/no-stubs.js");
+    const { circuitBreakerRule } = await import("../dist/rules/circuit-breaker.js");
+    const { guardianCommandReport } = await import("../dist/commands.js");
+
+    // Multiple stubs of the same pattern in ONE file must both be reported
+    const sameFileStubRes = noStubsRule.inspect({
+      sessionID: "s-multi-stub",
+      directory: process.cwd(),
+      currentTurn: [{
+        info: { id: "a1", role: "assistant" },
+        parts: [{
+          type: "tool",
+          tool: "write",
+          state: {
+            status: "completed",
+            input: {
+              path: "src/service.ts",
+              content: "export function a() { throw new NotImplementedError('first'); }\nexport function b() { throw new NotImplementedError('second'); }\n",
+            },
+          },
+        }],
+      }],
+      history: [],
+      ruleConfig: {},
+    });
+    assert.equal(sameFileStubRes.findings.length, 2, "distinct stubs in the same file must all be reported");
+
+    // Circuit breaker must skip subcommand probes (`npm test --help`) and probes with `2>&1`
+    const probeTurn = [
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "FAIL x", metadata: { exit: 1 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test --help" }, output: "usage", metadata: { exit: 0 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "FAIL x", metadata: { exit: 1 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "pytest --version 2>&1" }, output: "pytest 8", metadata: { exit: 0 } } },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "FAIL x", metadata: { exit: 1 } } },
+        ],
+      },
+    ];
+    const cbRes = circuitBreakerRule.inspect({
+      sessionID: "s-cb-probe",
+      directory: process.cwd(),
+      currentTurn: probeTurn,
+      history: probeTurn,
+      ruleConfig: {},
+    });
+    assert.equal(cbRes.decision, "block", "interleaved --help and --version 2>&1 probes must not reset circuit-breaker streak");
+
+    // Doctor & config when enabled: false must report Disabled and NOT emit preflight mismatch warning
+    const disabledDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-disabled-doc-"));
+    t.after(() => fs.rmSync(disabledDir, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(disabledDir, "opencode-guardian.json"), JSON.stringify({
+      enabled: false,
+      preflight: { enabled: true, mode: "strict" },
+    }));
+    const disabledDoc = await guardianCommandReport("doctor", disabledDir, "0.17.9");
+    assert.match(disabledDoc.message, /Protection mode: Disabled/);
+    assert.match(disabledDoc.message, /Preflight mode: disabled/);
+    assert.ok(!disabledDoc.message.includes("Attention: configured preflight"), "disabled Guardian must not emit preflight mismatch attention warning");
+    const disabledCfg = await guardianCommandReport("config", disabledDir, "0.17.9");
+    assert.match(disabledCfg.message, /Protection mode: Disabled/);
+    assert.match(disabledCfg.message, /Preflight mode: disabled/);
+
+    // Pass-2 re-audit: noStubsRule must scan new_str, CodeContent, ReplacementContent, and TargetFile
+    for (const input of [
+      { path: "src/a.ts", new_str: "throw new NotImplementedError();" },
+      { TargetFile: "src/b.ts", CodeContent: "export function run() {}" },
+      { TargetFile: "src/c.ts", ReplacementContent: "throw new NotImplementedError();" },
+    ]) {
+      const res = noStubsRule.inspect({
+        sessionID: "s-stub-keys",
+        directory: process.cwd(),
+        currentTurn: [{ info: { id: "a1", role: "assistant" }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input } }] }],
+        history: [],
+        ruleConfig: {},
+      });
+      assert.equal(res.decision, "block", `noStubsRule must inspect ${JSON.stringify(Object.keys(input))}`);
+    }
+
+    // Pass-2 re-audit: partial-line edit stub disk recheck must NOT falsely verify when stub remains on disk
+    const recheckDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-stub-recheck-"));
+    t.after(() => fs.rmSync(recheckDir, { recursive: true, force: true }));
+    fs.mkdirSync(path.join(recheckDir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(recheckDir, "src", "a.ts"), "export function f() { throw new NotImplementedError(); }\nexport const x = 2;\n");
+    const { GuardEngine } = await import("../dist/engine.js");
+    const recheckEngine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    const turn1 = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Implement f" }] },
+      { info: { id: "a1", role: "assistant" }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { path: "src/a.ts", old_string: "return 1;", new_string: "throw new NotImplementedError();" } } }, { type: "text", text: "Done." }] },
+    ];
+    const r1 = await recheckEngine.inspect("s-partial-stub", recheckDir, turn1);
+    assert.equal(r1.decision, "block");
+    const turn2 = [
+      ...turn1,
+      { info: { id: "rem1", role: "user" }, parts: [{ type: "text", text: r1.combinedRemediationPrompt, synthetic: true, metadata: { "opencode-guardian": true } }] },
+      { info: { id: "a2", role: "assistant" }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { path: "src/a.ts", old_string: "x = 1", new_string: "x = 2" } } }, { type: "text", text: "Updated." }] },
+    ];
+    const r2 = await recheckEngine.inspect("s-partial-stub", recheckDir, turn2);
+    assert.notEqual(r2.remediationStatus, "verified", "partial-line stub still present on disk must never verify remediation");
+
+    // Pass-3 re-audit: all remaining code rules inspect new_str/CodeContent/TargetFile, and no-silent-failure uses per-file patch paths
+    const { noTruncationRule } = await import("../dist/rules/no-truncation.js");
+    const { noCheatRule } = await import("../dist/rules/no-cheat.js");
+    const { noSilentFailureRule } = await import("../dist/rules/no-silent-failure.js");
+    const { noShortcutsRule } = await import("../dist/rules/no-shortcuts.js");
+    fs.writeFileSync(path.join(recheckDir, "package.json"), JSON.stringify({ name: "tmp-pass3", dependencies: {} }));
+    const mkCtx = (input, ruleConfig = {}) => ({
+      sessionID: "s-pass3-keys",
+      directory: recheckDir,
+      currentTurn: [{ info: { id: "a1", role: "assistant" }, parts: [{ type: "tool", tool: "str_replace_editor", state: { status: "completed", input } }] }],
+      history: [],
+      ruleConfig,
+    });
+    assert.equal(noTruncationRule.inspect(mkCtx({ TargetFile: "src/a.ts", new_str: "// ... existing code unchanged ..." })).decision, "block");
+    assert.equal(noCheatRule.inspect(mkCtx({ TargetFile: "src/a.test.ts", new_str: 'test.skip("x", () => {})' })).decision, "block");
+    assert.equal(noSilentFailureRule.inspect(mkCtx({ TargetFile: "src/a.ts", new_str: "try { a(); } catch (e) {}" }, { blockEmptyHandlers: true })).decision, "block");
+    assert.equal(noShortcutsRule.inspect(mkCtx({ TargetFile: "src/a.ts", new_str: "// TODO: implement auth" })).decision, "block");
+    assert.equal(noGhostDepsRule.inspect(mkCtx({ TargetFile: "src/a.ts", new_str: 'import x from "nonexistent-ghost-pkg";' })).decision, "block");
+    // Patch with JS/TS private class field `#f` must preserve filePath so `#` is not treated as a Python comment
+    assert.equal(
+      noSilentFailureRule.inspect(
+        mkCtx(
+          { patchText: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,2 @@\n class A {\n+  #f = 1; run() { try { x(); } catch (e) {} }\n" },
+          { blockEmptyHandlers: true }
+        )
+      ).decision,
+      "block",
+      "noSilentFailureRule must preserve patch filePath so JS/TS #privateField does not mask catch (e) {}"
+    );
+  });
 });

@@ -16,6 +16,8 @@ import {
   GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD,
   GUARDIAN_INTERVENTION_RPC_DEFINITION,
   GUARDIAN_INTERVENTION_RPC_METHOD,
+  GUARDIAN_RESET_RPC_METHOD,
+  GUARDIAN_STATUS_RPC_METHOD,
   parseGuardianInterventionSnapshot,
 } from "./intervention-rpc.js";
 import { GUARDIAN_COMMANDS, guardianCommandReport, guardianResetReport,
@@ -166,6 +168,41 @@ function v2UiConfig(directory: string, options: unknown) {
   }
 }
 
+async function withRpcTimeout<T>(promise: Promise<T>, timeoutMs = 1500): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("RPC timeout")), timeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function fetchServerStatusViaRpc(
+  context: GuardianV2Context,
+  directory: string
+): Promise<ReturnType<typeof readGuardianStatus> | undefined> {
+  if (typeof context.client?.rpc !== "function") return undefined;
+  try {
+    const rpcClient = context.client.rpc(GUARDIAN_INTERVENTION_RPC_DEFINITION);
+    const rpcStatus = rpcClient?.[GUARDIAN_STATUS_RPC_METHOD];
+    if (typeof rpcStatus !== "function") return undefined;
+    const res = await withRpcTimeout(
+      rpcStatus({ directory }, { location: { directory } })
+    ) as { ok?: unknown; status?: ReturnType<typeof readGuardianStatus> } | undefined;
+    return res?.ok === true && res.status && typeof res.status === "object"
+      ? res.status
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function v2PerformCommand(
   context: GuardianV2Context, command: GuardianCommand, directory: string,
   onReset?: (directory: string) => void
@@ -177,7 +214,26 @@ async function v2PerformCommand(
       label: { confirm: "Reset counters", cancel: "Cancel" },
     });
     if (confirmed !== true) return;
-    const result = guardianResetReport(directory);
+    let result: { title: string; message: string } | undefined;
+    if (typeof context.client?.rpc === "function") {
+      try {
+        const rpcClient = context.client.rpc(GUARDIAN_INTERVENTION_RPC_DEFINITION);
+        const rpcReset = rpcClient?.[GUARDIAN_RESET_RPC_METHOD];
+        if (typeof rpcReset === "function") {
+          const remote = await withRpcTimeout(
+            rpcReset({ directory }, { location: { directory } })
+          ) as { title?: unknown; message?: unknown } | undefined;
+          if (remote && typeof remote.title === "string" && typeof remote.message === "string") {
+            result = { title: remote.title, message: remote.message };
+          }
+        }
+      } catch {
+        // Fall back to local reset when RPC host is unavailable (e.g. standalone/unit tests).
+      }
+    }
+    if (!result) {
+      result = guardianResetReport(directory);
+    }
     const resetSucceeded = !result.message.startsWith("Reset failed");
     if (resetSucceeded) {
       if (onReset) {
@@ -189,7 +245,16 @@ async function v2PerformCommand(
     await context.ui.dialog.alert(result);
     return;
   }
-  const result = await guardianCommandReport(command, directory, guardianVersion, context.options);
+  const remoteStatus = command === "status"
+    ? await fetchServerStatusViaRpc(context, directory)
+    : undefined;
+  const result = await guardianCommandReport(
+    command,
+    directory,
+    guardianVersion,
+    context.options,
+    remoteStatus
+  );
   await context.ui.dialog.alert(result);
 }
 
@@ -271,13 +336,38 @@ function GuardianSidebar(props: {
   configInvalid?: () => boolean;
   configEnabled?: () => boolean;
   configPreflight?: () => boolean;
+  fetchRemoteStatus?: ((dir: string) => Promise<ReturnType<typeof readGuardianStatus> | undefined>) | undefined;
 }) {
   const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
   const [status, setStatus] = createSignal(readGuardianStatus(currentDirectory()));
-  const syncStatus = (dir: string) => {
-    const next = readGuardianStatus(dir);
-    setStatus((prev) => (guardianStatusEqual(prev, next) ? prev : next));
+  let statusSeq = 0;
+  let remoteSucceededForDir: string | undefined;
+  const syncStatus = (dir: string, forceDiskFallback = false) => {
+    const seq = ++statusSeq;
+    const hasRemote = Boolean(props.fetchRemoteStatus);
+    if (!hasRemote || forceDiskFallback || remoteSucceededForDir !== dir) {
+      const next = readGuardianStatus(dir);
+      setStatus((prev) => (guardianStatusEqual(prev, next) ? prev : next));
+    }
+    if (props.fetchRemoteStatus) {
+      void props.fetchRemoteStatus(dir).then((remote) => {
+        if (disposed || seq !== statusSeq || currentDirectory() !== dir) return;
+        if (remote) {
+          remoteSucceededForDir = dir;
+          setStatus((prev) => (guardianStatusEqual(prev, remote) ? prev : remote));
+        } else {
+          remoteSucceededForDir = undefined;
+          const fallback = readGuardianStatus(dir);
+          setStatus((prev) => (guardianStatusEqual(prev, fallback) ? prev : fallback));
+        }
+      }).catch(() => {
+        if (disposed || seq !== statusSeq || currentDirectory() !== dir) return;
+        remoteSucceededForDir = undefined;
+        const fallback = readGuardianStatus(dir);
+        setStatus((prev) => (guardianStatusEqual(prev, fallback) ? prev : fallback));
+      });
+    }
   };
   createEffect(() => {
     const dir = currentDirectory();
@@ -947,6 +1037,24 @@ const v2Plugin: Plugin.Definition = {
           configInvalid={() => sessionConfig().configInvalid}
           configEnabled={() => sessionConfig().enabled !== false}
           configPreflight={() => (sessionConfig() as { preflight?: { enabled?: boolean } }).preflight?.enabled === true}
+          fetchRemoteStatus={
+            interventionRpc && typeof interventionRpc[GUARDIAN_STATUS_RPC_METHOD] === "function"
+              ? async (dir: string) => {
+                  const res = await withRpcTimeout(
+                    interventionRpc[GUARDIAN_STATUS_RPC_METHOD](
+                      { directory: dir },
+                      { location: { directory: dir } }
+                    )
+                  ) as {
+                    ok?: unknown;
+                    status?: ReturnType<typeof readGuardianStatus>;
+                  } | undefined;
+                  return res?.ok === true && res.status && typeof res.status === "object"
+                    ? res.status
+                    : undefined;
+                }
+              : undefined
+          }
           colors={colors()} />;
       },
     });

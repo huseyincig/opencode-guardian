@@ -14,6 +14,7 @@ export declare class StreamLoopWatcher {
         settings: (sessionID: string) => Promise<Settings>;
         interrupt: (sessionID: string, directory: string, signal: AbortSignal) => Promise<unknown>;
         notifier: GuardianToastNotifier;
+        interruptTimeoutMs?: number;
     });
     clear(): void;
     private endVerification;

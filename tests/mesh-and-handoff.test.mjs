@@ -2166,4 +2166,79 @@ describe("Chat Turn Isolation & Hardening", () => {
       "R3-029: Guardian owner-scoped clear must not wipe sibling plugin intervention"
     );
   });
+
+  test("R4 Wave 2 (R4-043, R4-008): same-tier role resolvers merge restrictively and legacy isTrustedMeshMessage enforces expectedKind", async (t) => {
+    const {
+      resetMeshStateForTests: resetMesh,
+      registerRoleProfileResolver: regResolver,
+      resolveMeshAgentProfile: resolveProfile,
+      isTrustedMeshMessage: isTrusted,
+    } = await import("../dist/bridge.js");
+    resetMesh();
+    t.after(() => resetMesh());
+
+    const dir = "/tmp/r4-043-restrictive";
+    const disposePermissive = regResolver({
+      owner: "peer-permissive",
+      directory: dir,
+      resolve: () => ({ capability: "write-allowed", managedBy: "peer-permissive" }),
+    });
+    const disposeRestrictive = regResolver({
+      owner: "peer-restrictive",
+      directory: dir,
+      resolve: () => ({ capability: "read-only", managedBy: "peer-restrictive" }),
+    });
+    t.after(() => {
+      disposePermissive();
+      disposeRestrictive();
+    });
+
+    const merged = await resolveProfile("sess-r4-043", dir);
+    assert.equal(
+      merged?.capability,
+      "read-only",
+      "R4-043: most restrictive capability in same directory tier must win regardless of registration order"
+    );
+
+    // R4-008: legacy fallback must respect expectedKind (peer hi message is NOT a Guardian remediation)
+    const peerWake = {
+      type: "synthetic",
+      synthetic: true,
+      metadata: { "opencode-hi": true, "hi-internal": "wake" },
+    };
+    assert.equal(
+      isTrusted(peerWake, "sess-r4-008", "remediation"),
+      false,
+      "R4-008: legacy fallback must not match opencode-hi peer wake as Guardian remediation"
+    );
+
+    // Re-audit closure: meshEnv.synthetic === false must NOT fall through to legacy metadata,
+    // and legacy visible marker must not satisfy remediation/handoff expectedKind
+    const nonSyntheticEnvelope = {
+      synthetic: true,
+      metadata: {
+        "opencode-mesh": { v: 2, owner: "opencode-guardian", kind: "remediation", synthetic: false },
+        "opencode-guardian": true,
+      },
+    };
+    assert.equal(
+      isTrusted(nonSyntheticEnvelope, "sess-r4-008"),
+      false,
+      "V2 mesh envelope with synthetic: false must reject immediately without legacy fallthrough"
+    );
+    const legacyVisible = {
+      synthetic: true,
+      metadata: { "opencode-guardian": true, "opencode-guardian-visible": true },
+    };
+    assert.equal(
+      isTrusted(legacyVisible, "sess-r4-008", "remediation"),
+      false,
+      "legacy visible marker must never satisfy remediation expectedKind"
+    );
+    assert.equal(
+      isTrusted(legacyVisible, "sess-r4-008", "visible"),
+      true,
+      "legacy visible marker still matches visible expectedKind"
+    );
+  });
 });

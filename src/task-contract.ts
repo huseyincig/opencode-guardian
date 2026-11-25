@@ -15,13 +15,14 @@ export interface TaskContract {
   iterativeReview: boolean;
   requiresSourceReview: boolean;
   requiredVerifications: Array<"test" | "build" | "typecheck" | "lint" | "audit">;
+  prohibitedVerifications?: Array<"test" | "build" | "typecheck" | "lint" | "audit">;
   requiresExplicitCompletion: boolean;
   /** Optional locale of explicit multilingual signals. Not a universal language detector. */
   signalLocale?: string;
 }
 
-function userText(message: SessionMessage): string {
-  if (isTrustedMeshMessage(message)) return "";
+function userText(message: SessionMessage, sessionID?: string): string {
+  if (isTrustedMeshMessage({ ...message, parts: undefined }, sessionID)) return "";
   return message.parts
     .filter(
       (part) =>
@@ -29,19 +30,20 @@ function userText(message: SessionMessage): string {
         typeof part.text === "string" &&
         part.synthetic !== true &&
         part.ignored !== true &&
-        !isTrustedMeshMessage(part)
+        !isTrustedMeshMessage(part, sessionID)
     )
     .map((part) => part.text ?? "")
     .join("\n");
 }
 
 export function currentHumanMessage(
-  messages: readonly SessionMessage[]
+  messages: readonly SessionMessage[],
+  sessionID?: string
 ): SessionMessage | undefined {
   return messages.findLast(
     (message) =>
       message.info.role === "user" &&
-      userText(message).trim().length > 0
+      userText(message, sessionID).trim().length > 0
   );
 }
 
@@ -81,16 +83,17 @@ export function parseExplicitTaskDirective(text: string): ExplicitTaskDirective 
 }
 
 export function extractTaskContract(
-  messages: readonly SessionMessage[]
+  messages: readonly SessionMessage[],
+  sessionID?: string
 ): TaskContract | undefined {
-  const human = currentHumanMessage(messages);
+  const human = currentHumanMessage(messages, sessionID);
   if (!human) return undefined;
-  const text = userText(human).trim();
+  const text = userText(human, sessionID).trim();
   if (!text) return undefined;
 
   // 1. Explicit machine-readable directive takes highest precedence
   const directive = parseExplicitTaskDirective(text);
-  const body = sanitizeUserInstruction(text.startsWith("@guardian-task ")
+  const body = sanitizeUserInstruction(directive
     ? text.slice(text.indexOf("\n") < 0 ? text.length : text.indexOf("\n") + 1).trim()
     : text);
 
@@ -113,8 +116,12 @@ export function extractTaskContract(
       : advisory.requiredVerifications;
 
   // A natural-language prohibition cannot be overridden by a machine-readable header.
+  const allVerificationKinds = ["test", "build", "typecheck", "lint", "audit"] as const;
+  const prohibitedVerifications = allVerificationKinds.filter((kind) =>
+    deniedVerification(body, kind)
+  );
   const requiredVerifications = requestedVerifications.filter((kind) =>
-    !deniedVerification(body, kind)
+    !prohibitedVerifications.includes(kind)
   );
 
   const signalLocale = directive ? "structured" : advisory.signalLocale;
@@ -127,6 +134,7 @@ export function extractTaskContract(
     requiresSourceReview: iterativeReview &&
       (directive ? directive.review === "source" : advisory.requiresSourceReview),
     requiredVerifications,
+    ...(prohibitedVerifications.length > 0 ? { prohibitedVerifications } : {}),
     requiresExplicitCompletion: iterativeReview || requiredVerifications.length > 0,
     ...(signalLocale ? { signalLocale } : {}),
   };

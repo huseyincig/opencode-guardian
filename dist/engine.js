@@ -20,6 +20,7 @@ import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import { extractTaskContract, latestMutationSequence, } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff } from "./handoff.js";
+import { resolveSanitizerOptions } from "./secrets/index.js";
 import { isTrustedGuardianMetadata } from "./provenance.js";
 import { clearActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, isTrustedMeshMessage, setActiveMeshHandoff, } from "./bridge.js";
 export const REMEDIATION_MARKER = "[opencode-guardian remediation]";
@@ -410,12 +411,37 @@ export function resolveEffectiveConfig(base, rawOptions) {
     }
     return merged;
 }
+function readRegularTextFileBounded(filePath, maxBytes) {
+    let fd;
+    try {
+        fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.size > maxBytes)
+            return undefined;
+        const buf = Buffer.alloc(stat.size + 1);
+        const bytesRead = stat.size > 0 ? fs.readSync(fd, buf, 0, buf.length, 0) : 0;
+        if (bytesRead !== stat.size)
+            return undefined;
+        return buf.toString("utf8", 0, bytesRead);
+    }
+    finally {
+        if (fd !== undefined) {
+            try {
+                fs.closeSync(fd);
+            }
+            catch { }
+        }
+    }
+}
 function readSingleConfigFile(candidatePaths) {
     for (const configPath of candidatePaths) {
         if (!fs.existsSync(configPath))
             continue;
         try {
-            const raw = fs.readFileSync(configPath, "utf8");
+            const raw = readRegularTextFileBounded(configPath, 256 * 1024);
+            if (raw === undefined) {
+                throw new Error("configuration file is not a bounded regular file");
+            }
             const parsed = JSON.parse(raw);
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
                 throw new Error("configuration root must be a JSON object");
@@ -472,14 +498,10 @@ export function loadConfig(directory) {
 function isSyntheticUserMessage(message, sessionID) {
     if (message.info.role !== "user")
         return false;
-    if (isTrustedMeshMessage(message, sessionID))
+    if (isTrustedMeshMessage({ ...message, parts: undefined }, sessionID))
         return true;
     return Boolean(message.parts?.length && message.parts.every((part) => part.synthetic === true ||
         part.ignored === true ||
-        (part.metadata &&
-            typeof part.metadata === "object" &&
-            (part.metadata["opencode-guardian-visible"] === true ||
-                part.metadata["opencode-guardian-kind"] === "visible")) ||
         isTrustedGuardianMetadata(sessionID, part.metadata) ||
         isTrustedMeshMessage(part, sessionID)));
 }
@@ -709,7 +731,7 @@ export class GuardEngine {
         const persistedRemediationCount = completionTurn.filter((msg) => isGuardianRemediationMessage(msg, sessionID)).length;
         const contract = isPeerWakeTurn
             ? undefined
-            : extractTaskContract(currentTurn);
+            : extractTaskContract(currentTurn, sessionID);
         const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
         const freshTurn = isPeerWakeTurn
             ? [firstCurrentMessage, ...currentTurn.slice(lastPeerWakeIndex + 1)]
@@ -778,6 +800,9 @@ export class GuardEngine {
                 currentTurn: isCompletionGate ? completionTurn : freshTurn,
                 isSubagent,
                 agentCapability: options?.agentCapability,
+                secretOptions: this.config.secrets?.enabled === false
+                    ? undefined
+                    : (resolveSanitizerOptions(this.config) ?? undefined),
                 ruleConfig,
                 evidence: isCompletionGate ? completionEvidence : freshEvidence,
             };
@@ -898,8 +923,10 @@ export class GuardEngine {
                     results,
                     ...(effectiveRemediationResponse
                         ? {
-                            remediationStatus: pendingRules.length ? "failed" : "unverified",
-                            pendingRemediationRules: pendingRules,
+                            remediationStatus: pendingRules.length > 0 || blockingResults.length > 0
+                                ? "failed"
+                                : "unverified",
+                            pendingRemediationRules: pendingRules.length ? pendingRules : blockingRuleIds,
                         }
                         : {}),
                 };
@@ -910,8 +937,12 @@ export class GuardEngine {
                     decision: "pass",
                     results,
                     ...(effectiveRemediationResponse
-                        ? { remediationStatus: pendingRules.length ? "failed" : "unverified",
-                            pendingRemediationRules: pendingRules }
+                        ? {
+                            remediationStatus: pendingRules.length > 0 || blockingResults.length > 0
+                                ? "failed"
+                                : "unverified",
+                            pendingRemediationRules: pendingRules.length ? pendingRules : blockingRuleIds,
+                        }
                         : {}),
                 };
             }
@@ -966,6 +997,9 @@ export class GuardEngine {
             if (verified && pendingRules.includes("security/no-secrets")) {
                 // Check actual files, not only the proposed tool input. No file on
                 // disk, an out-of-scope path or an unreadable file means unverified.
+                const recheckSecretOptions = this.config.secrets?.enabled === false
+                    ? undefined
+                    : (resolveSanitizerOptions(this.config) ?? undefined);
                 verified = pendingFiles.length > 0 && pendingFiles.every((rel) => {
                     if (!fixedPaths.has(rel))
                         return false;
@@ -981,10 +1015,10 @@ export class GuardEngine {
                         if (realRelative === ".." || realRelative.startsWith(".." + path.sep) ||
                             path.isAbsolute(realRelative))
                             return false;
-                        const info = fs.lstatSync(full);
-                        if (!info.isFile() || info.size > 2 * 1024 * 1024)
+                        const diskText = readRegularTextFileBounded(realFile, 2 * 1024 * 1024);
+                        if (diskText === undefined)
                             return false;
-                        const remainingSecrets = findAllSecretsInCode(fs.readFileSync(full, "utf8"), rel);
+                        const remainingSecrets = findAllSecretsInCode(diskText, rel, undefined, recheckSecretOptions);
                         if (remainingSecrets.length > 0) {
                             originalFindingsRemain = true;
                             return false;
@@ -1015,17 +1049,18 @@ export class GuardEngine {
                     }
                     let content;
                     try {
-                        const actual = path.relative(fs.realpathSync(root), fs.realpathSync(full));
+                        const realFile = fs.realpathSync(full);
+                        const actual = path.relative(fs.realpathSync(root), realFile);
                         if (actual === ".." || actual.startsWith(".." + path.sep) || path.isAbsolute(actual)) {
                             verified = false;
                             break;
                         }
-                        const info = fs.lstatSync(full);
-                        if (!info.isFile() || info.size > 2 * 1024 * 1024) {
+                        const bounded = readRegularTextFileBounded(realFile, 2 * 1024 * 1024);
+                        if (bounded === undefined) {
                             verified = false;
                             break;
                         }
-                        content = fs.readFileSync(full, "utf8");
+                        content = bounded;
                     }
                     catch {
                         verified = false;

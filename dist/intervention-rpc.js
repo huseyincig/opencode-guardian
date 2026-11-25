@@ -1,6 +1,8 @@
 export const GUARDIAN_INTERVENTION_RPC_ID = "opencode-guardian.intervention";
 export const GUARDIAN_INTERVENTION_RPC_METHOD = "latest";
 export const GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD = "clear";
+export const GUARDIAN_STATUS_RPC_METHOD = "status";
+export const GUARDIAN_RESET_RPC_METHOD = "reset";
 const defineRpc = (definition) => definition;
 export const GUARDIAN_INTERVENTION_RPC_DEFINITION = defineRpc({
     id: GUARDIAN_INTERVENTION_RPC_ID,
@@ -42,6 +44,43 @@ export const GUARDIAN_INTERVENTION_RPC_DEFINITION = defineRpc({
                     cleared: { type: "boolean" },
                 },
                 required: ["cleared"],
+                additionalProperties: false,
+            },
+        },
+        [GUARDIAN_STATUS_RPC_METHOD]: {
+            input: {
+                type: "object",
+                properties: {
+                    directory: { type: "string", minLength: 1, maxLength: 4096 },
+                },
+                additionalProperties: false,
+            },
+            output: {
+                type: "object",
+                properties: {
+                    ok: { type: "boolean" },
+                    status: { type: "object" },
+                },
+                required: ["ok"],
+                additionalProperties: false,
+            },
+        },
+        [GUARDIAN_RESET_RPC_METHOD]: {
+            input: {
+                type: "object",
+                properties: {
+                    directory: { type: "string", minLength: 1, maxLength: 4096 },
+                },
+                additionalProperties: false,
+            },
+            output: {
+                type: "object",
+                properties: {
+                    ok: { type: "boolean" },
+                    title: { type: "string" },
+                    message: { type: "string" },
+                },
+                required: ["ok", "title", "message"],
                 additionalProperties: false,
             },
         },

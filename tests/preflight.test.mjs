@@ -1011,4 +1011,112 @@ describe("Backtick & Inert Discussion Preflight Gaps", () => {
       "move action must remain allowed"
     );
   });
+
+  test("R4 Wave 1 (R4-010, R4-011, R4-012): delete-only patches block, move/copy require paths, run_terminal_cmd is covered, and partial edits reject uninspectable items", () => {
+    // R4-010: delete-only patch must be subject to strict/critical delete protection
+    assert.equal(
+      evaluatePreflight_7("apply_patch", { patchText: "*** Begin Patch\n*** Delete File: src/app.ts\n*** End Patch" }, [], "strict"),
+      "destructive-command",
+      "R4-010: delete-only apply_patch must block in strict mode"
+    );
+    assert.equal(
+      evaluatePreflight_7("apply_patch", { patchText: "--- a/src/app.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-export const x = 1;\n" }, [], "strict"),
+      "destructive-command",
+      "R4-010: unified delete-only patch must block in strict mode"
+    );
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "move" }, [], "strict"),
+      "uninspectable-file-input",
+      "R4-010: move action without source/destination must fail as uninspectable-file-input"
+    );
+
+    // R4-011: run_terminal_cmd must be recognized identically in preflight and evidence
+    assert.equal(
+      evaluatePreflight_7("run_terminal_cmd", { command: "rm -rf /tmp/x" }, [], "strict"),
+      "destructive-command",
+      "R4-011: run_terminal_cmd must be covered by shell preflight"
+    );
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__run_terminal_cmd", { command: "rm -rf /tmp/x" }, [], "strict"),
+      "destructive-command",
+      "R4-011: MCP run_terminal_cmd must be covered by shell preflight"
+    );
+
+    // R4-012: partial edits array with one valid edit and one uninspectable object must fail closed
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", {
+        action: "edit",
+        path: "src/app.ts",
+        edits: [
+          { new_string: "const ok = 1;" },
+          { target: "src/secret.ts", opaquePayload: "sk-proj-1234567890abcdefghijklmnop" },
+        ],
+      }, [], "strict"),
+      "uninspectable-file-input",
+      "R4-012: mixed inspectable/uninspectable edits array must return uninspectable-file-input"
+    );
+  });
+
+  test("Re-audit closure: unified diff blank context line, trailing-slash catastrophic paths, and delete+secret payload", () => {
+    // Blank context line inside unified diff hunk must not swallow subsequent `+++ /dev/null` file deletion
+    const blankContextDeletePatch = [
+      "--- a/src/keep.ts",
+      "+++ b/src/keep.ts",
+      "@@ -1,3 +1,3 @@",
+      " export const a = 1;",
+      "",
+      "-export const b = 2;",
+      "+export const b = 3;",
+      "--- a/src/victim.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-export const doomed = true;",
+    ].join("\n");
+    assert.equal(
+      evaluatePreflight_7("apply_patch", { patchText: blankContextDeletePatch }, [], "strict"),
+      "destructive-command",
+      "blank context line in prior hunk must not hide subsequent +++ /dev/null delete"
+    );
+
+    // Trailing-slash catastrophic targets (./, ../, ~/) and Windows root / root-globs must block in critical mode
+    for (const target of ["./", "../", "~/", "~", "\\", "/*", "./*", "../*", "~/*", "C:\\*"]) {
+      assert.equal(
+        evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "delete", path: target }, [], "critical"),
+        "destructive-command",
+        `catastrophic target '${target}' must block in critical mode`
+      );
+    }
+
+    // CRLF unified diff with blank context line must also preserve subsequent +++ /dev/null section
+    const crlfDeletePatch = [
+      "--- a/fixtures/a.ts",
+      "+++ b/fixtures/a.ts",
+      "@@ -1,3 +1,3 @@",
+      " line1",
+      "",
+      "-old",
+      "+new",
+      "--- a/src/prod.ts",
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "-important();",
+    ].join("\r\n");
+    assert.equal(
+      evaluatePreflight_7("apply_patch", { patch: crlfDeletePatch }, [], "strict"),
+      "destructive-command",
+      "CRLF unified diff with blank context line must not drop subsequent +++ /dev/null delete"
+    );
+
+    // Non-catastrophic delete carrying hardcoded secret content in critical mode must still scan attached text
+    assert.equal(
+      evaluatePreflight_7(
+        "mcp__provider_a__file_mutate",
+        { action: "delete", path: "src/tmp.ts", content: "const k = 'sk-proj-abcdefghijklmnopqrstuvwxyz1234567890';" },
+        [],
+        "critical"
+      ),
+      "hardcoded-secret-in-file-write",
+      "critical-mode non-catastrophic delete must still scan attached write content for secrets"
+    );
+  });
 });

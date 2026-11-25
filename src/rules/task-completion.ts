@@ -12,7 +12,8 @@ function latestAssistantProse(context: TurnInspectionContext): string {
     last.parts
       .filter((part) => part.type === "text" && typeof part.text === "string")
       .map((part) => part.text ?? "")
-      .join("\n")
+      .join("\n\n"),
+    { preserveParagraphs: true }
   );
 }
 
@@ -28,7 +29,7 @@ export const taskCompletionRule: GuardRule = {
   id: "task/completion-gate",
   description: "Checks explicit iterative-review and verification requirements before accepting completion.",
   inspect(context): RuleResult {
-    const contract = extractTaskContract(context.currentTurn);
+    const contract = extractTaskContract(context.currentTurn, context.sessionID);
     const evidence = context.evidence;
     const prose = latestAssistantProse(context);
     const findings: RuleFinding[] = [];
@@ -176,6 +177,9 @@ export const taskCompletionRule: GuardRule = {
         if (later.kind !== failure.kind) return false;
 
         if (failure.command || later.command) {
+          if ((failure.cwd || later.cwd) && failure.cwd !== later.cwd) {
+            return false;
+          }
           return Boolean(
             failure.command &&
             later.command &&

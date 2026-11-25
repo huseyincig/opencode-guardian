@@ -2,10 +2,11 @@ import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } fro
 import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
-import { extractStructuredEditTexts, extractToolAction, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
+import { extractStructuredEditInspection, extractToolAction, KNOWN_SHELL_TOOLS, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
 export { extractToolAction } from "./tool-input.js";
 import { findTruncationPlaceholder } from "./edit-integrity.js";
 import type { PreflightMode } from "./types.js";
+import type { SanitizerOptions } from "./secrets/types.js";
 
 export type PreflightFinding =
   | "destructive-command"
@@ -19,13 +20,9 @@ export type PreflightFinding =
   | "hallucinated-or-malformed-package";
 
 /**
- * Shell tools known to execute shell commands.
+ * Shell tools known to execute shell commands (shared canonical set).
  */
-const SHELL_TOOLS = new Set([
-  "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
-  "execute_command", "command", "run_command", "run_shell_command",
-  "powershell", "pwsh", "cmd", "privileged_shell_exec",
-]);
+const SHELL_TOOLS = KNOWN_SHELL_TOOLS;
 
 /**
  * Tools that write or mutate files on disk.
@@ -137,7 +134,8 @@ function isWindowsDestructiveCommand(command: string, depth = 0): boolean {
 export function evaluateFileMutationPreflight(
   tool: string,
   input: unknown,
-  mode: PreflightMode = "strict"
+  mode: PreflightMode = "strict",
+  secretOptions?: SanitizerOptions
 ): PreflightFinding | undefined {
   if (!isFileMutationTool(tool)) return undefined;
   if (!input || typeof input !== "object" || Array.isArray(input)) return "uninspectable-file-input";
@@ -162,6 +160,7 @@ export function evaluateFileMutationPreflight(
   }
 
   let hasValidPatchStructure = false;
+  const deletedPatchTargets: string[] = [];
   if (typeof patchRaw === "string") {
     const sections = splitFilePatches(patchRaw);
     if (
@@ -172,6 +171,9 @@ export function evaluateFileMutationPreflight(
     }
     if (sections.length > 0) {
       for (const section of sections) {
+        if (section.deleted) {
+          deletedPatchTargets.push(section.filePath ?? section.previousPath ?? "");
+        }
         const sectionAdded = extractAddedLines(section.patch);
         if (sectionAdded) {
           const sectionPath =
@@ -194,18 +196,30 @@ export function evaluateFileMutationPreflight(
   }
 
   // File mutation providers also accept structured edit arrays. Preserve each
-  // edit's own target path so path-based sample/template exceptions can never
-  // bleed from one file into another.
+  // edit's own target path and reject any array containing an uninspectable edit.
   if (Array.isArray(args.edits)) {
-    for (const edit of args.edits) {
-      if (!edit || typeof edit !== "object" || Array.isArray(edit)) {
-        return "uninspectable-file-input";
-      }
-    }
-    textsToCheck.push(...extractStructuredEditTexts(
+    const editInspection = extractStructuredEditInspection(
       args,
       typeof targetFile === "string" ? targetFile : undefined
-    ));
+    );
+    if (editInspection.hasUninspectableEdit) {
+      return "uninspectable-file-input";
+    }
+    textsToCheck.push(...editInspection.texts);
+  }
+
+  const isCatastrophicPath = (raw: string): boolean => {
+    const trimmed = raw.trim().replace(/[\\/]+$/, (m, offset) => (offset === 0 ? m : ""));
+    return !trimmed || /^(?:[\\/]+\*+|[\\/]+|~(?:[\\/]+\*+)?|\.\.?(?:[\\/]+\*+)?|\*+|[a-z]:(?:[\\/]+\*+)?|[a-z]:[\\/]?)$/i.test(trimmed);
+  };
+
+  if (deletedPatchTargets.length > 0) {
+    if (mode === "strict") {
+      return "destructive-command";
+    }
+    if (deletedPatchTargets.some((p) => isCatastrophicPath(p))) {
+      return "destructive-command";
+    }
   }
 
   const action = typeof args.action === "string" ? args.action.toLowerCase() : "";
@@ -217,23 +231,30 @@ export function evaluateFileMutationPreflight(
     const isCatastrophicDelete =
       args.recursive === true ||
       args.force === true ||
-      !delTarget ||
-      /^(?:\/+|~|\.\.?|\*|[a-z]:\\?)$/i.test(delTarget);
+      isCatastrophicPath(delTarget);
     if (isCatastrophicDelete) {
       return "destructive-command";
     }
-    return undefined;
-  }
-  if (
-    !["move", "copy"].includes(action) &&
-    !hasValidPatchStructure &&
-    textsToCheck.length === 0
-  ) {
+    // Fall through to scan any attached textsToCheck instead of returning early.
+  } else if (action === "move" || action === "copy") {
+    const src =
+      (typeof args.source === "string" && args.source.trim()) ||
+      (typeof args.from === "string" && args.from.trim()) ||
+      (typeof targetFile === "string" && targetFile.trim());
+    const dst =
+      (typeof args.destination === "string" && args.destination.trim()) ||
+      (typeof args.to === "string" && args.to.trim()) ||
+      (typeof args.dest === "string" && args.dest.trim()) ||
+      (typeof args.target === "string" && args.target.trim());
+    if (!src || !dst) {
+      return "uninspectable-file-input";
+    }
+  } else if (!hasValidPatchStructure && textsToCheck.length === 0) {
     return "uninspectable-file-input";
   }
 
   for (const item of textsToCheck) {
-    const found = findSecretInCode(item.text, item.filePath);
+    const found = findSecretInCode(item.text, item.filePath, secretOptions);
     if (found) {
       return "hardcoded-secret-in-file-write";
     }
@@ -363,7 +384,8 @@ export function evaluatePreflight(
   tool: string,
   input: unknown,
   additionalTools: readonly string[] = [],
-  mode: PreflightMode = "strict"
+  mode: PreflightMode = "strict",
+  secretOptions?: SanitizerOptions
 ): PreflightFinding | undefined {
   if (isProcessStartTool(tool)) {
     return evaluateProcessStartPreflight(input, mode);
@@ -410,7 +432,7 @@ export function evaluatePreflight(
   }
 
   if (isFileMutationTool(tool)) {
-    return evaluateFileMutationPreflight(tool, input, mode);
+    return evaluateFileMutationPreflight(tool, input, mode, secretOptions);
   }
 
   return undefined;
@@ -445,8 +467,9 @@ export function enforcePreflight(
   tool: string,
   input: unknown,
   additionalTools: readonly string[] = [],
-  mode: PreflightMode = "strict"
+  mode: PreflightMode = "strict",
+  secretOptions?: SanitizerOptions
 ): void {
-  const finding = evaluatePreflight(tool, input, additionalTools, mode);
+  const finding = evaluatePreflight(tool, input, additionalTools, mode, secretOptions);
   if (finding) throw new GuardianPreflightError(finding);
 }

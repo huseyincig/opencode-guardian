@@ -13,16 +13,36 @@ export const GUARDIAN_COMMANDS = [
     { id: "reset", title: "Guardian: Reset Statistics", description: "Reset counters without erasing the security audit trail" },
 ];
 function option(value) { return value ? "enabled" : "disabled"; }
-export async function guardianCommandReport(command, directory, installedVersion, options) {
+export async function guardianCommandReport(command, directory, installedVersion, options, remoteStatus) {
     // The TUI and status CLI run outside the server process, so their telemetry
     // registry is empty: report the project's effective setting, not a fallback.
+    // Register under a temporary owner only while reading local status and clean
+    // it up immediately in finally so same-process server telemetry is never
+    // overwritten or leaked when config changes.
+    let registeredTempTelemetry = false;
+    if (!remoteStatus) {
+        try {
+            const loadedTelemetry = resolveEffectiveConfig(loadConfig(directory), options).telemetry;
+            if (loadedTelemetry !== undefined) {
+                configureGuardianTelemetry(directory, loadedTelemetry, "guardian-commands");
+                registeredTempTelemetry = true;
+            }
+        }
+        catch {
+            // A broken config is reported by the config command; keep the default level.
+        }
+    }
+    let status;
+    let localTelemetryLevel;
     try {
-        configureGuardianTelemetry(directory, resolveEffectiveConfig(loadConfig(directory), options).telemetry);
+        status = remoteStatus ?? readGuardianStatus(directory);
+        localTelemetryLevel = resolveTelemetrySettings(directory).level;
     }
-    catch {
-        // A broken config is reported by the config command; keep the default level.
+    finally {
+        if (registeredTempTelemetry) {
+            configureGuardianTelemetry(directory, undefined, "guardian-commands");
+        }
     }
-    const status = readGuardianStatus(directory);
     switch (command) {
         case "status": {
             const sample = readGuardianActivity(directory, 25);
@@ -33,10 +53,10 @@ export async function guardianCommandReport(command, directory, installedVersion
             }
             const popular = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
                 .map(([rule, count]) => rule + " (" + count + ")").join(", ");
-            const telem = resolveTelemetrySettings(directory);
-            const modeDesc = telem.level === "violations"
+            const telemLevel = remoteStatus?.telemetryLevel ?? localTelemetryLevel;
+            const modeDesc = telemLevel === "violations"
                 ? "violations (clean turns omit disk I/O)"
-                : telem.level;
+                : telemLevel;
             return {
                 title: "Guardian: Project Status",
                 message: [
@@ -79,14 +99,25 @@ export async function guardianCommandReport(command, directory, installedVersion
             }
             const log = guardianEventPath(directory);
             const present = fs.existsSync(log);
-            const match = config.preflight?.enabled === true && status.preflight !== "active";
+            const guardianEnabled = config.enabled !== false;
+            const preflightEnabled = guardianEnabled && config.preflight?.enabled === true;
+            const preflightMode = preflightEnabled
+                ? (config.preflight?.mode ?? "strict")
+                : "disabled";
+            const protectionMode = !guardianEnabled
+                ? "Disabled"
+                : preflightEnabled
+                    ? (config.preflight?.mode === "critical" ? "Autonomous (Critical Preflight)" : "Autonomous (Strict)")
+                    : "Autonomous (Standard)";
+            const match = preflightEnabled && status.preflight !== "active";
             return {
                 title: "Guardian: Diagnostics",
                 message: [
                     "Configuration: valid",
-                    "Guardian: " + option(config.enabled !== false),
-                    "Strict preflight configured: " + option(config.preflight?.enabled === true),
-                    "Protection mode: " + (config.preflight?.enabled === true ? "Autonomous (Strict)" : "Autonomous (Standard)"),
+                    "Guardian: " + option(guardianEnabled),
+                    "Strict preflight configured: " + option(preflightEnabled && preflightMode !== "critical"),
+                    "Preflight mode: " + preflightMode,
+                    "Protection mode: " + protectionMode,
                     "Preflight at last recorded start: " + status.preflight,
                     "Audit log: " + (present ? "present" : "not created"),
                     "Audit window: " + (status.truncated ? "partial or unreadable" : "readable"),
@@ -124,17 +155,21 @@ export async function guardianCommandReport(command, directory, installedVersion
             catch {
                 return { title: "Guardian: Configuration", message: "Configuration is invalid. No raw file contents will be displayed." };
             }
-            const preflightMode = config.preflight?.enabled === true
+            const guardianEnabled = config.enabled !== false;
+            const preflightEnabled = guardianEnabled && config.preflight?.enabled === true;
+            const preflightMode = preflightEnabled
                 ? (config.preflight?.mode ?? "strict")
                 : "disabled";
-            const protectionMode = config.preflight?.enabled === true
-                ? (config.preflight?.mode === "critical" ? "Autonomous (Critical Preflight)" : "Autonomous (Strict)")
-                : "Autonomous (Standard)";
+            const protectionMode = !guardianEnabled
+                ? "Disabled"
+                : preflightEnabled
+                    ? (config.preflight?.mode === "critical" ? "Autonomous (Critical Preflight)" : "Autonomous (Strict)")
+                    : "Autonomous (Standard)";
             return {
                 title: "Guardian: Configuration",
                 message: [
-                    "Guardian: " + option(config.enabled !== false),
-                    "Strict preflight: " + option(config.preflight?.enabled === true),
+                    "Guardian: " + option(guardianEnabled),
+                    "Strict preflight: " + option(preflightEnabled && preflightMode !== "critical"),
                     "Preflight mode: " + preflightMode,
                     "Protection mode: " + protectionMode,
                     "Project config overrides: " + (config.allowProjectOverrides === false ? "locked" : "allowed"),

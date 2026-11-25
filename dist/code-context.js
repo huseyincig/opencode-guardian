@@ -3,9 +3,9 @@
  * line breaks stay stable. String delimiters remain for call-shape patterns;
  * literal contents (including template bodies) never become executable code.
  */
-export function maskCodeLiterals(source, keepComments = false, filePath) {
-    if (source.length > 2 * 1024 * 1024)
-        return "";
+export function maskCodeLiterals(rawSource, keepComments = false, filePath) {
+    const MAX_LEX_BYTES = 2 * 1024 * 1024;
+    const source = rawSource.length > MAX_LEX_BYTES ? rawSource.slice(0, MAX_LEX_BYTES) : rawSource;
     const output = source.split("");
     const blank = (start, end) => {
         for (let at = start; at < end; at++) {

@@ -8,6 +8,7 @@ import {
   extractLikelyShellMutation,
   extractStructuredEditTexts,
   extractToolCommand,
+  splitFilePatches,
 } from "../tool-input.js";
 import { isVerificationFailureMask } from "../evidence.js";
 import { maskCodeLiterals } from "../code-context.js";
@@ -171,18 +172,28 @@ export const noSilentFailureRule: GuardRule = {
       for (const part of message.parts) {
         if (part.type !== "tool" || !part.state?.input) continue;
         const input = part.state.input;
-        const target = input.filePath ?? input.path ?? input.file ?? input.targetFile;
+        const target = input.filePath ?? input.path ?? input.file ?? input.targetFile ?? input.TargetFile;
         const filePath = typeof target === "string" ? target : undefined;
 
-        for (const value of [
-          input.content,
-          input.new_string,
-          input.newString,
-          extractAddedLines(input.patchText ?? input.patch),
-          extractLikelyShellMutation(input),
-        ]) {
+        for (const key of [
+          "content",
+          "new_string",
+          "newString",
+          "new_str",
+          "file_text",
+          "CodeContent",
+          "ReplacementContent",
+          "text",
+        ] as const) {
+          const value = input[key];
           if (typeof value === "string" && value) checkCode(value, "code mutation", filePath);
         }
+        for (const section of splitFilePatches(input.patchText ?? input.patch)) {
+          const patchText = extractAddedLines(section.patch);
+          if (patchText) checkCode(patchText, "patch code mutation", section.filePath ?? filePath);
+        }
+        const shellMutation = extractLikelyShellMutation(input);
+        if (shellMutation) checkCode(shellMutation, "shell code mutation", filePath);
         for (const edit of extractStructuredEditTexts(input)) {
           checkCode(edit.text, "structured code mutation", edit.filePath ?? filePath);
         }

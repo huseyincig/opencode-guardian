@@ -30,6 +30,7 @@ export const SAFE_RULE_IDS = new Set([
     "hardcoded-secret-in-file-write", "truncation-placeholder-in-file-write", "lazy-commit-message", "hallucinated-or-malformed-package",
     "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
+    "config-reload-failed",
     "v2-event-stream-error", "v2-event-stream-unavailable",
     "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);
@@ -43,6 +44,7 @@ export const SAFE_REASON_CODES = new Set([
     "hardcoded-secret-in-file-write", "truncation-placeholder-in-file-write", "lazy-commit-message", "hallucinated-or-malformed-package",
     "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
+    "config-reload-failed",
     "v2-event-stream-error", "v2-event-stream-unavailable",
     "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);

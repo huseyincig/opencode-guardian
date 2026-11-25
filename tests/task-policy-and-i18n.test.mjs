@@ -833,4 +833,120 @@ describe("International Adapter Behavior", () => {
     assert.equal(closingAfterProgress.isClosing, true, "R3-042: explicit completion in final paragraph must classify as closing even when earlier prose mentions processing/step");
     assert.equal(closingAfterProgress.state, "completed");
   });
+
+  test("R4 Wave 1 (R4-039, R4-037): task/completion-gate preserves paragraph breaks for final completion and malformed @guardian-task keeps line 1", async () => {
+    const { taskCompletionRule } = await import("../dist/rules/task-completion.js");
+    const { collectTurnEvidence } = await import("../dist/evidence.js");
+    const { extractTaskContract } = await import("../dist/task-contract.js");
+
+    // R4-039: multi-paragraph report mentioning earlier progress ("Step 1: fixed processing")
+    // followed by concluding completion ("All done, task completed.") must NOT bypass completion-gate.
+    const turn = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Review every issue, fix it, and restart the review until zero bugs remain. Run the tests." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/parser.ts", content: "export const ok = true;\n" }, output: "ok" } },
+          { type: "text", text: "Step 1: fixed JSON processing.\n\nAll done, task completed." },
+        ],
+      },
+    ];
+    const evidence = collectTurnEvidence(turn, process.cwd());
+    const result = taskCompletionRule.inspect({
+      sessionID: "s-r4-039",
+      directory: process.cwd(),
+      currentTurn: turn,
+      history: turn,
+      evidence,
+      ruleConfig: {},
+      isSubagent: false,
+      agentCapability: "write-allowed",
+    });
+    assert.equal(result.decision, "block", "R4-039: task/completion-gate must preserve paragraph breaks so concluding completion cannot be masked by earlier progress prose");
+
+    // R4-037: malformed @guardian-task line must NOT strip line 1 natural language instructions.
+    const contract = extractTaskContract([
+      { info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "@guardian-task malformed please run the tests" }] },
+    ]);
+    assert.equal(contract?.requiredVerifications.includes("test"), true, "R4-037: invalid @guardian-task directive must not discard line 1 instructions");
+  });
+
+  test("Re-audit closure: English ALL-CAPS completion/blocker, multi-part assistant paragraphs, multi-blocker stripping, and mixed human+mesh user messages", async () => {
+    const { classifyAgentReport } = await import("../dist/locale-intents.js");
+    const { taskCompletionRule } = await import("../dist/rules/task-completion.js");
+    const { extractTaskContract } = await import("../dist/task-contract.js");
+    const { createGuardianMessageMetadata } = await import("../dist/provenance.js");
+
+    // English ALL-CAPS "TASK FINISHED" and "CANNOT VERIFY" must not break via Turkish dotless-ı replacement
+    assert.equal(classifyAgentReport("TASK FINISHED.").isClosing, true, "ALL-CAPS 'TASK FINISHED.' must classify as closing");
+    assert.equal(classifyAgentReport("CANNOT VERIFY DUE TO MISSING CREDENTIALS.").state, "blocked", "ALL-CAPS 'CANNOT VERIFY' must classify as blocked");
+
+    // Pass-2 re-audit: Turkish Unicode boundaries (ı, ç, ü) must match cleanly
+    const {
+      isUncertaintyClaim,
+      getClaimPatterns,
+      SQL_TARGET_CONTEXT_REGEX,
+      isDeleteTargetRequested,
+      isSqlDestructionRequested,
+      isImperativeExecutionRequest,
+    } = await import("../dist/locale-intents.js");
+    assert.equal(classifyAgentReport("Görev tamamlandı.").isClosing, true, "Turkish 'Görev tamamlandı.' must classify as closing");
+    assert.equal(classifyAgentReport("Testleri çalıştıramıyorum, görev tamamlanmadı.").hasClearBlocker, true, "Turkish blocker must match Unicode boundaries");
+    assert.equal(classifyAgentReport("çalışmamız devam ediyor").isInProgress, true, "Turkish Unicode stem in IN_PROGRESS_REGEX must match");
+    assert.equal(classifyAgentReport("ödeniyorum").isInProgress, false, "substring 'deniyorum' inside 'ödeniyorum' must not match");
+    assert.equal(SQL_TARGET_CONTEXT_REGEX.test("eski veritabanı analytics"), true, "Turkish 'veritabanı' must match SQL_TARGET_CONTEXT_REGEX");
+    assert.equal(SQL_TARGET_CONTEXT_REGEX.test("eski şema analytics"), true, "Turkish 'şema' must match SQL_TARGET_CONTEXT_REGEX");
+    assert.equal(isDeleteTargetRequested("kaldırım fotoğrafını göster"), false, "'kaldırım' must not false-positive as 'kaldır'");
+    assert.equal(isSqlDestructionRequested("kaldırım"), false, "'kaldırım' must not false-positive in SQL destruction");
+    assert.equal(isImperativeExecutionRequest("çalıştırıp test etme"), false, "'çalıştırıp' must not false-positive as imperative 'çalıştır'");
+    assert.equal(isUncertaintyClaim("Testler doğrulanmadı."), true, "Turkish uncertainty must match Unicode boundaries");
+    const claimPatterns = getClaimPatterns();
+    assert.equal(claimPatterns.some((p) => p.regex.test("testler başarılı")), true, "Turkish 'testler başarılı' claim must match");
+    assert.equal(claimPatterns.some((p) => p.regex.test("sorun çözüldü")), true, "Turkish 'sorun çözüldü' claim must match");
+    assert.equal(claimPatterns.some((p) => p.regex.test("çalışma ağacı temiz")), true, "Turkish 'çalışma ağacı temiz' claim must match");
+
+    // Multiple blocker sentences must all be stripped before checking for closing
+    const multiBlocker = classifyAgentReport("Blocked by missing database credentials. Also cannot run integration tests in this sandbox.");
+    assert.equal(multiBlocker.state, "blocked");
+    assert.equal(multiBlocker.isClosing, false);
+
+    // Multi-part assistant response must preserve paragraph breaks between parts
+    const multiPartTurn = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Review every issue, fix it, and restart the review until zero bugs remain. Run the tests." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/app.ts", content: "export const ok = 1;\n" }, output: "ok" } },
+          { type: "text", text: "Step 1: updated src/app.ts while working on the fix." },
+          { type: "text", text: "All done, task completed." },
+        ],
+      },
+    ];
+    const { collectTurnEvidence } = await import("../dist/evidence.js");
+    const mpRes = taskCompletionRule.inspect({
+      sessionID: "s-multipart",
+      directory: process.cwd(),
+      currentTurn: multiPartTurn,
+      history: multiPartTurn,
+      evidence: collectTurnEvidence(multiPartTurn, process.cwd()),
+      ruleConfig: {},
+      isSubagent: false,
+      agentCapability: "write-allowed",
+    });
+    assert.equal(mpRes.decision, "block", "multi-part assistant response ending with completion must not be masked by earlier progress part");
+
+    // Mixed user message containing both a trusted mesh synthetic part and a genuine human text part
+    const sid = "s-mixed-user";
+    const meshMeta = createGuardianMessageMetadata(sid, "remediation");
+    const mixedContract = extractTaskContract([
+      {
+        info: { id: "u-mix", role: "user" },
+        parts: [
+          { type: "text", text: "synthetic notice", synthetic: true, metadata: meshMeta },
+          { type: "text", text: "Please update src/a.ts and run the tests." },
+        ],
+      },
+    ], sid);
+    assert.equal(mixedContract?.requiredVerifications.includes("test"), true, "mixed user message must still extract human text parts");
+  });
 });

@@ -1,3 +1,4 @@
+export { KNOWN_READ_ONLY_TOOLS, isKnownReadOnlyTool } from "./tool-input.js";
 import type { SessionMessage } from "./types.js";
 export type AgentMutationCapability = "read-only" | "write-allowed" | "write-requires-approval" | "unknown";
 export interface AgentMutationEvidence {
@@ -12,8 +13,6 @@ export interface AgentMutationProfile {
     capability: AgentMutationCapability;
     evidence: AgentMutationEvidence;
 }
-export declare const KNOWN_READ_ONLY_TOOLS: Set<string>;
-export declare function isKnownReadOnlyTool(toolName: string): boolean;
 export interface V2PermissionRule {
     permission?: string | undefined;
     action?: string | undefined;

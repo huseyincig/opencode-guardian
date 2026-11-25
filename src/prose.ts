@@ -3,9 +3,12 @@
  * assistant prose so that meta-discussions, citations, and rule explanations do
  * not trigger false positive detections.
  */
-export function sanitizeProseForInspection(text: string): string {
+export function sanitizeProseForInspection(
+  text: string,
+  options?: { preserveParagraphs?: boolean }
+): string {
   if (typeof text !== "string") return "";
-  return text
+  const stripped = text
     // Strip fenced code blocks (``` ... ```)
     .replace(/```[\s\S]*?```/g, " ")
     // Strip inline code spans (` ... `)
@@ -13,7 +16,16 @@ export function sanitizeProseForInspection(text: string): string {
     // Strip markdown blockquotes (> ...)
     .replace(/^>+[^\n]*/gm, " ")
     // Strip double-quoted or smart-quoted phrases ("..." or “...”)
-    .replace(/(?:["“][^"”\n]{1,300}["”])/g, " ")
+    .replace(/(?:["“][^"”\n]{1,300}["”])/g, " ");
+  if (options?.preserveParagraphs) {
+    return stripped
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+  return stripped
     // Collapse whitespace
     .replace(/\s+/g, " ")
     .trim();

@@ -55,6 +55,18 @@ function primaryRecords(context) {
     }
     return [...bySequence.values()];
 }
+function isTrivialProbeCommand(record) {
+    const raw = record.command?.trim();
+    if (!raw)
+        return false;
+    const cleaned = raw
+        .replace(/\s+\d*>&\d+\b/g, "")
+        .replace(/\s+2>\s*\/dev\/null\b/g, "")
+        .trim();
+    // Single-command or subcommand --version / --help probes (e.g. `node --version`, `npm test --help`, `pytest --version 2>&1`)
+    return /^(?:[a-z0-9_./-]+)(?:\s+(?:run|-m)?\s*[a-z0-9_.:-]+){0,2}\s+(?:--version|-V|--help|-h)\s*$/i.test(cleaned) ||
+        /^(?:[a-z0-9_./-]+)\s+-v\s*$/i.test(cleaned);
+}
 export const circuitBreakerRule = {
     id: "runtime/circuit-breaker",
     description: "Detects repeated failing invocations and repeated root-cause error fingerprints without progress.",
@@ -67,9 +79,11 @@ export const circuitBreakerRule = {
                 continue;
             const family = commandFamily(record);
             if (record.status === "success") {
-                for (const [signature, state] of exactCounts) {
-                    if (commandFamily(state.last) === family) {
-                        exactCounts.delete(signature);
+                if (!isTrivialProbeCommand(record)) {
+                    for (const [signature, state] of exactCounts) {
+                        if (commandFamily(state.last) === family) {
+                            exactCounts.delete(signature);
+                        }
                     }
                 }
                 continue;
@@ -106,9 +120,11 @@ export const circuitBreakerRule = {
                 continue;
             const family = commandFamily(record);
             if (record.status === "success") {
-                for (const key of streaks.keys()) {
-                    if (key.startsWith(`${family}::`))
-                        streaks.delete(key);
+                if (!isTrivialProbeCommand(record)) {
+                    for (const key of streaks.keys()) {
+                        if (key.startsWith(`${family}::`))
+                            streaks.delete(key);
+                    }
                 }
                 continue;
             }

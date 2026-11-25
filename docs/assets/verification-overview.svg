@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="318" viewBox="0 0 1200 318" role="img" aria-labelledby="title description">
 <title id="title">OpenCode Guardian test results</title>
-<desc id="description">852 of 852 v0.17.9 local automated tests, 18 of 18 sandbox scenarios, and 17 of 17 synthetic security benchmark cases pass on Node 26.13.1. 10 of 10 live acceptance checks pass on OpenCode v2.4.1 and Bun 1.4.4.</desc>
+<desc id="description">911 of 911 v0.17.9 local automated tests, 18 of 18 sandbox scenarios, and 17 of 17 synthetic security benchmark cases pass on Node 26.13.1. 10 of 10 live acceptance checks pass on OpenCode v2.4.1 and Bun 1.4.4.</desc>
 <rect width="1200" height="318" rx="14" fill="#111619"/>
 <rect x=".5" y=".5" width="1199" height="317" rx="13.5" stroke="#353e42" fill="none"/>
 <path d="M36 37l12-6 12 6v11c0 9-7 15-12 18-5-3-12-9-12-18z" fill="none" stroke="#72d9ad" stroke-width="2"/>
@@ -9,7 +9,7 @@
 <text x="76" y="68" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">v0.17.9 Automated Verification • Pure OpenCode v2.4.1 Architecture</text>
 <path d="M36 91H1164" stroke="#353e42"/>
 <text x="40" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">AUTOMATED TESTS</text>
-<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">852<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 852</tspan></text>
+<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">911<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 911</tspan></text>
 <text x="40" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
 <text x="40" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Unit and regression</text>
 <path d="M310 117v165" stroke="#353e42"/>

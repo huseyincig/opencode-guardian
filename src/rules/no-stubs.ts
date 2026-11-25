@@ -76,28 +76,39 @@ export const noStubsRule: GuardRule = {
       const fixture = /(?:^|[/\\])(?:__fixtures__|fixtures)(?:[/\\]|$)/i.test(filePath ?? "");
       if (fixture || /\.d\.[cm]?ts$/i.test(filePath ?? "")) return;
 
+      const fileScope = filePath ?? source;
+      const perCallCounts = new Map<string, number>();
       for (const pattern of STUB_PATTERNS) {
-        if (seen.has(pattern.name)) continue;
-
+        if (findings.length >= 20) break;
         const view = /comment|placeholder (?:constant return|return None)/.test(pattern.name) ? withComments : executable;
         const regex = new RegExp(pattern.regex.source, `${pattern.regex.flags.replace(/g/g, "")}g`);
         let match = regex.exec(code);
-        // Message-bearing throws need their original string content. Only the
-        // actual syntax start is checked against the lexical view.
-        while (match && view[match.index] !== code[match.index]) match = regex.exec(code);
-        if (match) {
-          seen.add(pattern.name);
-          const snippet = extractSnippet(code, match.index, match[0].length);
-          findings.push({
-            ruleId: "integrity/no-stubs",
-            pattern: pattern.name,
-            messageSnippet: snippet,
-            description: `Stub / incomplete implementation detected in ${source}: "${match[0]}" → "${snippet}"`,
-            ...(filePath ? {
-              filePath,
-              fingerprint: `${filePath}:${pattern.name}:${match[0].trim()}`,
-            } : {}),
-          });
+        while (match && findings.length < 20) {
+          if (view[match.index] === code[match.index]) {
+            const matchText = match[0].trim();
+            const baseKey = `${fileScope}:${pattern.name}:${matchText}`;
+            const occ = (perCallCounts.get(baseKey) ?? 0) + 1;
+            perCallCounts.set(baseKey, occ);
+            const dedupKey = occ === 1 ? baseKey : `${baseKey}#${occ}`;
+            if (!seen.has(dedupKey)) {
+              seen.add(dedupKey);
+              const snippet = extractSnippet(code, match.index, match[0].length);
+              findings.push({
+                ruleId: "integrity/no-stubs",
+                pattern: pattern.name,
+                messageSnippet: snippet,
+                description: `Stub / incomplete implementation detected in ${source}: "${match[0]}" → "${snippet}"`,
+                ...(filePath ? {
+                  filePath,
+                  fingerprint: occ === 1
+                    ? `${filePath}:${pattern.name}:${matchText}`
+                    : `${filePath}:${pattern.name}:${matchText}#${occ}`,
+                } : {}),
+              });
+            }
+          }
+          if (match[0].length === 0) regex.lastIndex++;
+          match = regex.exec(code);
         }
       }
 
@@ -108,10 +119,12 @@ export const noStubsRule: GuardRule = {
       ];
       for (const regex of emptyPatterns) {
         for (const match of executable.matchAll(regex)) {
+          if (findings.length >= 20) break;
           if (/^(?:constructor|noop|if|for|while|switch|catch)$/i.test(match[1] ?? "")) continue;
           const name = "empty named JavaScript/TypeScript implementation";
-          if (seen.has(name)) continue;
-          seen.add(name);
+          const dedupKey = `${fileScope}:${name}:${match[1] ?? ""}`;
+          if (seen.has(dedupKey)) continue;
+          seen.add(dedupKey);
           findings.push({ ruleId: "integrity/no-stubs", pattern: name,
             messageSnippet: extractSnippet(code, match.index, match[0].length),
             description: `Empty named implementation detected in ${source}; implement it or use an explicit no-op callback contract.`,
@@ -131,17 +144,23 @@ export const noStubsRule: GuardRule = {
           const targetFile =
             (input.path as string) ??
             (input.targetFile as string) ??
+            (input.TargetFile as string) ??
             (input.filePath as string) ??
             (input.file as string) ??
             extractFilePathFromPatch(patchRaw);
-          if (typeof input.content === "string") {
-            checkCode(input.content, "file write content", targetFile);
-          }
-          if (typeof input.new_string === "string") {
-            checkCode(input.new_string, "file edit", targetFile);
-          }
-          if (typeof input.newString === "string") {
-            checkCode(input.newString, "file edit", targetFile);
+          for (const [key, label] of [
+            ["content", "file write content"],
+            ["new_string", "file edit"],
+            ["newString", "file edit"],
+            ["new_str", "file edit"],
+            ["file_text", "file write content"],
+            ["CodeContent", "file write content"],
+            ["ReplacementContent", "file edit"],
+            ["text", "file write content"],
+          ] as const) {
+            if (typeof input[key] === "string") {
+              checkCode(input[key] as string, label, targetFile);
+            }
           }
           for (const edit of extractStructuredEditTexts(input, targetFile)) {
             checkCode(edit.text, "structured file edit", edit.filePath);

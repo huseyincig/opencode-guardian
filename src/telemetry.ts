@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SAFE_REASON_CODES, SAFE_RULE_IDS, type AuditReason } from "./audit.js";
+import { extractToolAction } from "./tool-input.js";
 import type { GuardianTelemetryConfig, TelemetryLevel } from "./types.js";
 
 export type { GuardianTelemetryConfig, TelemetryLevel };
@@ -80,7 +81,7 @@ const ACTIONS: Record<GuardianEventKind, [GuardianAction, GuardianOutcome]> = {
 };
 const SAFE_TOOLS = new Set([
   "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
-  "execute_command", "command", "run_command", "run_shell_command",
+  "execute_command", "command", "run_command", "run_shell_command", "run_terminal_cmd",
   "powershell", "pwsh", "cmd", "privileged_shell_exec", "process_start",
   "write", "write_to_file", "write_file", "create_file", "save_file",
   "replace_file_content", "edit_file", "edit", "patch", "apply_patch",
@@ -159,7 +160,7 @@ function safeEvent(event: Omit<GuardianEvent, "at">): GuardianEvent {
     safe.session = event.session;
   }
   if (typeof event.tool === "string") {
-    const tool = event.tool.toLowerCase().split(/[.:/]/).at(-1) ?? "";
+    const tool = extractToolAction(event.tool);
     safe.tool = SAFE_TOOLS.has(tool) ? tool : "custom-shell-tool";
   }
   if (Array.isArray(event.rules)) {
@@ -353,11 +354,26 @@ function acquireRotationLock(lockPath: string): (() => void) | undefined {
       return () => {
         if (released) return;
         released = true;
+        let checkFd: number | undefined;
         try {
-          if (fs.readFileSync(lockPath, "utf8") === token) {
-            fs.unlinkSync(lockPath);
+          checkFd = fs.openSync(
+            lockPath,
+            fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+          );
+          const stat = fs.fstatSync(checkFd);
+          if (stat.isFile() && stat.size > 0 && stat.size <= 256) {
+            const buf = Buffer.alloc(stat.size);
+            const n = fs.readSync(checkFd, buf, 0, stat.size, 0);
+            if (buf.toString("utf8", 0, n) === token) {
+              fs.unlinkSync(lockPath);
+            }
           }
         } catch {}
+        finally {
+          if (checkFd !== undefined) {
+            try { fs.closeSync(checkFd); } catch {}
+          }
+        }
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
@@ -418,15 +434,28 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
     const line = JSON.stringify(safeEvent(event)) + "\n";
     const filePath = guardianEventPath(directoryArg);
     const archive = filePath + ".1";
-    let fd = fs.openSync(filePath,
-      fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
-      (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+    const openLogFd = (): number => {
+      const opened = fs.openSync(filePath,
+        fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
+        (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0), 0o600);
+      try {
+        const openedInfo = fs.fstatSync(opened);
+        if (!openedInfo.isFile() ||
+            (typeof process.getuid === "function" && openedInfo.uid !== process.getuid())) {
+          throw new Error("Guardian event log is not owned by the current user");
+        }
+        if (process.platform !== "win32" && (openedInfo.mode & 0o777) !== 0o600) {
+          fs.fchmodSync(opened, 0o600);
+        }
+        return opened;
+      } catch (err) {
+        try { fs.closeSync(opened); } catch {}
+        throw err;
+      }
+    };
+    let fd = openLogFd();
     try {
       const info = fs.fstatSync(fd);
-      if (!info.isFile() || (typeof process.getuid === "function" && info.uid !== process.getuid())) {
-        throw new Error("Guardian event log is not owned by the current user");
-      }
-      if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
       if (info.size + Buffer.byteLength(line) > settings.maxBytes) {
         const releaseLock = acquireRotationLock(filePath + ".lock");
         if (releaseLock) {
@@ -434,11 +463,10 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
             // Re-check file size and inode after acquiring lock so concurrent processes
             // neither double-rotate nor append into a rotated archive via a stale fd.
             const freshStat = fs.lstatSync(filePath, { throwIfNoEntry: false });
-            if (freshStat && freshStat.isFile() && freshStat.ino !== info.ino) {
+            if (!freshStat || !freshStat.isFile() || freshStat.ino !== info.ino) {
               fs.closeSync(fd);
-              fd = fs.openSync(filePath,
-                fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
-                (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+              fd = -1;
+              fd = openLogFd();
             }
             const activeStat = fs.fstatSync(fd);
             if (activeStat.isFile() && activeStat.size + Buffer.byteLength(line) > settings.maxBytes) {
@@ -458,18 +486,18 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
               } catch (err) {
                 if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
               }
-              fd = fs.openSync(filePath,
-                fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
-                (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-              const current = fs.fstatSync(fd);
-              if (!current.isFile() ||
-                  (typeof process.getuid === "function" && current.uid !== process.getuid())) {
-                throw new Error("Rotated Guardian log is not owned by this user");
-              }
-              if (process.platform !== "win32" && (current.mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
+              fd = openLogFd();
             }
           } finally {
             releaseLock();
+          }
+        } else {
+          // Another process is rotating: re-check inode (or missing mid-rename file) so we don't append into .1.
+          const freshStat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+          if (!freshStat || !freshStat.isFile() || freshStat.ino !== info.ino) {
+            fs.closeSync(fd);
+            fd = -1;
+            fd = openLogFd();
           }
         }
       }
@@ -560,7 +588,7 @@ export function readGuardianStatus(
       }
       let fd: number | undefined;
       try {
-        fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
         const stat = fs.fstatSync(fd);
         if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
             (process.platform !== "win32" && (stat.mode & 0o077) !== 0)) {
@@ -658,7 +686,7 @@ export function readGuardianActivity(directory?: string, limit = 12): GuardianEv
   for (const candidate of [file + ".1", file]) {
     let fd: number | undefined;
     try {
-      fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      fd = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
           (process.platform !== "win32" && (stat.mode & 0o077) !== 0)) continue;

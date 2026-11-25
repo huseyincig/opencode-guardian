@@ -437,21 +437,23 @@ export const noCheatRule: GuardRule = {
         const targetFile =
           (input.path as string) ??
           (input.targetFile as string) ??
+          (input.TargetFile as string) ??
           (input.filePath as string) ??
           (input.file as string) ??
           extractFilePathFromPatch(patchRaw);
 
-        if (typeof input.content === "string") {
-          // Whole-file writes may preserve pre-existing skips/ignores. Treat
-          // them as advisory unless failed-test evidence or strict structural
-          // mode makes the intent suspicious.
-          checkTestCode(input.content, targetFile, blockStructuralTestChanges);
+        for (const key of ["content", "file_text", "CodeContent", "text"] as const) {
+          if (typeof input[key] === "string") {
+            // Whole-file writes may preserve pre-existing skips/ignores. Treat
+            // them as advisory unless failed-test evidence or strict structural
+            // mode makes the intent suspicious.
+            checkTestCode(input[key] as string, targetFile, blockStructuralTestChanges);
+          }
         }
-        if (typeof input.new_string === "string") {
-          checkTestCode(input.new_string, targetFile);
-        }
-        if (typeof input.newString === "string") {
-          checkTestCode(input.newString, targetFile);
+        for (const key of ["new_string", "newString", "new_str", "ReplacementContent"] as const) {
+          if (typeof input[key] === "string") {
+            checkTestCode(input[key] as string, targetFile);
+          }
         }
         for (const edit of extractStructuredEditTexts(input, targetFile)) {
           checkTestCode(edit.text, edit.filePath);

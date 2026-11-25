@@ -94,8 +94,8 @@ function sanitizeKeyValueLine(
     }
   }
 
-  // 2. YAML / Header assignment: KEY: VALUE
-  const yamlMatch = line.match(/^(\s*["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)(.*)$/);
+  // 2. YAML / Header assignment: KEY: VALUE (including YAML sequence items: - KEY: VALUE)
+  const yamlMatch = line.match(/^(\s*(?:-\s+)?["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)(.*)$/);
   if (yamlMatch) {
     const prefix = yamlMatch[1] ?? '';
     const key = yamlMatch[2] ?? '';
@@ -212,7 +212,10 @@ export function sanitizeString(
     let lineModified = false;
     let activeYamlBlockIndent: number | null = null;
     for (let i = 0; i < lines.length; i++) {
-      const original = lines[i] ?? '';
+      const rawLine = lines[i] ?? '';
+      const hasCr = rawLine.endsWith('\r');
+      const original = hasCr ? rawLine.slice(0, -1) : rawLine;
+      const eol = hasCr ? '\r' : '';
       if (activeYamlBlockIndent !== null) {
         if (original.trim().length === 0) {
           continue;
@@ -220,7 +223,7 @@ export function sanitizeString(
         const indentMatch = /^(\s*)/.exec(original);
         const lineIndent = indentMatch?.[1]?.length ?? 0;
         if (lineIndent > activeYamlBlockIndent) {
-          lines[i] = `${' '.repeat(lineIndent)}${replacement}`;
+          lines[i] = `${' '.repeat(lineIndent)}${replacement}${eol}`;
           lineModified = true;
           redactedCount++;
           findings.push({ kind: 'key-value', category: 'yaml-block-scalar' });
@@ -229,14 +232,14 @@ export function sanitizeString(
         activeYamlBlockIndent = null;
       }
 
-      const yamlBlockHeader = /^(\s*)(["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)([|>][+-]?\d*(?:\s+#.*)?)$/.exec(original);
+      const yamlBlockHeader = /^(\s*(?:-\s+)?)(["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)([|>](?:[+-]?\d*|\d*[+-]?)\s*(?:#.*)?)$/.exec(original);
       if (
         yamlBlockHeader &&
         isSensitiveKey(yamlBlockHeader[3] ?? '', options.customSensitiveKeys, options.safeKeyNames)
       ) {
         const leadingIndent = yamlBlockHeader[1] ?? '';
         activeYamlBlockIndent = leadingIndent.length;
-        lines[i] = `${leadingIndent}${yamlBlockHeader[2] ?? ''}${yamlBlockHeader[3] ?? ''}${yamlBlockHeader[4] ?? ''}${replacement}`;
+        lines[i] = `${leadingIndent}${yamlBlockHeader[2] ?? ''}${yamlBlockHeader[3] ?? ''}${yamlBlockHeader[4] ?? ''}${replacement}${eol}`;
         lineModified = true;
         redactedCount++;
         findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: yamlBlockHeader[3] ?? '' });
@@ -252,7 +255,7 @@ export function sanitizeString(
         safeValueSet
       );
       if (sanitized !== original) {
-        lines[i] = sanitized;
+        lines[i] = sanitized + eol;
         lineModified = true;
         redactedCount++;
       }
@@ -262,26 +265,96 @@ export function sanitizeString(
     }
 
     // 3b. Inline key-value assignments (e.g. "token=xyz", "password: xyz", "password=\"multi word\"", "--api-key=xyz")
-    // Support long quoted tokens (up to 4096 chars) and unclosed/oversized quoted values on the same line.
-    const inlineKvRegex =
-      /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)(?:"((?:\\.|[^"\\\r\n]){1,4096})"|'((?:\\.|[^'\\\r\n]){1,4096})'|"([^\r\n]{1,4096})|'([^\r\n]{1,4096})|([^\s,;)"'>\n\r]+))/gi;
-    result = result.replace(inlineKvRegex, (match, lead, key, sep, dqVal, sqVal, dqUnclosed, sqUnclosed, bareVal) => {
-      const val = (dqVal ?? sqVal ?? dqUnclosed ?? sqUnclosed ?? bareVal ?? "") as string;
-      if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
-        return match;
-      }
-      if (val === replacement || val === '[REDACTED:PRIVATE_KEY]' || safeValueSet?.has(val)) {
-        return match;
-      }
-      if (/^\s+$/.test(sep) && dqVal === undefined && sqVal === undefined && dqUnclosed === undefined && sqUnclosed === undefined) {
-        if (val.length < 6 || INLINE_STOPWORDS.has(val.toLowerCase())) {
-          return match;
+    // Linearly consume arbitrarily long quoted values on the same line so tails past 4096 chars never leak.
+    const customInlineStems = (options.customSensitiveKeys ?? [])
+      .filter((k): k is string => typeof k === 'string')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 0 && /^[a-zA-Z0-9_.-]+$/.test(k))
+      .map(escapeRegExp);
+    const keyStemAlternation = customInlineStems.length > 0
+      ? `(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token|${customInlineStems.join('|')})`
+      : `(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)`;
+    const inlineKeyPrefixRegex = new RegExp(
+      `(^|[\\s,;([{"'=])([a-zA-Z0-9_.-]{0,64}${keyStemAlternation}[a-zA-Z0-9_.-]{0,64})(["']?\\s*[:=]\\s*|\\s+)`,
+      'gi'
+    );
+    {
+      let out = '';
+      let cursor = 0;
+      inlineKeyPrefixRegex.lastIndex = 0;
+      let match = inlineKeyPrefixRegex.exec(result);
+      while (match !== null) {
+        const matchStart = match.index;
+        if (matchStart < cursor) {
+          inlineKeyPrefixRegex.lastIndex = cursor;
+          match = inlineKeyPrefixRegex.exec(result);
+          continue;
         }
+        const lead = match[1] ?? '';
+        const key = match[2] ?? '';
+        const sep = match[3] ?? '';
+        const valStart = matchStart + match[0].length;
+        if (valStart >= result.length) break;
+
+        let valEnd = valStart;
+        let val = '';
+        let quoted = false;
+        const firstCh = result[valStart];
+        if (firstCh === '"' || firstCh === "'") {
+          quoted = true;
+          let i = valStart + 1;
+          while (i < result.length && result[i] !== '\n' && result[i] !== '\r') {
+            if (result[i] === '\\' && i + 1 < result.length && result[i + 1] !== '\n' && result[i + 1] !== '\r') {
+              i += 2;
+              continue;
+            }
+            if (result[i] === firstCh) {
+              val = result.slice(valStart + 1, i);
+              valEnd = i + 1;
+              break;
+            }
+            i++;
+          }
+          if (valEnd === valStart) {
+            // Unclosed quote on this line: redact through end of line.
+            val = result.slice(valStart + 1, i);
+            valEnd = i;
+          }
+        } else {
+          let i = valStart;
+          while (i < result.length && !/[\s,;)"'>\n\r]/.test(result[i]!)) {
+            i++;
+          }
+          val = result.slice(valStart, i);
+          valEnd = i;
+        }
+
+        const shouldRedact =
+          val.length > 0 &&
+          isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames) &&
+          val !== replacement &&
+          val !== '[REDACTED:PRIVATE_KEY]' &&
+          !safeValueSet?.has(val) &&
+          !(
+            /^\s+$/.test(sep) &&
+            !quoted &&
+            (val.length < 6 || INLINE_STOPWORDS.has(val.toLowerCase()))
+          );
+
+        if (shouldRedact) {
+          out += result.slice(cursor, matchStart) + `${lead}${key}${sep}${replacement}`;
+          cursor = valEnd;
+          redactedCount++;
+          findings.push({ kind: 'key-value', category: 'inline-assignment', keyName: key });
+          inlineKeyPrefixRegex.lastIndex = cursor;
+        }
+        match = inlineKeyPrefixRegex.exec(result);
       }
-      redactedCount++;
-      findings.push({ kind: 'key-value', category: 'inline-assignment', keyName: key });
-      return `${lead}${key}${sep}${replacement}`;
-    });
+      if (cursor > 0) {
+        out += result.slice(cursor);
+        result = out;
+      }
+    }
 
     // 4. Known Credential Value Formats (OpenAI, Stripe, GitHub, Slack, AWS, Google, etc.)
     for (const pattern of KNOWN_CREDENTIAL_PATTERNS) {
@@ -452,7 +525,15 @@ export function sanitizeObject<T>(
         findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
         return replacement;
       }
-      return recurse(value, key === 'opencode-mesh');
+      const isMeshEnvelopeCandidate =
+        key === 'opencode-mesh' &&
+        Boolean(value) &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        (value as Record<string, unknown>).v === 2 &&
+        typeof (value as Record<string, unknown>).owner === 'string' &&
+        typeof (value as Record<string, unknown>).kind === 'string';
+      return recurse(value, isMeshEnvelopeCandidate);
     }
 
     function recurse(val: unknown, insideMeshEnvelope = false): unknown {
@@ -481,6 +562,16 @@ export function sanitizeObject<T>(
       }
 
       if (val instanceof RegExp) {
+        const res = sanitizeString(val.source, options);
+        if (res.redactedCount > 0) {
+          redactedCount += res.redactedCount;
+          findings.push(...res.findings);
+          try {
+            return new RegExp(res.sanitized.replace(/\[REDACTED\]/g, 'REDACTED'), val.flags);
+          } catch {
+            return new RegExp('REDACTED', val.flags);
+          }
+        }
         return new RegExp(val.source, val.flags);
       }
 
@@ -511,14 +602,107 @@ export function sanitizeObject<T>(
         return output;
       }
 
+      const isLikelyTextBytes = (bytes: Uint8Array, allowNul: boolean): boolean => {
+        if (bytes.byteLength === 0) return false;
+        // Preserve binary media/archive headers untouched (PNG, JPEG, GIF, PDF, ZIP, GZIP, ELF).
+        if (bytes.byteLength >= 4) {
+          const b0 = bytes[0], b1 = bytes[1], b2 = bytes[2], b3 = bytes[3];
+          if (
+            (b0 === 0x89 && b1 === 0x50 && b2 === 0x4e && b3 === 0x47) ||
+            (b0 === 0xff && b1 === 0xd8 && b2 === 0xff) ||
+            (b0 === 0x47 && b1 === 0x49 && b2 === 0x46 && b3 === 0x38) ||
+            (b0 === 0x25 && b1 === 0x50 && b2 === 0x44 && b3 === 0x46) ||
+            (b0 === 0x50 && b1 === 0x4b && b2 === 0x03 && b3 === 0x04) ||
+            (b0 === 0x1f && b1 === 0x8b) ||
+            (b0 === 0x7f && b1 === 0x45 && b2 === 0x4c && b3 === 0x46)
+          ) {
+            return false;
+          }
+        }
+        const sampleLen = Math.min(bytes.byteLength, 4096);
+        let controlBytes = 0;
+        for (let i = 0; i < sampleLen; i++) {
+          const b = bytes[i]!;
+          if (b === 0) {
+            if (!allowNul) return false;
+            continue;
+          }
+          if (b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d) {
+            controlBytes++;
+          }
+        }
+        return controlBytes / sampleLen <= 0.05;
+      };
+
       if (Buffer.isBuffer(val)) {
-        if (val.byteLength > 0 && val.byteLength <= 256 * 1024 && !val.includes(0)) {
-          const decoded = val.toString('utf8');
+        if (val.byteLength > 0 && val.byteLength <= 16 * 1024 * 1024 && isLikelyTextBytes(val, true)) {
+          if (val.includes(0)) {
+            // NUL-delimited text buffers (e.g. /proc/self/environ): sanitize each NUL-separated record.
+            const decoded = val.toString('utf8');
+            const parts = decoded.split('\0');
+            let anyRedacted = false;
+            const outParts = parts.map((segment) => {
+              if (!segment) return segment;
+              const res = sanitizeString(segment, options);
+              if (res.redactedCount > 0) {
+                anyRedacted = true;
+                redactedCount += res.redactedCount;
+                findings.push(...res.findings);
+                return res.sanitized;
+              }
+              return segment;
+            });
+            if (anyRedacted) {
+              return Buffer.from(outParts.join('\0'), 'utf8');
+            }
+          } else if (val.byteLength <= 2 * 1024 * 1024) {
+            const decoded = val.toString('utf8');
+            const res = sanitizeString(decoded, options);
+            if (res.redactedCount > 0) {
+              redactedCount += res.redactedCount;
+              findings.push(...res.findings);
+              return Buffer.from(res.sanitized, 'utf8');
+            }
+          } else {
+            // Chunk large UTF-8 text buffers (>2 MiB) into 1 MiB line-aligned slices.
+            const decoded = val.toString('utf8');
+            const CHUNK = 1024 * 1024;
+            let out = '';
+            let anyRedacted = false;
+            for (let pos = 0; pos < decoded.length; ) {
+              let end = Math.min(pos + CHUNK, decoded.length);
+              if (end < decoded.length) {
+                const nl = decoded.lastIndexOf('\n', end);
+                if (nl > pos) end = nl + 1;
+              }
+              const slice = decoded.slice(pos, end);
+              const res = sanitizeString(slice, options);
+              if (res.redactedCount > 0) {
+                anyRedacted = true;
+                redactedCount += res.redactedCount;
+                findings.push(...res.findings);
+                out += res.sanitized;
+              } else {
+                out += slice;
+              }
+              pos = end;
+            }
+            if (anyRedacted) {
+              return Buffer.from(out, 'utf8');
+            }
+          }
+        }
+        return val;
+      }
+
+      if (val instanceof Uint8Array && !(val instanceof Buffer)) {
+        if (val.byteLength > 0 && val.byteLength <= 2 * 1024 * 1024 && isLikelyTextBytes(val, false)) {
+          const decoded = Buffer.from(val.buffer, val.byteOffset, val.byteLength).toString('utf8');
           const res = sanitizeString(decoded, options);
           if (res.redactedCount > 0) {
             redactedCount += res.redactedCount;
             findings.push(...res.findings);
-            return Buffer.from(res.sanitized, 'utf8');
+            return new Uint8Array(Buffer.from(res.sanitized, 'utf8'));
           }
         }
         return val;
@@ -631,12 +815,20 @@ export function sanitizeMessages<T = unknown>(messages: T[], options: SanitizerO
           msgProto && msgProto !== Object.prototype ? Object.create(msgProto) : {};
         for (const [k, v] of Object.entries(msgObj)) {
           if (k === 'parts') continue;
+          const isValidMeshEnv =
+            k === 'opencode-mesh' &&
+            Boolean(v) &&
+            typeof v === 'object' &&
+            !Array.isArray(v) &&
+            (v as Record<string, unknown>).v === 2 &&
+            typeof (v as Record<string, unknown>).owner === 'string' &&
+            typeof (v as Record<string, unknown>).kind === 'string';
           const sanitizedVal =
             typeof v === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(v)
               ? v
               : isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
                 ? (options.replacement ?? DEFAULT_REPLACEMENT)
-                : sanitizeObject(v, options, k === 'opencode-mesh').sanitized;
+                : sanitizeObject(v, options, isValidMeshEnv).sanitized;
           Object.defineProperty(clonedMsg, k, {
             value: sanitizedVal,
             enumerable: true,

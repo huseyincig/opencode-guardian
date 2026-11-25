@@ -808,11 +808,25 @@ function recordFromPart(part, sequence, directory) {
         const errorFingerprint = outcome.status === "failure"
             ? normalizeErrorFingerprint(outcome.errorText || outputText)
             : undefined;
+        const genericTargetFile = kind === "generic" && part.state.input
+            ? (typeof part.state.input.filePath === "string" && part.state.input.filePath.trim()
+                ? part.state.input.filePath.trim()
+                : typeof part.state.input.path === "string" && part.state.input.path.trim()
+                    ? part.state.input.path.trim()
+                    : typeof part.state.input.TargetFile === "string" && part.state.input.TargetFile.trim()
+                        ? part.state.input.TargetFile.trim()
+                        : typeof part.state.input.targetFile === "string" && part.state.input.targetFile.trim()
+                            ? part.state.input.targetFile.trim()
+                            : typeof part.state.input.file === "string" && part.state.input.file.trim()
+                                ? part.state.input.file.trim()
+                                : undefined)
+            : undefined;
         records.push({
             kind,
             status: evidenceStatus,
             sequence,
             toolName,
+            ...(genericTargetFile ? { filePath: genericTargetFile } : {}),
             ...(command ? { command } : {}),
             ...(executionCwd ? { cwd: executionCwd } : {}),
             signature: `${baseSignature}:${kind}`,
@@ -886,6 +900,8 @@ export function extractMutatedFilePaths(part) {
     add(input.from);
     add(input.destination);
     add(input.to);
+    add(input.dest);
+    add(input.target);
     const defaultPath = [input.path, input.targetFile, input.TargetFile, input.filePath, input.file]
         .find((value) => typeof value === "string" && value.trim().length > 0);
     for (const edit of extractStructuredEditTexts(input, defaultPath))
@@ -1003,6 +1019,27 @@ export function calculateProductFingerprint(directory, files) {
     }
     return hash.digest("hex");
 }
+const evictedSnapshotMaps = new WeakSet();
+/**
+ * Shared snapshot freshness check used by task-policy, remediation verification,
+ * and unverified-claims so disk tampering after verification is detected uniformly.
+ */
+export function isVerificationSnapshotCurrent(record, evidence, directory) {
+    if (!record)
+        return false;
+    if (record.stateFingerprint === "unverified-state")
+        return false;
+    if (record.stateFingerprint?.startsWith("sha256:")) {
+        const files = record.snapshotFiles?.length ? record.snapshotFiles : evidence?.mutatedFiles;
+        if (!directory || !files || (Array.isArray(files) ? !files.length : !files.size))
+            return false;
+        const fp = calculateProductFingerprint(directory, files);
+        if (fp === "unverified-state" || `sha256:${fp}` !== record.stateFingerprint) {
+            return false;
+        }
+    }
+    return true;
+}
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export class VerificationSnapshotStore {
     sessions = new Map();
@@ -1010,13 +1047,19 @@ export class VerificationSnapshotStore {
     static MAX_PATHS = 512;
     getOrCreateSession(sessionID) {
         let session = this.sessions.get(sessionID);
-        if (!session) {
+        if (session) {
+            this.sessions.delete(sessionID);
+            this.sessions.set(sessionID, session);
+        }
+        else {
             session = {
                 paths: new Set(),
                 snapshots: new Map(),
                 before: new Map(),
+                inFlightMutations: new Set(),
                 overflowed: false,
                 hasPathlessMutation: false,
+                snapshotsEvicted: false,
             };
             this.sessions.set(sessionID, session);
             while (this.sessions.size > VerificationSnapshotStore.MAX_SESSIONS) {
@@ -1031,10 +1074,20 @@ export class VerificationSnapshotStore {
     observeBefore(sessionID, callID, tool, input, directory) {
         if (!sessionID || !callID)
             return;
+        const session = this.getOrCreateSession(sessionID);
+        if (hasFileMutation({ type: "tool", tool, callID, state: { status: "running", input } })) {
+            session.inFlightMutations.delete(callID);
+            session.inFlightMutations.add(callID);
+            while (session.inFlightMutations.size > 64) {
+                const oldest = session.inFlightMutations.values().next().value;
+                if (oldest === undefined)
+                    break;
+                session.inFlightMutations.delete(oldest);
+            }
+        }
         const before = captureBeforeEdit(tool, input, directory);
         if (!before)
             return;
-        const session = this.getOrCreateSession(sessionID);
         session.before.set(callID, before);
         if (session.before.size > 32) {
             const oldest = session.before.keys().next().value;
@@ -1051,6 +1104,7 @@ export class VerificationSnapshotStore {
             { info: { id: callID, role: "assistant" }, parts: [part] },
         ], directory);
         const session = this.getOrCreateSession(sessionID);
+        session.inFlightMutations.delete(callID);
         const before = session.before.get(callID);
         session.before.delete(callID);
         if (before && status === "completed" && evidence.fileMutations.some(r => r.status === "success")) {
@@ -1062,7 +1116,7 @@ export class VerificationSnapshotStore {
             });
         }
         for (const mutation of evidence.fileMutations) {
-            if (mutation.status === "success") {
+            if (mutation.status !== "failure") {
                 if (!mutation.filePath) {
                     session.hasPathlessMutation = true;
                     continue;
@@ -1077,9 +1131,10 @@ export class VerificationSnapshotStore {
                 }
             }
         }
-        if ((session.paths.size || session.hasPathlessMutation) && evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
+        if ((session.paths.size || session.hasPathlessMutation || session.inFlightMutations.size > 0) &&
+            evidence.successfulVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
             const existing = session.snapshots.get(callID);
-            if (session.overflowed || session.hasPathlessMutation) {
+            if (session.overflowed || session.hasPathlessMutation || session.inFlightMutations.size > 0) {
                 session.snapshots.set(callID, {
                     ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
                     fingerprint: "unverified-state",
@@ -1106,11 +1161,15 @@ export class VerificationSnapshotStore {
                 }
             }
         }
-        // Bound the call table even in very long sessions.
+        // Bound the call table even in very long sessions; mark eviction so missing
+        // snapshots degrade to unverified-state rather than silent seq fallback.
         if (session.snapshots.size > 512) {
             const oldest = session.snapshots.keys().next().value;
-            if (oldest !== undefined)
+            if (oldest !== undefined) {
                 session.snapshots.delete(oldest);
+                session.snapshotsEvicted = true;
+                evictedSnapshotMaps.add(session.snapshots);
+            }
         }
     }
     beginTurn(sessionID) {
@@ -1157,8 +1216,11 @@ export function collectTurnEvidence(currentTurn, directory, snapshots) {
                     // Historical message replay cannot recreate the disk state at test
                     // time. Only a live after-hook may supply an observed fingerprint.
                     const snapshot = callID ? snapshots?.get(callID) : undefined;
+                    const snapshotTrackedKind = record.status === "success" &&
+                        ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind);
+                    const evictedMissing = Boolean(snapshotTrackedKind && !snapshot && snapshots && evictedSnapshotMaps.has(snapshots));
                     record.stateFingerprint = (snapshot?.fingerprint || undefined) ??
-                        `seq:${lastMutationSequence}:m${mutationCount}`;
+                        (evictedMissing ? "unverified-state" : `seq:${lastMutationSequence}:m${mutationCount}`);
                     if (snapshot)
                         record.snapshotFiles = [...snapshot.files];
                 }

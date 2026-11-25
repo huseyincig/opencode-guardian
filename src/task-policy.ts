@@ -1,6 +1,7 @@
 import type { EvidenceRecord, TurnEvidence } from "./types.js";
 import type { TaskContract } from "./task-contract.js";
 import { hasPostMutationReview, latestMutationSequence } from "./task-contract.js";
+import { isVerificationSnapshotCurrent } from "./evidence.js";
 
 type VerificationKind = TaskContract["requiredVerifications"][number];
 
@@ -28,7 +29,8 @@ export interface TaskPolicyDecision {
  */
 export function evaluateTaskPolicy(
   contract: TaskContract,
-  evidence: TurnEvidence
+  evidence: TurnEvidence,
+  directory?: string
 ): TaskPolicyDecision {
   const lastMutationSequence = latestMutationSequence(evidence);
   const review: TaskPolicyDecision["review"] = !contract.iterativeReview
@@ -46,14 +48,21 @@ export function evaluateTaskPolicy(
         candidate.kind === kind && candidate.sequence > lastMutationSequence
       )
       .sort((left, right) => right.sequence - left.sequence)[0];
+    const snapshotCurrent = record
+      ? isVerificationSnapshotCurrent(record, evidence, directory)
+      : false;
+    const isFailedOutcome =
+      record?.status === "failure" ||
+      record?.outcomeReason === "no-tests" ||
+      record?.outcomeReason === "skipped-only" ||
+      record?.outcomeReason === "summary-conflict";
     const status: VerificationDecision["status"] =
-      record?.stateFingerprint === "unverified-state"
-        ? "unknown"
-        : record?.status === "success"
-          ? "passed"
-          : record?.status === "failure" || record?.outcomeReason === "no-tests" ||
-            record?.outcomeReason === "skipped-only" || record?.outcomeReason === "summary-conflict"
-            ? "failed"
+      isFailedOutcome
+        ? "failed"
+        : record && !snapshotCurrent
+          ? "unknown"
+          : record?.status === "success"
+            ? "passed"
             : "unknown";
     return { kind, status, ...(record ? { evidence: record } : {}) };
   });

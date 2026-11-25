@@ -84,6 +84,7 @@ export interface MeshSessionLease {
     acquiredAt: number;
     expiresAt: number;
     reason?: string | undefined;
+    token?: string | undefined;
 }
 export interface MeshAgentProfile {
     sessionID: string;
@@ -255,12 +256,15 @@ export declare function acquireSessionLease(input: {
     kind: MeshLeaseKind;
     ttlMs?: number | undefined;
     reason?: string | undefined;
-}): () => void;
+}): (() => void) & {
+    leaseToken: string;
+};
 export declare function renewSessionLease(input: {
     sessionID: string;
     owner: string;
     kind: MeshLeaseKind;
     ttlMs?: number | undefined;
+    leaseToken?: string | undefined;
 }): boolean;
 export declare function getBlockingSessionLease(sessionID: string, callerKind: MeshLeaseKind, callerOwner?: string): MeshSessionLease | undefined;
 export declare function isSessionWaitingOnUser(sessionID: string): boolean;

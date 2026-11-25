@@ -127,31 +127,42 @@ export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions)
                 /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\([^)]*\))?$/.test(unquotedVal) ||
                 /^[A-Za-z_$][\w$]*\([^)]*\)$/.test(unquotedVal);
             // Scan quoted/unquoted key assignments across JS/TS, JSON, YAML, and .env formats.
-            const scanSource = code.length > 512 * 1024 ? code.slice(0, 512 * 1024) : code;
+            // For oversized payloads (>512 KiB), scan both the leading 512 KiB and trailing 128 KiB
+            // so secrets appended at the end of large files are not silently missed.
+            const MAX_HEAD = 512 * 1024;
+            const MAX_TAIL = 128 * 1024;
+            const scanSlices = code.length > MAX_HEAD + MAX_TAIL
+                ? [code.slice(0, MAX_HEAD), code.slice(code.length - MAX_TAIL)]
+                : [code];
             const assignmentRe = /(?:["'])?([A-Za-z0-9_.-]{2,80})(?:["'])?\s*[:=]\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([^\s"'`,;)}\]\r\n]{6,}))/g;
-            let m = assignmentRe.exec(scanSource);
-            let iter = 0;
-            while (m !== null && iter < 20_000) {
-                iter++;
-                const k = m[1] ?? "";
-                const quotedVal = m[2] ?? m[3];
-                const unquotedVal = m[4];
-                const val = quotedVal ?? unquotedVal ?? "";
-                if (k &&
-                    val &&
-                    keyMatcher(k) &&
-                    (quotedVal !== undefined || !isCodeReference(val)) &&
-                    !isExplicitTemplateValue(val) &&
-                    !safeValueSet?.has(val)) {
-                    seen.add("Custom Sensitive Key Assignment");
-                    results.push({
-                        name: "Custom Sensitive Key Assignment",
-                        secretValue: val,
-                        masked: maskSecret(val),
-                    });
+            for (const scanSource of scanSlices) {
+                if (seen.has("Custom Sensitive Key Assignment"))
                     break;
+                assignmentRe.lastIndex = 0;
+                let m = assignmentRe.exec(scanSource);
+                let iter = 0;
+                while (m !== null && iter < 20_000) {
+                    iter++;
+                    const k = m[1] ?? "";
+                    const quotedVal = m[2] ?? m[3];
+                    const unquotedVal = m[4];
+                    const val = quotedVal ?? unquotedVal ?? "";
+                    if (k &&
+                        val &&
+                        keyMatcher(k) &&
+                        (quotedVal !== undefined || !isCodeReference(val)) &&
+                        !isExplicitTemplateValue(val) &&
+                        !safeValueSet?.has(val)) {
+                        seen.add("Custom Sensitive Key Assignment");
+                        results.push({
+                            name: "Custom Sensitive Key Assignment",
+                            secretValue: val,
+                            masked: maskSecret(val),
+                        });
+                        break;
+                    }
+                    m = assignmentRe.exec(scanSource);
                 }
-                m = assignmentRe.exec(scanSource);
             }
         }
     }

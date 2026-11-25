@@ -505,9 +505,25 @@ export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = fals
                 seenObjects.set(val, output);
                 // Error.cause and AggregateError.errors are non-enumerable. Inspect
                 // every own property, including provider metadata, at the same boundary.
+                const standardErrorKeys = new Set(['name', 'message', 'stack', 'cause', 'errors', 'code']);
                 for (const key of new Set(['name', ...Object.getOwnPropertyNames(val)])) {
                     const value = val[key];
-                    Object.defineProperty(output, key, {
+                    let outKey = key;
+                    if (!standardErrorKeys.has(key)) {
+                        const keyScan = sanitizeString(key, options);
+                        if (keyScan.redactedCount > 0) {
+                            redactedCount += keyScan.redactedCount;
+                            findings.push(...keyScan.findings);
+                            outKey = keyScan.sanitized;
+                        }
+                        if (Object.hasOwn(output, outKey)) {
+                            let suffix = 2;
+                            while (Object.hasOwn(output, `${outKey}#${suffix}`))
+                                suffix++;
+                            outKey = `${outKey}#${suffix}`;
+                        }
+                    }
+                    Object.defineProperty(output, outKey, {
                         value: propertyValue(key, value),
                         enumerable: Object.getOwnPropertyDescriptor(val, key)?.enumerable ?? false,
                         writable: true,
@@ -645,8 +661,22 @@ export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = fals
                         : {};
                 seenObjects.set(val, output);
                 for (const [k, v] of Object.entries(val)) {
-                    Object.defineProperty(output, k, {
-                        value: propertyValue(k, v, insideMeshEnvelope), enumerable: true, writable: true, configurable: true,
+                    const sanitizedVal = propertyValue(k, v, insideMeshEnvelope);
+                    const keyScan = sanitizeString(k, options);
+                    let outKey = k;
+                    if (keyScan.redactedCount > 0) {
+                        redactedCount += keyScan.redactedCount;
+                        findings.push(...keyScan.findings);
+                        outKey = keyScan.sanitized;
+                    }
+                    if (Object.hasOwn(output, outKey)) {
+                        let suffix = 2;
+                        while (Object.hasOwn(output, `${outKey}#${suffix}`))
+                            suffix++;
+                        outKey = `${outKey}#${suffix}`;
+                    }
+                    Object.defineProperty(output, outKey, {
+                        value: sanitizedVal, enumerable: true, writable: true, configurable: true,
                     });
                 }
                 neutralizeInheritedSerializer(output, proto, options, replacement);

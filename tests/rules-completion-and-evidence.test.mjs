@@ -1943,5 +1943,108 @@ describe("Aborted Tools & Service Restart Handling", () => {
     const snap = store.snapshots("s-pathless-only").get("c2");
     assert.equal(snap?.incomplete, true, "pathless-only mutation must produce incomplete verification snapshot");
     assert.equal(snap?.fingerprint, "unverified-state");
+
+    // R5-014, R5-015, R5-016, R5-025, R5-027, R5-028:
+    const { evaluateTaskPolicy } = await import("../dist/task-policy.js");
+    const { hasPostMutationReview } = await import("../dist/task-contract.js");
+    const { extractMutatedFilePaths } = await import("../dist/evidence.js");
+
+    // R5-025: dest & target aliases extracted for move/copy
+    assert.deepEqual(
+      extractMutatedFilePaths({ type: "tool", tool: "file_mutate", state: { input: { action: "move", source: "a.ts", dest: "b.ts" } } }).sort(),
+      ["a.ts", "b.ts"]
+    );
+    assert.deepEqual(
+      extractMutatedFilePaths({ type: "tool", tool: "file_mutate", state: { input: { action: "copy", from: "a.ts", target: "c.ts" } } }).sort(),
+      ["a.ts", "c.ts"]
+    );
+
+    // R5-014: disk tampering after verification invalidates evaluateTaskPolicy when directory is provided
+    fs.writeFileSync(path.join(projectDir, "item.ts"), "export const v = 1;\n");
+    const store14 = new VerificationSnapshotStore();
+    store14.observe("s-r5-14", "e1", "write", { path: "item.ts", content: "export const v = 1;\n" }, "ok", {}, projectDir, "completed");
+    store14.observe("s-r5-14", "t1", "bash", { command: "npm test" }, "5 passing", { exit: 0 }, projectDir, "completed");
+    // Now tamper item.ts on disk AFTER verification!
+    fs.writeFileSync(path.join(projectDir, "item.ts"), "export const v = 999;\n");
+    const ev14 = collectTurnEvidence([{
+      info: { id: "a1", role: "assistant" },
+      parts: [
+        { type: "tool", tool: "write", callID: "e1", state: { status: "completed", input: { path: "item.ts", content: "export const v = 1;\n" }, output: "ok" } },
+        { type: "tool", tool: "bash", callID: "t1", state: { status: "completed", input: { command: "npm test" }, output: "5 passing", metadata: { exit: 0 } } },
+      ],
+    }], projectDir, store14.snapshots("s-r5-14"));
+    const pol14 = evaluateTaskPolicy({
+      turnKey: "u1", explicitAction: true, iterativeReview: false, requiresSourceReview: false,
+      requiredVerifications: ["test"], requiresExplicitCompletion: true,
+    }, ev14, projectDir);
+    assert.equal(pol14.verifications[0]?.status, "unknown", "R5-014: tampered file on disk must invalidate sha256 snapshot in evaluateTaskPolicy");
+
+    // R5-015: unknown shell mutation (no exit code) must still dirty VerificationSnapshotStore
+    const store15 = new VerificationSnapshotStore();
+    store15.observe("s-r5-15", "m1", "bash", { command: "node -e \"require('fs').writeFileSync('x.ts','1')\"" }, "done", {}, projectDir, "completed");
+    store15.observe("s-r5-15", "t1", "bash", { command: "npm test" }, "5 passing", { exit: 0 }, projectDir, "completed");
+    assert.equal(store15.snapshots("s-r5-15").get("t1")?.fingerprint, "unverified-state", "R5-015: unknown-status mutation must mark snapshot incomplete");
+
+    // R5-016: verification completing while another mutation is in-flight must be unverified-state
+    const store16 = new VerificationSnapshotStore();
+    store16.observeBefore("s-r5-16", "m-inflight", "write", { path: "item.ts", content: "export const v = 2;\n" }, projectDir);
+    store16.observe("s-r5-16", "t-overlap", "bash", { command: "npm test" }, "5 passing", { exit: 0 }, projectDir, "completed");
+    assert.equal(store16.snapshots("s-r5-16").get("t-overlap")?.fingerprint, "unverified-state", "R5-016: overlapping in-flight mutation must mark verification unverified-state");
+
+    // R5-027: snapshot eviction (>512 snapshots) must degrade evicted verification callID to unverified-state
+    const store27 = new VerificationSnapshotStore();
+    store27.observe("s-r5-27", "e0", "write", { path: "item.ts", content: "export const v = 1;\n" }, "ok", {}, projectDir, "completed");
+    for (let i = 0; i < 515; i++) {
+      store27.observe("s-r5-27", `t-${i}`, "bash", { command: "npm test" }, "1 passing", { exit: 0 }, projectDir, "completed");
+    }
+    const ev27 = collectTurnEvidence([{
+      info: { id: "a1", role: "assistant" },
+      parts: [
+        { type: "tool", tool: "bash", callID: "t-0", state: { status: "completed", input: { command: "npm test" }, output: "1 passing", metadata: { exit: 0 } } },
+        { type: "tool", tool: "bash", callID: "fail-after-evict", state: { status: "error", input: { command: "npm test" }, output: "1 failing", metadata: { exit: 1 } } },
+      ],
+    }], projectDir, store27.snapshots("s-r5-27"));
+    assert.equal(ev27.records[0]?.stateFingerprint, "unverified-state", "R5-027: evicted verification callID must degrade to unverified-state");
+    assert.notEqual(ev27.records[1]?.stateFingerprint, "unverified-state", "evicted snapshots must not mask brand-new failed verifications");
+    const pol27Fail = evaluateTaskPolicy({
+      turnKey: "u1", explicitAction: true, iterativeReview: false, requiresSourceReview: false,
+      requiredVerifications: ["test"], requiresExplicitCompletion: true,
+    }, ev27, projectDir);
+    assert.equal(pol27Fail.verifications[0]?.status, "failed", "evicted snapshot map must preserve failed test status");
+
+    // R5-028: direct read_file of unrelated README.md or root index.ts does not satisfy post-mutation source review for src/index.ts
+    const evUnrelatedRead = collectTurnEvidence([{
+      info: { id: "a1", role: "assistant" },
+      parts: [
+        { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/index.ts", content: "export const a = 1;" }, output: "ok" } },
+        { type: "tool", tool: "read_file", state: { status: "completed", input: { path: "README.md" }, output: "# Docs" } },
+        { type: "tool", tool: "read_file", state: { status: "completed", input: { path: "index.ts" }, output: "export {};" } },
+      ],
+    }], projectDir);
+    assert.equal(hasPostMutationReview(evUnrelatedRead, true), false, "R5-028: reading unrelated README.md or root index.ts must not satisfy source review of mutated src/index.ts");
+
+    // R5-032: iterative source-only review verifies via Round 2 read_file without demanding tests
+    const { GuardEngine } = await import("../dist/engine.js");
+    const srcEngine = new GuardEngine({ enabled: true, iterationBudget: 2 });
+    const srcTurn1 = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: '@guardian-task {"mode":"iterative-review","review":"source","verify":[]}\nFix src/app.ts and review source.' }] },
+      { info: { id: "a1", role: "assistant" }, parts: [
+        { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/app.ts", content: "export const ok = 1;\n" }, output: "ok" } },
+        { type: "text", text: "Done." },
+      ] },
+    ];
+    const sr1 = await srcEngine.inspect("s-r5-32", projectDir, srcTurn1);
+    assert.equal(sr1.decision, "block");
+    const srcTurn2 = [
+      ...srcTurn1,
+      { info: { id: "rem1", role: "user" }, parts: [{ type: "text", text: sr1.combinedRemediationPrompt, synthetic: true, metadata: { "opencode-guardian": true } }] },
+      { info: { id: "a2", role: "assistant" }, parts: [
+        { type: "tool", tool: "read_file", state: { status: "completed", input: { path: "src/app.ts" }, output: "export const ok = 1;\n" } },
+        { type: "text", text: "Reviewed src/app.ts, complete." },
+      ] },
+    ];
+    const sr2 = await srcEngine.inspect("s-r5-32", projectDir, srcTurn2);
+    assert.equal(sr2.decision, "pass");
+    assert.equal(sr2.remediationStatus, "verified", "R5-032: source-only iterative remediation must verify via Round 2 source review");
   });
 });

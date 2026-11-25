@@ -13,7 +13,6 @@ export const TRUNCATION_PLACEHOLDERS: RegExp[] = [
 
 export function findTruncationPlaceholder(text: string, filePath?: string): RegExpMatchArray | null {
   if (filePath && /\.(?:md|mdx|rst|txt|json|ya?ml)$/i.test(filePath)) return null;
-  if (text.length > 2 * 1024 * 1024) return null;
   const comments = maskCodeLiterals(text, true, filePath);
   for (const pattern of TRUNCATION_PLACEHOLDERS) {
     const match = pattern.exec(comments);

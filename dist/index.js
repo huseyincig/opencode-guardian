@@ -449,10 +449,11 @@ function setRemediationLeaseForSession(sessionID, release, options) {
         disposeRemediationLeaseEntry(existing);
     }
     const ttlMs = options?.ttlMs ?? 45_000;
+    const leaseToken = options?.leaseToken;
     const startedAt = Date.now();
     const heartbeat = setInterval(() => {
         if (Date.now() - startedAt >= MAX_IDLE_LEASE_DURATION_MS) {
-            releaseRemediationLeaseForSession(sessionID);
+            releaseRemediationLeaseForSession(sessionID, options?.instanceId, leaseToken);
             return;
         }
         const renewed = renewSessionLease({
@@ -460,9 +461,10 @@ function setRemediationLeaseForSession(sessionID, release, options) {
             owner: "opencode-guardian",
             kind: "active_remediation",
             ttlMs,
+            ...(leaseToken !== undefined ? { leaseToken } : {}),
         });
         if (!renewed) {
-            releaseRemediationLeaseForSession(sessionID);
+            releaseRemediationLeaseForSession(sessionID, options?.instanceId, leaseToken);
         }
     }, Math.max(50, Math.floor(ttlMs / 3)));
     heartbeat.unref?.();
@@ -471,6 +473,7 @@ function setRemediationLeaseForSession(sessionID, release, options) {
         release,
         heartbeat,
         ...(options?.instanceId !== undefined ? { instanceId: options.instanceId } : {}),
+        ...(leaseToken !== undefined ? { leaseToken } : {}),
     });
     while (activeRemediationLeases.size > 512) {
         const oldest = activeRemediationLeases.keys().next().value;
@@ -482,11 +485,13 @@ function setRemediationLeaseForSession(sessionID, release, options) {
             disposeRemediationLeaseEntry(oldEntry);
     }
 }
-function releaseRemediationLeaseForSession(sessionID, ownerInstanceId) {
+function releaseRemediationLeaseForSession(sessionID, ownerInstanceId, expectedLeaseToken) {
     const existing = activeRemediationLeases.get(sessionID);
     if (!existing)
         return;
     if (ownerInstanceId !== undefined && existing.instanceId !== ownerInstanceId)
+        return;
+    if (expectedLeaseToken !== undefined && existing.leaseToken !== expectedLeaseToken)
         return;
     activeRemediationLeases.delete(sessionID);
     disposeRemediationLeaseEntry(existing);
@@ -687,23 +692,25 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
 }
 export async function finalizeSubagentHandoff(input) {
     let remediated = false;
-    let resolvedCapability;
-    if (input.resolveCapability) {
-        try {
-            resolvedCapability = await input.resolveCapability();
-        }
-        catch {
-            resolvedCapability = {
-                capability: "unknown",
-                evidence: { agentName: input.agentName, reasons: ["capability resolution failed"] },
-            };
-        }
-    }
-    const agentCapability = resolvedCapability?.capability ?? "unknown";
     for (let round = 0; round < MAX_SUBAGENT_HANDOFF_ROUNDS; round++) {
         if (input.signal?.aborted) {
             throw new Error("[opencode-guardian handoff] plugin teardown interrupted subagent finalization.");
         }
+        // Re-evaluate capability on every round so mid-handoff permission/agent revocations
+        // immediately block subsequent autonomous remediation dispatches (cache-backed when unchanged).
+        let resolvedCapability;
+        if (input.resolveCapability) {
+            try {
+                resolvedCapability = await input.resolveCapability();
+            }
+            catch {
+                resolvedCapability = {
+                    capability: "unknown",
+                    evidence: { agentName: input.agentName, reasons: ["capability resolution failed"] },
+                };
+            }
+        }
+        const agentCapability = resolvedCapability?.capability ?? "unknown";
         let messages;
         try {
             messages = await input.fetchMessages();
@@ -767,6 +774,7 @@ export async function finalizeSubagentHandoff(input) {
                     owner: "opencode-guardian",
                     kind: "active_remediation",
                     ttlMs: leaseTtlMs,
+                    leaseToken: releaseRemediationLease.leaseToken,
                 });
                 if (!renewed) {
                     clearInterval(leaseHeartbeat);
@@ -990,6 +998,7 @@ export function hasUnfinishedBackgroundTool(messages) {
  */
 async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability, toastNotifier, ownerInstanceId) {
     let stage = "message-fetch";
+    let acquiredLeaseToken;
     try {
         if (signal?.aborted)
             return;
@@ -1035,7 +1044,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
         const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
         if (result.decision === "block" && result.combinedRemediationPrompt) {
             if (effectiveIsSubagent && agentCapability !== "write-allowed") {
-                releaseRemediationLeaseForSession(sessionID);
+                releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
                 return;
             }
             stage = "prompt-send";
@@ -1049,7 +1058,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 active: true,
                 updatedAt: Date.now(),
             });
-            releaseRemediationLeaseForSession(sessionID);
+            releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
             const releaseRemediationLease = acquireSessionLease({
                 sessionID,
                 owner: "opencode-guardian",
@@ -1057,9 +1066,15 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 ttlMs: 45_000,
                 reason: "guardian-remediation",
             });
+            acquiredLeaseToken = releaseRemediationLease.leaseToken;
+            setRemediationLeaseForSession(sessionID, releaseRemediationLease, {
+                ...(ownerInstanceId !== undefined ? { instanceId: ownerInstanceId } : {}),
+                ttlMs: 45_000,
+                leaseToken: acquiredLeaseToken,
+            });
             try {
                 if (signal?.aborted) {
-                    releaseRemediationLease();
+                    releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
                     result.rollback?.();
                     rollbackProcessInspect?.();
                     clearMeshIntervention(sessionID, "opencode-guardian");
@@ -1067,13 +1082,9 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 }
                 await sendPrompt(result.combinedRemediationPrompt);
                 if (signal?.aborted) {
-                    releaseRemediationLease();
+                    releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
                     return;
                 }
-                setRemediationLeaseForSession(sessionID, releaseRemediationLease, {
-                    ...(ownerInstanceId !== undefined ? { instanceId: ownerInstanceId } : {}),
-                    ttlMs: 45_000,
-                });
                 recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
                 toastNotifier?.notify({
                     kind: "remediation",
@@ -1083,7 +1094,7 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                 });
             }
             catch (promptError) {
-                releaseRemediationLease();
+                releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
                 result.rollback?.();
                 rollbackProcessInspect?.();
                 clearMeshIntervention(sessionID, "opencode-guardian");
@@ -1091,13 +1102,18 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
             }
         }
         else if (result.results.length > 0) {
-            releaseRemediationLeaseForSession(sessionID);
+            releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
         }
     }
     catch {
-        releaseRemediationLeaseForSession(sessionID);
+        if (acquiredLeaseToken !== undefined) {
+            releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
+        }
         if (signal?.aborted)
             return;
+        if (acquiredLeaseToken === undefined) {
+            releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
+        }
         const errorCode = stage === "message-fetch"
             ? "message-fetch-failed"
             : stage === "prompt-send"
@@ -1427,6 +1443,7 @@ const setup = async (context) => {
         return;
     }
     const MAX_BOUNDED_DIRECTORIES = 64;
+    const HARD_MAX_BOUNDED_DIRECTORIES = 128;
     const setBoundedDirectoryEntry = (map, key, value, protectedDirs) => {
         map.delete(key);
         map.set(key, value);
@@ -1436,6 +1453,18 @@ const setup = async (context) => {
             if (map.size <= MAX_BOUNDED_DIRECTORIES)
                 break;
             if (candidate === directory || candidate === key || protectedDirs?.has(candidate))
+                continue;
+            map.delete(candidate);
+            if (map === runtimeByDirectory) {
+                configureGuardianTelemetry(candidate, undefined, instanceId);
+            }
+        }
+        if (map.size <= HARD_MAX_BOUNDED_DIRECTORIES)
+            return;
+        for (const candidate of map.keys()) {
+            if (map.size <= HARD_MAX_BOUNDED_DIRECTORIES)
+                break;
+            if (candidate === directory || candidate === key)
                 continue;
             map.delete(candidate);
             if (map === runtimeByDirectory) {
@@ -1580,8 +1609,23 @@ const setup = async (context) => {
         sessionDirectories.delete(sessionID);
     };
     const verificationStore = new VerificationSnapshotStore();
+    const BACKGROUND_JOB_STALE_TTL_MS = 10 * 60_000;
     const backgroundSessions = new Set();
     const sessionBackgroundJobs = new Map();
+    const pruneStaleBackgroundJobs = (sessionID, now = Date.now()) => {
+        const jobs = sessionBackgroundJobs.get(sessionID);
+        if (!jobs)
+            return;
+        for (const [jobKey, updatedAt] of jobs.entries()) {
+            if (now - updatedAt > BACKGROUND_JOB_STALE_TTL_MS) {
+                jobs.delete(jobKey);
+            }
+        }
+        if (jobs.size === 0) {
+            sessionBackgroundJobs.delete(sessionID);
+            backgroundSessions.delete(sessionID);
+        }
+    };
     const backgroundJobKey = (job) => {
         if (!job || typeof job !== "object")
             return undefined;
@@ -1896,11 +1940,11 @@ const setup = async (context) => {
                             toolCallStartedAt.delete(oldest);
                         }
                     }
-                    if (toolAfterReady && event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
-                        verificationStore.observeBefore(event.sessionID, event.id, event.tool, event.input, runtimeDirectory);
-                    }
                     if (runtime.config.preflight?.enabled === true) {
                         inspectPreflight(event.tool, event.input, event.sessionID, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier, runtime.config.preflight?.mode ?? "strict", runtime.config.secrets?.enabled === false ? undefined : (runtime.sanitizer ?? undefined));
+                    }
+                    if (toolAfterReady && event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
+                        verificationStore.observeBefore(event.sessionID, event.id, event.tool, event.input, runtimeDirectory);
                     }
                     if (toolAfterReady && canFinalizeSubagent && event.tool === "subagent") {
                         const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
@@ -2033,7 +2077,18 @@ const setup = async (context) => {
                                             cacheAgentCapability(childID, resolved);
                                             return resolved;
                                         }
-                                        let resolvedName = childAgent ?? meshProfile?.agentName;
+                                        let liveSessionAgent;
+                                        if (typeof context.session.get === "function") {
+                                            try {
+                                                const liveChild = await context.session.get({ sessionID: childID });
+                                                const rawLiveAgent = liveChild?.agent;
+                                                if (typeof rawLiveAgent === "string" && rawLiveAgent.trim().length > 0) {
+                                                    liveSessionAgent = rawLiveAgent.trim();
+                                                }
+                                            }
+                                            catch { }
+                                        }
+                                        let resolvedName = liveSessionAgent ?? childAgent ?? meshProfile?.agentName;
                                         if (!resolvedName) {
                                             try {
                                                 const ctxMsgs = normalizeV2Messages(await context.session.context({ sessionID: childID }), childID);
@@ -2088,21 +2143,43 @@ const setup = async (context) => {
                                         : undefined,
                                 });
                             if (revised !== undefined) {
+                                const lastNonEmptyLine = (text) => {
+                                    const trimmed = text.trimEnd();
+                                    const nl = trimmed.lastIndexOf("\n");
+                                    return (nl >= 0 ? trimmed.slice(nl + 1) : trimmed).replace(/\r$/, "").trim();
+                                };
                                 const existingText = extractV2OutputText(current.output, current.content).replace(/\r?\n?<\/subagent>\s*$/i, "");
-                                const revisedHasOutcome = /^\s*\[TASK OUTCOME\]/m.test(revised);
-                                const trailingOutcomeLine = !subagentRemediated && !revisedHasOutcome
-                                    ? /(?:^|\r?\n)(\[TASK OUTCOME\][^\r\n]*)\s*$/.exec(existingText)?.[1]
+                                const revisedLastLine = lastNonEmptyLine(revised);
+                                const revisedHasOutcome = /^\[TASK OUTCOME\]/i.test(revisedLastLine);
+                                const existingLastLine = lastNonEmptyLine(existingText);
+                                const trailingOutcomeLine = !subagentRemediated && !revisedHasOutcome && /^\[TASK OUTCOME\]/i.test(existingLastLine)
+                                    ? existingLastLine
                                     : undefined;
                                 const finalRevised = trailingOutcomeLine
                                     ? `${revised}\n${trailingOutcomeLine}`
                                     : revised;
-                                const outcomeStatus = /^\s*\[TASK OUTCOME\][^\r\n]*\bstatus=([a-z_-]+)/im.exec(finalRevised)?.[1]?.toLowerCase();
+                                const TERMINAL_SUBAGENT_STATUSES = new Set([
+                                    "completed",
+                                    "blocked",
+                                    "failed",
+                                    "partial",
+                                    "needs_input",
+                                    "cancelled",
+                                ]);
+                                const finalLastLine = lastNonEmptyLine(finalRevised);
+                                const rawOutcomeStatus = /^\[TASK OUTCOME\][^\r\n]*\bstatus=([a-z_-]+)\b/i.exec(finalLastLine)?.[1]?.toLowerCase();
+                                const outcomeStatus = rawOutcomeStatus && TERMINAL_SUBAGENT_STATUSES.has(rawOutcomeStatus)
+                                    ? rawOutcomeStatus
+                                    : undefined;
                                 const existingStatus = typeof structured?.status === "string" && structured.status.trim().length > 0
                                     ? structured.status.trim()
                                     : typeof current.metadata?.status === "string" && current.metadata.status.trim().length > 0
                                         ? current.metadata.status.trim()
                                         : undefined;
-                                const finalStatus = outcomeStatus ?? (subagentRemediated ? "completed" : (existingStatus ?? "completed"));
+                                const safeExistingStatus = existingStatus && TERMINAL_SUBAGENT_STATUSES.has(existingStatus.toLowerCase())
+                                    ? existingStatus
+                                    : undefined;
+                                const finalStatus = outcomeStatus ?? (subagentRemediated ? "completed" : (safeExistingStatus ?? "completed"));
                                 event.result = {
                                     ...event.result,
                                     output: {
@@ -2286,8 +2363,10 @@ const setup = async (context) => {
                 clearMeshIntervention(event.sessionID, "opencode-guardian");
                 foregroundHandoffs.delete(event.sessionID);
                 contracts.delete(event.sessionID);
-                backgroundSessions.delete(event.sessionID);
-                sessionBackgroundJobs.delete(event.sessionID);
+                pruneStaleBackgroundJobs(event.sessionID);
+                if (!sessionBackgroundJobs.has(event.sessionID)) {
+                    backgroundSessions.delete(event.sessionID);
+                }
                 toastNotifier[INTERVENTION_TRACKER]?.noteHumanPrompt(event.sessionID);
                 verificationStore.beginTurn(event.sessionID);
                 const text = typeof event.prompt?.text === "string" ? event.prompt.text : "";
@@ -2382,21 +2461,19 @@ const setup = async (context) => {
                         })
                         : [];
                     if (ownBg.length > 0) {
-                        const keys = new Set();
+                        const now = Date.now();
+                        const keys = new Map();
                         for (const job of ownBg) {
-                            const key = backgroundJobKey(job);
-                            if (key)
-                                keys.add(key);
+                            const key = backgroundJobKey(job) ?? "__anonymous__";
+                            keys.set(key, now);
                         }
-                        if (keys.size > 0) {
-                            sessionBackgroundJobs.delete(event.sessionID);
-                            sessionBackgroundJobs.set(event.sessionID, keys);
-                            while (sessionBackgroundJobs.size > 512) {
-                                const oldest = sessionBackgroundJobs.keys().next().value;
-                                if (oldest === undefined)
-                                    break;
-                                sessionBackgroundJobs.delete(oldest);
-                            }
+                        sessionBackgroundJobs.delete(event.sessionID);
+                        sessionBackgroundJobs.set(event.sessionID, keys);
+                        while (sessionBackgroundJobs.size > 512) {
+                            const oldest = sessionBackgroundJobs.keys().next().value;
+                            if (oldest === undefined)
+                                break;
+                            sessionBackgroundJobs.delete(oldest);
                         }
                         backgroundSessions.delete(event.sessionID);
                         backgroundSessions.add(event.sessionID);
@@ -2571,20 +2648,19 @@ const setup = async (context) => {
                         if (jobSessionID) {
                             const jobStatus = typeof jobInfo?.status === "string" ? jobInfo.status : undefined;
                             if (jobStatus === "running") {
-                                const key = backgroundJobKey(jobInfo);
-                                const set = sessionBackgroundJobs.get(jobSessionID) ?? new Set();
-                                if (key) {
-                                    set.delete(key);
-                                    set.add(key);
-                                    while (set.size > 128) {
-                                        const oldestKey = set.values().next().value;
-                                        if (oldestKey === undefined)
-                                            break;
-                                        set.delete(oldestKey);
-                                    }
+                                const now = Date.now();
+                                const key = backgroundJobKey(jobInfo) ?? "__anonymous__";
+                                const jobs = sessionBackgroundJobs.get(jobSessionID) ?? new Map();
+                                jobs.delete(key);
+                                jobs.set(key, now);
+                                while (jobs.size > 128) {
+                                    const oldestKey = jobs.keys().next().value;
+                                    if (oldestKey === undefined)
+                                        break;
+                                    jobs.delete(oldestKey);
                                 }
                                 sessionBackgroundJobs.delete(jobSessionID);
-                                sessionBackgroundJobs.set(jobSessionID, set);
+                                sessionBackgroundJobs.set(jobSessionID, jobs);
                                 while (sessionBackgroundJobs.size > 512) {
                                     const oldest = sessionBackgroundJobs.keys().next().value;
                                     if (oldest === undefined)
@@ -2625,6 +2701,7 @@ const setup = async (context) => {
                                                 : undefined,
                                             typeof jobInfo?.path === "string" ? jobInfo.path : undefined,
                                             jobInfo?.kind,
+                                            "__anonymous__",
                                         ]) {
                                             if (typeof candidate === "string" && candidate.length > 0) {
                                                 set.delete(candidate);
@@ -2729,6 +2806,7 @@ const setup = async (context) => {
                         const runtime = runtimeForDirectory(activeDirectory);
                         if (runtime.config.enabled === false || idleSignal.aborted)
                             return;
+                        pruneStaleBackgroundJobs(sessionID);
                         if (backgroundSessions.has(sessionID)) {
                             return;
                         }

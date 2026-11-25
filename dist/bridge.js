@@ -762,8 +762,9 @@ function clampLeaseTtl(kind, ttlMs) {
 }
 export function acquireSessionLease(input) {
     const sID = String(input.sessionID ?? "");
+    const leaseToken = randomUUID();
     if (!sID)
-        return () => { };
+        return Object.assign(() => { }, { leaseToken });
     const state = getMeshState();
     const now = Date.now();
     const ttl = clampLeaseTtl(input.kind, input.ttlMs);
@@ -785,11 +786,12 @@ export function acquireSessionLease(input) {
         priority: LEASE_PRIORITY[input.kind],
         acquiredAt: now,
         expiresAt: now + ttl,
+        token: leaseToken,
         ...(input.reason ? { reason: input.reason } : {}),
     };
     leases.set(key, lease);
     let released = false;
-    return () => {
+    const releaseFn = () => {
         if (released)
             return;
         released = true;
@@ -803,6 +805,7 @@ export function acquireSessionLease(input) {
             state.leasesBySession.delete(sID);
         }
     };
+    return Object.assign(releaseFn, { leaseToken });
 }
 export function renewSessionLease(input) {
     const sID = String(input.sessionID ?? "");
@@ -817,6 +820,9 @@ export function renewSessionLease(input) {
     const existing = leases.get(key);
     if (!existing)
         return false;
+    if (input.leaseToken !== undefined && existing.token !== input.leaseToken) {
+        return false;
+    }
     const ttl = clampLeaseTtl(input.kind, input.ttlMs);
     existing.expiresAt = now + ttl;
     return true;

@@ -24,12 +24,18 @@ import { noApologyRule } from "./rules/no-apology.js";
 import { noUnverifiedClaimsRule } from "./rules/no-unverified-claims.js";
 import { noSilentFailureRule } from "./rules/no-silent-failure.js";
 import { destructiveOperationsRule } from "./rules/destructive-operations.js";
-import { collectTurnEvidence, type VerificationSnapshot } from "./evidence.js";
+import {
+  collectTurnEvidence,
+  isVerificationSnapshotCurrent,
+  type VerificationSnapshot,
+} from "./evidence.js";
 import { SessionStateStore } from "./state.js";
 import { taskCompletionRule } from "./rules/task-completion.js";
 import { instructionFidelityRule } from "./rules/instruction-fidelity.js";
 import {
   extractTaskContract,
+  hasPostMutationReview,
+  isSourceReviewEvidence,
   latestMutationSequence,
 } from "./task-contract.js";
 import { createHandoffForBlockingResults, formatOpenCodeHandoff, type OpenCodeHandoff } from "./handoff.js";
@@ -1024,6 +1030,28 @@ export class GuardEngine {
           };
         }
         this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
+        const contRuleIds = blockingResults.map((r) => r.ruleId);
+        const contFiles = Array.from(new Set(
+          blockingResults.flatMap((result) =>
+            result.findings.flatMap((finding) =>
+              finding.filePath ? [finding.filePath] : []
+            )
+          )
+        ));
+        const contFindingKeys = Array.from(new Set(
+          blockingResults.flatMap((result) =>
+            result.findings.map((finding) =>
+              findingIdentity(result.ruleId, finding)
+            )
+          )
+        ));
+        this.sessionState.setPendingRemediation(
+          sessionID,
+          turnKey,
+          contRuleIds,
+          contFiles,
+          contFindingKeys
+        );
         const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
         const handoff = !isSubagent
           ? createHandoffForBlockingResults(blockingResults, sessionID, turnKey, sequence)
@@ -1048,6 +1076,7 @@ export class GuardEngine {
             rollbackDone = true;
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
+            this.sessionState.clearPendingRemediation(sessionID);
             if (handoff) {
               this.sessionState.clearActiveHandoff(sessionID);
               clearActiveMeshHandoff(sessionID);
@@ -1210,9 +1239,14 @@ export class GuardEngine {
         successfulFresh.filter((record) => record.kind === "file-mutation")
           .map((record) => record.filePath).filter((file): file is string => !!file)
       );
-      const hasProgress = successfulFresh.some((record) =>
-        ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind)
+      const hasFreshSourceReview = successfulFresh.some((record) =>
+        isSourceReviewEvidence(record)
       );
+      const hasProgress =
+        successfulFresh.some((record) =>
+          ["file-mutation", "test", "build", "typecheck", "lint", "audit"].includes(record.kind)
+        ) ||
+        (pendingRules.includes("task/completion-gate") && hasFreshSourceReview);
       const pendingFindingSet = new Set(pendingFindingKeys);
       let originalFindingsRemain = results.some(
         (result) =>
@@ -1315,7 +1349,7 @@ export class GuardEngine {
       const freshValidVerifications = successfulFresh.filter(
         (record) =>
           record.sequence > lastFreshMutationSequence &&
-          record.stateFingerprint !== "unverified-state"
+          isVerificationSnapshotCurrent(record, freshEvidence, directory)
       );
       if (verified && pendingRules.some((rule) =>
         ["integrity/no-unverified-claims", "integrity/no-silent-failure"].includes(rule)) &&
@@ -1325,9 +1359,17 @@ export class GuardEngine {
       }
       if (verified && pendingRules.includes("task/completion-gate")) {
         const required = contract?.requiredVerifications ?? [];
+        const sourceOnlyAllowed =
+          required.length === 0 &&
+          (Boolean(contract?.requiresSourceReview) || (contract?.prohibitedVerifications?.length ?? 0) > 0);
+        const sourceReviewSatisfied =
+          sourceOnlyAllowed &&
+          hasFreshSourceReview &&
+          hasPostMutationReview(evidence, Boolean(contract?.requiresSourceReview));
         const hasRequired = required.length > 0
           ? required.every((kind) => freshValidVerifications.some((record) => record.kind === kind))
-          : freshValidVerifications.some((record) =>
+          : sourceReviewSatisfied ||
+            freshValidVerifications.some((record) =>
               ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)
             );
         if (!hasRequired) verified = false;

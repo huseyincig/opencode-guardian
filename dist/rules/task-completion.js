@@ -59,7 +59,7 @@ export const taskCompletionRule = {
             return { ruleId: this.id, decision: "pass", findings };
         }
         const policy = contract?.requiresExplicitCompletion
-            ? evaluateTaskPolicy(contract, evidence)
+            ? evaluateTaskPolicy(contract, evidence, context.directory)
             : undefined;
         if (policy?.review === "missing") {
             const finding = {

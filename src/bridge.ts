@@ -117,6 +117,7 @@ export interface MeshSessionLease {
   acquiredAt: number;
   expiresAt: number;
   reason?: string | undefined;
+  token?: string | undefined;
 }
 
 export interface MeshAgentProfile {
@@ -1017,9 +1018,10 @@ export function acquireSessionLease(input: {
   kind: MeshLeaseKind;
   ttlMs?: number | undefined;
   reason?: string | undefined;
-}): () => void {
+}): (() => void) & { leaseToken: string } {
   const sID = String(input.sessionID ?? "");
-  if (!sID) return () => {};
+  const leaseToken = randomUUID();
+  if (!sID) return Object.assign(() => {}, { leaseToken });
   const state = getMeshState();
   const now = Date.now();
   const ttl = clampLeaseTtl(input.kind, input.ttlMs);
@@ -1042,12 +1044,13 @@ export function acquireSessionLease(input: {
     priority: LEASE_PRIORITY[input.kind],
     acquiredAt: now,
     expiresAt: now + ttl,
+    token: leaseToken,
     ...(input.reason ? { reason: input.reason } : {}),
   };
   leases.set(key, lease);
 
   let released = false;
-  return () => {
+  const releaseFn = () => {
     if (released) return;
     released = true;
     const current = state.leasesBySession.get(sID);
@@ -1059,6 +1062,7 @@ export function acquireSessionLease(input: {
       state.leasesBySession.delete(sID);
     }
   };
+  return Object.assign(releaseFn, { leaseToken });
 }
 
 export function renewSessionLease(input: {
@@ -1066,6 +1070,7 @@ export function renewSessionLease(input: {
   owner: string;
   kind: MeshLeaseKind;
   ttlMs?: number | undefined;
+  leaseToken?: string | undefined;
 }): boolean {
   const sID = String(input.sessionID ?? "");
   if (!sID) return false;
@@ -1076,6 +1081,9 @@ export function renewSessionLease(input: {
   const key = `${input.owner}::${input.kind}`;
   const existing = leases.get(key);
   if (!existing) return false;
+  if (input.leaseToken !== undefined && existing.token !== input.leaseToken) {
+    return false;
+  }
   const ttl = clampLeaseTtl(input.kind, input.ttlMs);
   existing.expiresAt = now + ttl;
   return true;

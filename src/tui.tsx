@@ -168,14 +168,20 @@ function v2UiConfig(directory: string, options: unknown) {
   }
 }
 
+class RpcTimeoutError extends Error {
+  constructor() {
+    super("RPC timeout");
+    this.name = "RpcTimeoutError";
+  }
+}
+
 async function withRpcTimeout<T>(promise: Promise<T>, timeoutMs = 1500): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("RPC timeout")), timeoutMs);
-        (timer as { unref?: () => void }).unref?.();
+        timer = setTimeout(() => reject(new RpcTimeoutError()), timeoutMs);
       }),
     ]);
   } finally {
@@ -227,8 +233,14 @@ async function v2PerformCommand(
             result = { title: remote.title, message: remote.message };
           }
         }
-      } catch {
-        // Fall back to local reset when RPC host is unavailable (e.g. standalone/unit tests).
+      } catch (err) {
+        if (err instanceof RpcTimeoutError) {
+          result = {
+            title: "Guardian: Reset Statistics",
+            message: "Reset failed: server RPC timed out; local statistics were not modified.",
+          };
+        }
+        // Fall back to local reset only when RPC host is unavailable (e.g. standalone/unit tests).
       }
     }
     if (!result) {

@@ -1,4 +1,4 @@
-import { calculateProductFingerprint, latestEvidence } from "../evidence.js";
+import { isVerificationSnapshotCurrent, latestEvidence } from "../evidence.js";
 import { sanitizeProseForInspection } from "../prose.js";
 import { extractTaskContract } from "../task-contract.js";
 import { getClaimPatterns, isUncertaintyClaim } from "../locale-intents.js";
@@ -27,17 +27,8 @@ function staleAfterMutation(evidence, record, directory) {
     if (lastMutation >= 0 && lastMutation >= record.sequence) {
         return true;
     }
-    if (record.stateFingerprint === "unverified-state") {
+    if (!isVerificationSnapshotCurrent(record, evidence, directory)) {
         return true;
-    }
-    if (record.stateFingerprint?.startsWith("sha256:")) {
-        const files = record.snapshotFiles?.length ? record.snapshotFiles : evidence?.mutatedFiles;
-        if (!directory || !files || (Array.isArray(files) ? !files.length : !files.size))
-            return true;
-        const fp = calculateProductFingerprint(directory, files);
-        if (fp === "unverified-state" || `sha256:${fp}` !== record.stateFingerprint) {
-            return true;
-        }
     }
     return false;
 }

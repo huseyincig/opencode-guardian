@@ -21,5 +21,5 @@ export interface TaskPolicyDecision {
  * intent nor interprets the assistant's prose. A Rego/Wasm policy adapter
  * could consume the same structured input without replacing host adapters.
  */
-export declare function evaluateTaskPolicy(contract: TaskContract, evidence: TurnEvidence): TaskPolicyDecision;
+export declare function evaluateTaskPolicy(contract: TaskContract, evidence: TurnEvidence, directory?: string): TaskPolicyDecision;
 export {};

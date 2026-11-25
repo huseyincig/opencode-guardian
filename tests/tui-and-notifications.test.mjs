@@ -1852,4 +1852,34 @@ describe("Version Update Notice", () => {
     assert.match(alerts[0]?.message ?? "", /Inspections \(tool \+ turn\): 42/);
     assert.match(alerts[0]?.message ?? "", /Secret redactions \(in-memory\): 7/);
   });
+
+  test("R5-038: /guardian reset timeout does not fall back to local reset", async (t) => {
+    const rpcMod = await import("../dist/intervention-rpc.js");
+    const { registerGuardianV2Commands } = await import("../dist/tui.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r5-038-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    let commands = [];
+    const alerts = [];
+    let onResetCalls = 0;
+    registerGuardianV2Commands({
+      keymap: { layer(factory) { commands = factory().commands; } },
+      ui: { dialog: { async alert(r) { alerts.push(r); }, async confirm() { return true; } } },
+      client: {
+        rpc() {
+          return {
+            [rpcMod.GUARDIAN_RESET_RPC_METHOD]() {
+              return new Promise(() => {}); // hangs until RPC timeout
+            },
+          };
+        },
+      },
+    }, () => dir, () => { onResetCalls++; });
+
+    const resetCmd = commands.find((c) => c.id === "opencode-guardian.reset");
+    assert.ok(resetCmd);
+    await resetCmd.run();
+    assert.equal(onResetCalls, 0, "R5-038: timed-out remote reset must not invoke local onReset");
+    assert.match(alerts[0]?.message ?? "", /Reset failed.*timed out/i);
+  });
 });

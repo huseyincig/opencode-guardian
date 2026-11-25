@@ -208,6 +208,33 @@ export function isSourceReviewEvidence(record: EvidenceRecord): boolean {
     /^[+-](?![+-])\s*\S/m.test(output);
 }
 
+function normalizeReviewPath(target: string): string {
+  return target.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function isAbsoluteReviewPath(norm: string): boolean {
+  return norm.startsWith("/") || /^[a-z]:\//.test(norm);
+}
+
+function reviewPathMatchesMutated(reviewPath: string, mutatedFiles: ReadonlySet<string>): boolean {
+  const normReview = normalizeReviewPath(reviewPath);
+  const reviewAbs = isAbsoluteReviewPath(normReview);
+  for (const mutated of mutatedFiles) {
+    const normMutated = normalizeReviewPath(mutated);
+    if (normReview === normMutated) return true;
+    const mutatedAbs = isAbsoluteReviewPath(normMutated);
+    if (reviewAbs !== mutatedAbs) {
+      if (
+        (reviewAbs && normReview.endsWith("/" + normMutated)) ||
+        (mutatedAbs && normMutated.endsWith("/" + normReview))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function hasPostMutationReview(
   evidence: TurnEvidence,
   sourceReviewRequired = false
@@ -219,6 +246,11 @@ export function hasPostMutationReview(
     if (!sourceReviewRequired && ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)) {
       return true;
     }
-    return isSourceReviewEvidence(record);
+    if (!isSourceReviewEvidence(record)) return false;
+    const isDirectFileRead = /(?:^|[.:_-])(?:read|view)(?:$|[.:_-])/.test(record.toolName.toLowerCase());
+    if (isDirectFileRead && record.filePath && evidence.mutatedFiles && evidence.mutatedFiles.size > 0) {
+      return reviewPathMatchesMutated(record.filePath, evidence.mutatedFiles);
+    }
+    return true;
   });
 }

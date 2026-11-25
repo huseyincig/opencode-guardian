@@ -431,7 +431,19 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
       verifiedStateDirs.add(dir);
     }
 
-    const line = JSON.stringify(safeEvent(event)) + "\n";
+    const baseEvent = safeEvent(event);
+    let line = JSON.stringify(baseEvent) + "\n";
+    if (Buffer.byteLength(line) > settings.maxBytes) {
+      const compact: GuardianEvent = {
+        at: baseEvent.at,
+        ...(baseEvent.id ? { id: baseEvent.id } : {}),
+        kind: baseEvent.kind,
+        ...(baseEvent.action ? { action: baseEvent.action } : {}),
+        ...(baseEvent.outcome ? { outcome: baseEvent.outcome } : {}),
+        ...(baseEvent.preflight ? { preflight: baseEvent.preflight } : {}),
+      };
+      line = JSON.stringify(compact) + "\n";
+    }
     const filePath = guardianEventPath(directoryArg);
     const archive = filePath + ".1";
     const openLogFd = (): number => {
@@ -469,7 +481,7 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
               fd = openLogFd();
             }
             const activeStat = fs.fstatSync(fd);
-            if (activeStat.isFile() && activeStat.size + Buffer.byteLength(line) > settings.maxBytes) {
+            if (activeStat.isFile() && activeStat.size > 0 && activeStat.size + Buffer.byteLength(line) > settings.maxBytes) {
               // Keep exactly one bounded archive. Refuse unsafe pre-existing archive paths.
               if (fs.existsSync(archive) || fs.lstatSync(archive, { throwIfNoEntry: false })) {
                 checkFile(archive);

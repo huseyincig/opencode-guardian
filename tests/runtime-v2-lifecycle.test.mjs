@@ -4754,5 +4754,274 @@ describe("Deep Runtime & Config Merge Regressions", () => {
       0,
       "lease-blocked finalizeSubagentHandoff must roll back consumed remediation budget"
     );
+
+    // R5-004: finalizeSubagentHandoff must re-resolve capability on each round so mid-handoff revocation blocks round 1
+    let capRound = 0;
+    let sendCalls = 0;
+    const capDowngradeEngine = new GuardEngine({ enabled: true, remediationBudget: 2 });
+    const downgradedOut = await finalizeSubagentHandoff({
+      sessionID: "ses-r5-004",
+      directory: proj,
+      engine: capDowngradeEngine,
+      resolveCapability: async () => {
+        capRound++;
+        return {
+          capability: capRound === 1 ? "write-allowed" : "read-only",
+          evidence: { reasons: ["round-" + capRound] },
+        };
+      },
+      fetchMessages: async () => [
+        { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the bug." }] },
+        { info: { id: `a${capRound}`, role: "assistant" }, parts: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+      ],
+      sendAndWait: async () => { sendCalls++; },
+    });
+    assert.equal(sendCalls, 1, "R5-004: round 1 must not dispatch remediation after capability downgraded to read-only");
+    assert.ok(capRound >= 2, "R5-004: resolveCapability must be re-evaluated on round 1");
+    assert.equal(typeof downgradedOut, "string");
+
+    // R5-009: renewSessionLease must reject stale leaseToken
+    const { renewSessionLease } = await import("../dist/bridge.js");
+    const relA = acquireSessionLease({ sessionID: "ses-r5-009", owner: "opencode-guardian", kind: "active_remediation", ttlMs: 10_000 });
+    const relB = acquireSessionLease({ sessionID: "ses-r5-009", owner: "opencode-guardian", kind: "active_remediation", ttlMs: 10_000 });
+    t.after(() => { relA(); relB(); });
+    assert.equal(renewSessionLease({ sessionID: "ses-r5-009", owner: "opencode-guardian", kind: "active_remediation", leaseToken: relA.leaseToken }), false, "R5-009: stale leaseToken must not renew newer lease");
+    assert.equal(renewSessionLease({ sessionID: "ses-r5-009", owner: "opencode-guardian", kind: "active_remediation", leaseToken: relB.leaseToken }), true, "R5-009: active leaseToken must renew cleanly");
+
+    // Pass-1 Part A #2 & #3: trailing [TASK OUTCOME] check ignores mid-body quoted lines and handles long trailing whitespace in linear time
+    const outcomeEngine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    const quotedWithRealTail = [
+      "The log quoted a previous line:",
+      "[TASK OUTCOME] status=failed",
+      "Real summary after investigation.",
+      "[TASK OUTCOME] status=blocked" + " ".repeat(50_000),
+    ].join("\n");
+    const tStart = Date.now();
+    const outcomeRes = await finalizeSubagentHandoff({
+      sessionID: "ses-part-a-outcome",
+      directory: proj,
+      engine: outcomeEngine,
+      resolveCapability: async () => ({ capability: "read-only", evidence: { reasons: ["ro"] } }),
+      fetchMessages: async () => [
+        { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Investigate." }] },
+        { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: quotedWithRealTail }] },
+      ],
+      sendAndWait: async () => { throw new Error("read-only must not send"); },
+      initialOutput: quotedWithRealTail,
+    });
+    assert.ok(Date.now() - tStart < 1000, "trailing outcome parsing must be O(N), not quadratic");
+    assert.ok(
+      outcomeRes.trimEnd().endsWith("[TASK OUTCOME] status=blocked"),
+      `must preserve genuine trailing status=blocked instead of matching mid-body quote, got tail: ${outcomeRes.slice(-120)}`
+    );
+  });
+
+  test("Pass-1 re-audit: mid-handoff agent switch, keyless background job, and preflight-blocked execute.before", async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-pass1-rt-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(dir, "app.ts"), "export const v = 1;\n");
+
+    let currentChildAgent = "builder";
+    let childMsgCount = 0;
+    const childSent = [];
+    const parentSent = [];
+    let executeBefore;
+    let executeAfter;
+    let emitEvent;
+
+    const cleanup = await Guardian.setup({
+      location: { directory: dir },
+      options: {
+        enabled: true,
+        remediationBudget: 2,
+        preflight: { enabled: true, mode: "strict" },
+        secrets: { enabled: false },
+        updateNotice: { enabled: false },
+        rules: {
+          "discipline/no-evasion": "error",
+          "task/completion-gate": "error",
+        },
+      },
+      agent: {
+        async list() {
+          return [
+            { name: "builder", permissions: [{ permission: "edit", pattern: "*", effect: "allow" }] },
+            { name: "reviewer", permissions: [{ permission: "edit", pattern: "*", effect: "deny" }, { permission: "bash", pattern: "*", effect: "deny" }] },
+          ];
+        },
+      },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              const ev = await new Promise((resolve) => {
+                emitEvent = resolve;
+                signal.addEventListener("abort", () => resolve(null), { once: true });
+              });
+              if (!ev) break;
+              yield ev;
+            }
+          })();
+        },
+      },
+      tool: {
+        async hook(name, cb) {
+          if (name === "execute.before") executeBefore = cb;
+          if (name === "execute.after") executeAfter = cb;
+          return { dispose() {} };
+        },
+      },
+      shell: { async hook() { return { dispose() {} }; } },
+      session: {
+        async get({ sessionID }) {
+          if (sessionID === "ses-child-switch") {
+            return { id: sessionID, parentID: "ses-parent-switch", agent: currentChildAgent, location: { directory: dir } };
+          }
+          return { id: sessionID, location: { directory: dir } };
+        },
+        async context({ sessionID }) {
+          if (sessionID === "ses-child-switch") {
+            childMsgCount++;
+            return [
+              { id: "cu1", type: "user", text: "Fix the bug." },
+              {
+                id: `ca${childMsgCount}`,
+                type: "assistant",
+                agent: currentChildAgent,
+                content: [{ type: "text", text: "The test failure is unrelated to this change." }],
+              },
+            ];
+          }
+          if (sessionID === "ses-bg-anon") {
+            return [
+              { id: "bu1", type: "user", text: "Fix the bug." },
+              { id: "ba1", type: "assistant", content: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+            ];
+          }
+          if (sessionID === "ses-preflight-clean") {
+            return [
+              { id: "pu1", type: "user", text: "Update app.ts and run tests." },
+              {
+                id: "pa1",
+                type: "assistant",
+                content: [
+                  {
+                    type: "tool",
+                    id: "tc-write",
+                    name: "write",
+                    state: { status: "completed", input: { filePath: "app.ts", content: "export const v = 2;\n" } },
+                  },
+                  {
+                    type: "tool",
+                    id: "tc-test",
+                    name: "bash",
+                    state: { status: "completed", input: { command: "npm test" }, output: "1 passing" },
+                  },
+                  { type: "text", text: "Updated app.ts and ran npm test cleanly." },
+                ],
+              },
+            ];
+          }
+          return [];
+        },
+        async synthetic(payload) {
+          if (payload.sessionID === "ses-child-switch") {
+            childSent.push(payload);
+            // Mid-handoff agent switches from builder -> reviewer before Round 1
+            currentChildAgent = "reviewer";
+            emitEvent?.({ type: "session.agent.selected", data: { sessionID: "ses-child-switch", agent: "reviewer" } });
+          } else {
+            parentSent.push(payload);
+          }
+        },
+        async wait() {
+          await new Promise((r) => setTimeout(r, 20));
+        },
+        async hook() { return { dispose() {} }; },
+      },
+    });
+    t.after(async () => {
+      emitEvent?.(null);
+      await cleanup?.();
+    });
+
+    // Part A #1: live context.session.get agent lookup in finalizeSubagentHandoff stops Round 1 after agent switches to read-only reviewer
+    await executeBefore({
+      id: "call-sub-switch",
+      sessionID: "ses-parent-switch",
+      tool: "subagent",
+      input: { agent: "builder", prompt: "Fix the bug." },
+    });
+    const taskAfterEvent = {
+      id: "call-sub-switch",
+      sessionID: "ses-parent-switch",
+      tool: "subagent",
+      status: "completed",
+      input: { agent: "builder", prompt: "Fix the bug." },
+      result: {
+        output: "The test failure is unrelated to this change.",
+        metadata: { sessionID: "ses-child-switch" },
+      },
+    };
+    await executeAfter(taskAfterEvent);
+    assert.equal(childSent.length, 1, "Part A #1: Round 1 must NOT send remediation after child agent switched to read-only reviewer");
+
+    // Part A #4: keyless experimental.job.updated running suppresses immediate session.idle until completion
+    emitEvent({ type: "experimental.job.updated", data: { info: { sessionID: "ses-bg-anon", status: "running" } } });
+    await new Promise((r) => setTimeout(r, 20));
+    emitEvent({ type: "session.idle", data: { sessionID: "ses-bg-anon" } });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(
+      parentSent.filter((p) => p.sessionID === "ses-bg-anon").length,
+      0,
+      "Part A #4: keyless running background job must suppress session.idle remediation"
+    );
+    emitEvent({ type: "experimental.job.updated", data: { info: { sessionID: "ses-bg-anon", status: "completed" } } });
+    await new Promise((r) => setTimeout(r, 20));
+    emitEvent({ type: "session.idle", data: { sessionID: "ses-bg-anon" } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      parentSent.filter((p) => p.sessionID === "ses-bg-anon").length,
+      1,
+      "Part A #4: once keyless background job completes, session.idle remediation must resume"
+    );
+
+    // Part B #1: preflight-rejected mutating tool must NOT leave stale inFlightMutations poisoning subsequent verification snapshot
+    await assert.rejects(
+      executeBefore({
+        id: "call-pf-blocked",
+        sessionID: "ses-preflight-clean",
+        tool: "bash",
+        input: { command: "rm -rf /" },
+      }),
+      /rejected/i
+    );
+    // Now run a clean write + npm test in the same session and verify session.idle passes without false overlap invalidation
+    fs.writeFileSync(path.join(dir, "app.ts"), "export const v = 2;\n");
+    await executeBefore({ id: "call-pf-w", sessionID: "ses-preflight-clean", tool: "write", input: { filePath: "app.ts", content: "export const v = 2;\n" } });
+    await executeAfter({
+      id: "call-pf-w",
+      sessionID: "ses-preflight-clean",
+      tool: "write",
+      status: "completed",
+      input: { filePath: "app.ts", content: "export const v = 2;\n" },
+      result: { output: "ok" },
+    });
+    await executeBefore({ id: "call-pf-t", sessionID: "ses-preflight-clean", tool: "bash", input: { command: "npm test" } });
+    await executeAfter({
+      id: "call-pf-t",
+      sessionID: "ses-preflight-clean",
+      tool: "bash",
+      status: "completed",
+      input: { command: "npm test" },
+      result: { output: "1 passing" },
+    });
+    emitEvent({ type: "session.idle", data: { sessionID: "ses-preflight-clean" } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      parentSent.filter((p) => p.sessionID === "ses-preflight-clean").length,
+      0,
+      "Part B #1: preflight-blocked command must not poison inFlightMutations and invalidate subsequent passing test snapshot"
+    );
   });
 });

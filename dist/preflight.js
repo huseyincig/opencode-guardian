@@ -200,6 +200,27 @@ export function evaluateFileMutationPreflight(tool, input, mode = "strict", secr
         if (!src || !dst) {
             return "uninspectable-file-input";
         }
+        const isNullDevice = (raw) => {
+            const slashNorm = raw.trim().replace(/\\/g, "/");
+            const segments = slashNorm.split("/");
+            const collapsed = [];
+            for (const seg of segments) {
+                if (!seg || seg === ".")
+                    continue;
+                if (seg === "..") {
+                    collapsed.pop();
+                    continue;
+                }
+                collapsed.push(seg);
+            }
+            const joined = (slashNorm.startsWith("/") ? "/" : "") + collapsed.join("/");
+            return /^(?:\/dev\/null|nul)$/i.test(joined);
+        };
+        if (isCatastrophicPath(src) ||
+            isCatastrophicPath(dst) ||
+            (action === "move" && isNullDevice(dst))) {
+            return "destructive-command";
+        }
     }
     else if (!hasValidPatchStructure && textsToCheck.length === 0) {
         return "uninspectable-file-input";

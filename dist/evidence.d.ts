@@ -22,6 +22,11 @@ export interface VerificationSnapshot {
     editIntegrity?: EditIntegrityEvidence;
     incomplete?: boolean | undefined;
 }
+/**
+ * Shared snapshot freshness check used by task-policy, remediation verification,
+ * and unverified-claims so disk tampering after verification is detected uniformly.
+ */
+export declare function isVerificationSnapshotCurrent(record: EvidenceRecord | undefined, evidence: TurnEvidence | undefined, directory?: string): boolean;
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export declare class VerificationSnapshotStore {
     private readonly sessions;

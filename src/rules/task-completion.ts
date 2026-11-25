@@ -70,7 +70,7 @@ export const taskCompletionRule: GuardRule = {
     }
 
     const policy = contract?.requiresExplicitCompletion
-      ? evaluateTaskPolicy(contract, evidence)
+      ? evaluateTaskPolicy(contract, evidence, context.directory)
       : undefined;
 
     if (policy?.review === "missing") {

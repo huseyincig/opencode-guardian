@@ -1068,6 +1068,48 @@ describe("Dynamic Shell & Example-File Credential Rules", () => {
       "customSensitiveKeys must scan past 256 assignments in normal files"
     );
 
+    // R5-018: object keys containing credentials/secrets must be redacted (including JSON fast-path)
+    const keyLeakJson = JSON.stringify({ "https://admin:super_secret_pw@db.internal": 1, token: "tok-1234567890" });
+    const keyLeakSan = sanitizeString(keyLeakJson, { includeRuntimeEnv: false });
+    assert.ok(!keyLeakSan.sanitized.includes("super_secret_pw"), `R5-018: credential in JSON object key must be redacted: ${keyLeakSan.sanitized}`);
+    const objKeyLeak = sanitizeObject({ "sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "val1", "sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "val2" }, { includeRuntimeEnv: false });
+    assert.ok(!JSON.stringify(objKeyLeak.sanitized).includes("sk-proj-"), "R5-018: secret object keys must be redacted");
+    assert.equal(Object.keys(objKeyLeak.sanitized).length, 2, "R5-018: colliding redacted keys must preserve both values");
+
+    // Pass-2 re-audit: normal HTTP URLs with ports + @ in query/fragment must NOT be corrupted;
+    // reverse-order key collision and Error custom keys must be handled safely
+    for (const safeUrl of [
+      "http://localhost:3000?email=alice@example.com",
+      "https://api.example.com:8443?pkg=@opencode/plugin",
+      "https://example.com:8080#user@host",
+      "http://[::1]:3000?email=alice@example.com",
+    ]) {
+      assert.equal(sanitizeString(safeUrl, { includeRuntimeEnv: false }).sanitized, safeUrl, `normal URL must not be corrupted: ${safeUrl}`);
+    }
+    const revCollision = sanitizeObject({ "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "from-secret", "[REDACTED]": "from-literal" }, { includeRuntimeEnv: false });
+    assert.equal(Object.keys(revCollision.sanitized).length, 2, "reverse-order redacted/literal key collision must preserve both entries");
+    const errWithSecretKey = new Error("failed");
+    errWithSecretKey["https://admin:s3cr3tPass@api.example.com/v1"] = "500";
+    const sanErr = sanitizeObject(errWithSecretKey, { includeRuntimeEnv: false });
+    assert.ok(!Object.getOwnPropertyNames(sanErr.sanitized).some((k) => k.includes("s3cr3tPass")), "Error own property keys must be redacted");
+
+    // 512 KiB seam straddling customSensitiveKeys assignment must not be missed
+    const seamCode = "a".repeat(512 * 1024 - 18) + '\nmyCustomKey = "secret_value_999"\n';
+    assert.equal(
+      findAllSecretsInCode(seamCode, "app.ts", undefined, { customSensitiveKeys: ["myCustomKey"] }).length,
+      1,
+      "customSensitiveKeys assignment straddling 512 KiB offset must be detected"
+    );
+
+    // R5-022: customSensitiveKeys appended at tail of >512 KiB file must still be detected
+    const hugeCustomFile = "const pad = 1;\n".repeat(40_000) + '\nconst MY_TAIL_KEY = "tail_secret_value_99999";\n';
+    assert.ok(hugeCustomFile.length > 512 * 1024);
+    assert.equal(
+      findAllSecretsInCode(hugeCustomFile, "src/huge.ts", undefined, { customSensitiveKeys: ["MY_TAIL_KEY"] }).length,
+      1,
+      "R5-022: customSensitiveKeys at tail of >512 KiB file must still be detected"
+    );
+
     // noSecretsRule must inspect all 5 extra write keys (new_str, file_text, CodeContent, ReplacementContent, text)
     for (const [key, fileKey] of [
       ["new_str", "path"],

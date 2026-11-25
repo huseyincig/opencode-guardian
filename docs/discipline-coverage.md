@@ -66,5 +66,5 @@ Default production-dependency findings are advisory, including when the rule sev
 
 Validation commands: `npm run verify` (`typecheck:strict`, `lint`, `test`, `check-docs`), `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI.
 
-Observed on 2026-11-25 for **v0.17.9**: **852 / 852 tests passed** across 13 domain suites, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 65 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
+Observed on 2026-11-25 for **v0.17.9**: **913 / 913 tests passed** across 14 domain suites, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 65 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
 

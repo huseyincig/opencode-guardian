@@ -152,6 +152,29 @@ export function isSourceReviewEvidence(record) {
     return /(?:^|(?:&&|\|\||;|\n)\s*)\s*git\s+(?:diff|show)(?=\s|$)/m.test(command) &&
         /^[+-](?![+-])\s*\S/m.test(output);
 }
+function normalizeReviewPath(target) {
+    return target.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+function isAbsoluteReviewPath(norm) {
+    return norm.startsWith("/") || /^[a-z]:\//.test(norm);
+}
+function reviewPathMatchesMutated(reviewPath, mutatedFiles) {
+    const normReview = normalizeReviewPath(reviewPath);
+    const reviewAbs = isAbsoluteReviewPath(normReview);
+    for (const mutated of mutatedFiles) {
+        const normMutated = normalizeReviewPath(mutated);
+        if (normReview === normMutated)
+            return true;
+        const mutatedAbs = isAbsoluteReviewPath(normMutated);
+        if (reviewAbs !== mutatedAbs) {
+            if ((reviewAbs && normReview.endsWith("/" + normMutated)) ||
+                (mutatedAbs && normMutated.endsWith("/" + normReview))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 export function hasPostMutationReview(evidence, sourceReviewRequired = false) {
     const lastMutation = latestMutationSequence(evidence);
     if (lastMutation < 0)
@@ -162,6 +185,12 @@ export function hasPostMutationReview(evidence, sourceReviewRequired = false) {
         if (!sourceReviewRequired && ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)) {
             return true;
         }
-        return isSourceReviewEvidence(record);
+        if (!isSourceReviewEvidence(record))
+            return false;
+        const isDirectFileRead = /(?:^|[.:_-])(?:read|view)(?:$|[.:_-])/.test(record.toolName.toLowerCase());
+        if (isDirectFileRead && record.filePath && evidence.mutatedFiles && evidence.mutatedFiles.size > 0) {
+            return reviewPathMatchesMutated(record.filePath, evidence.mutatedFiles);
+        }
+        return true;
     });
 }

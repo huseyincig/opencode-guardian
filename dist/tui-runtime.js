@@ -197,12 +197,17 @@ function v2UiConfig(directory, options) {
     };
   }
 }
+class RpcTimeoutError extends Error {
+  constructor() {
+    super("RPC timeout");
+    this.name = "RpcTimeoutError";
+  }
+}
 async function withRpcTimeout(promise, timeoutMs = 1500) {
   let timer;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("RPC timeout")), timeoutMs);
-      timer.unref?.();
+      timer = setTimeout(() => reject(new RpcTimeoutError()), timeoutMs);
     })]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -257,8 +262,14 @@ async function v2PerformCommand(context, command, directory, onReset) {
             };
           }
         }
-      } catch {
-        // Fall back to local reset when RPC host is unavailable (e.g. standalone/unit tests).
+      } catch (err) {
+        if (err instanceof RpcTimeoutError) {
+          result = {
+            title: "Guardian: Reset Statistics",
+            message: "Reset failed: server RPC timed out; local statistics were not modified."
+          };
+        }
+        // Fall back to local reset only when RPC host is unavailable (e.g. standalone/unit tests).
       }
     }
     if (!result) {

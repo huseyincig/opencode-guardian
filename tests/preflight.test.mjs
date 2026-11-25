@@ -1107,6 +1107,36 @@ describe("Backtick & Inert Discussion Preflight Gaps", () => {
       "CRLF unified diff with blank context line must not drop subsequent +++ /dev/null delete"
     );
 
+    // R5-026: catastrophic move/copy source/dest or move to /dev/null must block; normal move stays allowed
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "move", source: "src/a.ts", destination: "/dev/null" }, [], "strict"),
+      "destructive-command"
+    );
+    for (const nullDst of ["//dev/null", "/dev/./null", "NUL"]) {
+      assert.equal(
+        evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "move", source: "src/a.ts", dest: nullDst }, [], "strict"),
+        "destructive-command",
+        `move to null device variant '${nullDst}' must block`
+      );
+    }
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "copy", source: "src/a.ts", destination: "/" }, [], "critical"),
+      "destructive-command"
+    );
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "move", source: "src/a.ts", destination: "src/b.ts" }, [], "strict"),
+      undefined
+    );
+
+    // R5-040: truncation placeholders in >2 MiB files must still be caught within bounded 2 MiB prefix
+    const bigTruncated = "// ... existing code unchanged ...\n" + "const x = 1;\n".repeat(170_000);
+    assert.ok(bigTruncated.length > 2 * 1024 * 1024);
+    assert.equal(
+      evaluatePreflight_7("write", { path: "src/big.ts", content: bigTruncated }, [], "strict"),
+      "truncation-placeholder-in-file-write",
+      "R5-040: >2 MiB write with truncation placeholder must still block in preflight"
+    );
+
     // Non-catastrophic delete carrying hardcoded secret content in critical mode must still scan attached text
     assert.equal(
       evaluatePreflight_7(

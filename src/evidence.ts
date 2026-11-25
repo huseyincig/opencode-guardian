@@ -283,19 +283,62 @@ export function normalizeErrorFingerprint(errorText: string): string {
     .slice(0, 240);
 }
 
-function executableShellStages(command: string): string[] {
-  return splitShellStages(command)
-    .flat()
-    .map((stage) => normalizeCommand(stage).toLowerCase())
-    .map((stage) =>
-      stage
-        .replace(/^\s*sudo(?:\s+-\S+)*\s+/i, "")
-        .replace(/^\s*env(?:\s+(?:-\S+|[a-z_][a-z0-9_]*=\S+))*\s+/i, "")
-        .replace(/^(?:[a-z_][a-z0-9_]*=\S+\s+)*/i, "")
-        .replace(/^(?:npx(?:\s+--no-install)?|pnpm\s+exec|npm\s+exec\s+--)\s+/i, "")
-        .trim()
-    )
-    .filter(Boolean);
+function stripBenignCommandWrappers(stage: string): string {
+  let current = stage.trim();
+  for (let i = 0; i < 6; i++) {
+    const next = current
+      .replace(/^\s*sudo(?:\s+-\S+)*\s+/i, "")
+      .replace(/^\s*env(?:\s+(?:-\S+|[a-z_][a-z0-9_]*=\S+))*\s+/i, "")
+      .replace(/^\s*command(?:\s+-[pvV])*\s+/i, "")
+      .replace(/^\s*time(?:\s+-\S+)*\s+/i, "")
+      .replace(/^\s*nohup\s+/i, "")
+      .replace(/^\s*nice(?:\s+(?:-n\s+-?\d+|-\d+))?\s+/i, "")
+      .replace(/^\s*timeout(?:\s+(?:--?[a-z-]+(?:=\S+)?|(?:-[ks]|--kill-after|--signal)\s+\S+))*\s+\d+(?:\.\d+)?[smhd]?\s+/i, "")
+      .replace(/^\s*flock(?:\s+(?:-[sxnoueE]+|--(?:shared|exclusive|nonblock|nb|unlock|no-fork|close|verbose)|(?:-w|--timeout)\s+\S+))*\s+(?:"[^"]*"|'[^']*'|\S+)\s+(?!-c\b)/i, "")
+      .replace(/^(?:[a-z_][a-z0-9_]*=\S+\s+)*/i, "")
+      .replace(/^(?:npx(?:\s+--no-install)?|pnpm\s+exec|npm\s+exec\s+--)\s+/i, "")
+      .trim();
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+function unwrapFlockCommandScripts(stage: string): string[] {
+  const match = /^\s*flock(?:\s+(?:-[sxnoueE]+|--(?:shared|exclusive|nonblock|nb|unlock|no-fork|close|verbose)|(?:-w|--timeout)\s+\S+))*\s+(?:"[^"]*"|'[^']*'|\S+)\s+-c\s+(?:'([^']*)'|"((?:\\.|[^"\\])*)")(?=\s|$)/i.exec(stage);
+  const script = match?.[1] ?? match?.[2];
+  return script !== undefined ? [script] : [];
+}
+
+function executableShellStages(command: string, depth = 0): string[] {
+  const rawStages = splitShellStages(command).flat();
+  const out: string[] = [];
+  for (const raw of rawStages) {
+    const normalized = normalizeCommand(raw);
+    const stripped = stripBenignCommandWrappers(normalized);
+    if (!stripped) continue;
+    if (depth < 3) {
+      const nestedScripts = [
+        ...literalShellScripts(stripped),
+        ...unwrapFlockCommandScripts(normalized),
+      ];
+      if (nestedScripts.length > 0) {
+        for (const script of nestedScripts) {
+          out.push(...executableShellStages(script, depth + 1));
+        }
+        continue;
+      }
+    }
+    out.push(stripped.toLowerCase());
+  }
+  return out.filter(Boolean);
+}
+
+function hasOutputSpoofingStage(command: string): boolean {
+  if (!command) return false;
+  return executableShellStages(command).some((stage) =>
+    /^(?:echo|printf|cat|node\s+(?:-[ep]|--eval|--print)|python(?:3)?\s+-c|perl\s+-e|ruby\s+-e)\b/i.test(stage)
+  );
 }
 
 function classifyCommand(command: string, toolName: string): EvidenceKind[] {
@@ -308,7 +351,7 @@ function classifyCommand(command: string, toolName: string): EvidenceKind[] {
       return pattern.test(stage);
     });
   const exploratoryVerification =
-    /(?:^|\s)(?:--help|--version|--listtests|--list-tests|--collect-only|--list|--dry-run|--showconfig|--show-config)(?=\s|$)/i;
+    /(?:^|\s)(?:--help|--version|--init|--listtests|--list-tests|--collect-only|--list|--dry-run|--showconfig|--show-config)(?=\s|$)/i;
   const anyVerificationStage = (pattern: RegExp): boolean =>
     stages.some((stage) => {
       if (exploratoryVerification.test(stage)) return false;
@@ -317,8 +360,8 @@ function classifyCommand(command: string, toolName: string): EvidenceKind[] {
     });
 
   if (
-    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b/) ||
-    anyVerificationStage(/^(?:pytest|py\.test|python(?:3)?\s+-m\s+(?:pytest|unittest)|go\s+test|cargo\s+(?:test|nextest\s+run)|node\s+--test|jest|vitest|dotnet\s+test|phpunit|make\s+test)\b/) ||
+    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::[a-z0-9_-]+)?\b/) ||
+    anyVerificationStage(/^(?:pytest|py\.test|python(?:3)?\s+-m\s+(?:pytest|unittest)|go\s+test|cargo\s+(?:test|nextest\s+run)|node(?:\s+(?:--?[a-z0-9-]+(?:=\S+)?|(?:--import|--require|-r|--loader|--conditions|--env-file)\s+\S+))*\s+--test|jest|vitest|ava|mocha|tap|dotnet\s+test|phpunit|make\s+test)\b/) ||
     anyVerificationStage(/^(?:\.\/)?(?:mvn|mvnw)\b[^\n;&|]*(?:\btest\b|\bverify\b)/) ||
     anyVerificationStage(/^(?:\.\/)?(?:gradle|gradlew)\b[^\n;&|]*\btest\b/)
   ) {
@@ -326,7 +369,7 @@ function classifyCommand(command: string, toolName: string): EvidenceKind[] {
   }
 
   if (
-    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/) ||
+    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build(?::[a-z0-9_-]+)?\b/) ||
     anyVerificationStage(/^(?:cargo\s+build|go\s+build|dotnet\s+build|make\s+build)\b/) ||
     anyVerificationStage(/^(?:\.\/)?(?:mvn|mvnw)\b[^\n;&|]*(?:\bpackage\b|\binstall\b)/) ||
     anyVerificationStage(/^(?:\.\/)?(?:gradle|gradlew)\b[^\n;&|]*\bbuild\b/)
@@ -335,15 +378,15 @@ function classifyCommand(command: string, toolName: string): EvidenceKind[] {
   }
 
   if (
-    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?typecheck\b/) ||
-    anyVerificationStage(/^(?:tsc\b[^\n;&|]*--noemit|mypy|pyright)\b/)
+    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?typecheck(?::[a-z0-9_-]+)?\b/) ||
+    anyVerificationStage(/^(?:tsc|mypy|pyright)\b/)
   ) {
     kinds.add("typecheck");
   }
 
   if (
-    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint\b/) ||
-    anyVerificationStage(/^(?:eslint|ruff|flake8|golangci-lint|cargo\s+clippy)\b/)
+    anyVerificationStage(/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint(?::[a-z0-9_-]+)?\b/) ||
+    anyVerificationStage(/^(?:eslint|oxlint|biome\s+(?:lint|check)|prettier\s+--check|stylelint|shellcheck|ruff|flake8|golangci-lint|cargo\s+clippy)\b/)
   ) {
     kinds.add("lint");
   }
@@ -894,10 +937,31 @@ function recordFromPart(part: MessagePart, sequence: number, directory?: string)
       Boolean(command) &&
       isVerification &&
       isVerificationFailureMask(command);
-    const ambiguousVerification =
-      isVerification && (nonSequentialCompound || pipedWithoutPipefail);
     const testSummary = kind === "test" ? parseTestSummary(outputText) : undefined;
     const testReason = kind === "test" ? testOutcomeReason(command, outcome.exitCode, testSummary) : undefined;
+    const confirmedByStructuredSummary =
+      isVerification &&
+      commandStatus === "success" &&
+      outcome.exitCode === 0 &&
+      !maskedVerification &&
+      !foreignCwd &&
+      !hasOutputSpoofingStage(command) &&
+      (
+        (kind === "test" &&
+          Boolean(testSummary) &&
+          (testSummary?.total ?? 0) > 0 &&
+          (testSummary?.passed ?? 0) > 0 &&
+          (testSummary?.failed ?? 0) === 0 &&
+          (testSummary?.cancelled ?? 0) === 0 &&
+          !testReason) ||
+        (kind === "lint" &&
+          executableShellStages(command).some((stage) => /^oxlint\b/.test(stage)) &&
+          /^Found 0 warnings and 0 errors\.$/m.test(outputText))
+      );
+    const ambiguousVerification =
+      isVerification &&
+      (nonSequentialCompound || pipedWithoutPipefail) &&
+      !confirmedByStructuredSummary;
     const cancelled =
       outcome.aborted === true ||
       ((outcome.exitCode === 130 || part.state.status === "error") &&

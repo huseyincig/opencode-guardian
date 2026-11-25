@@ -75,6 +75,7 @@ export const noStubsRule: GuardRule = {
       const withComments = maskCodeLiterals(code, true, filePath);
       const fixture = /(?:^|[/\\])(?:__fixtures__|fixtures)(?:[/\\]|$)/i.test(filePath ?? "");
       if (fixture || /\.d\.[cm]?ts$/i.test(filePath ?? "")) return;
+      const isTestFile = /(?:^|[/\\])(?:__tests__|tests?)(?:[/\\]|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(filePath ?? "");
 
       const fileScope = filePath ?? source;
       const perCallCounts = new Map<string, number>();
@@ -112,24 +113,26 @@ export const noStubsRule: GuardRule = {
         }
       }
 
-      const emptyPatterns = [
-        /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
-        /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{\s*\}/g,
-        /(?:^|[{};\n])\s*(?:(?:public|private|protected|static|async|override)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
-      ];
-      for (const regex of emptyPatterns) {
-        for (const match of executable.matchAll(regex)) {
-          if (findings.length >= 20) break;
-          if (/^(?:constructor|noop|if|for|while|switch|catch)$/i.test(match[1] ?? "")) continue;
-          const name = "empty named JavaScript/TypeScript implementation";
-          const dedupKey = `${fileScope}:${name}:${match[1] ?? ""}`;
-          if (seen.has(dedupKey)) continue;
-          seen.add(dedupKey);
-          findings.push({ ruleId: "integrity/no-stubs", pattern: name,
-            messageSnippet: extractSnippet(code, match.index, match[0].length),
-            description: `Empty named implementation detected in ${source}; implement it or use an explicit no-op callback contract.`,
-            ...(filePath ? { filePath, fingerprint: `${filePath}:${name}:${match[1]}` } : {}),
-          });
+      if (!isTestFile) {
+        const emptyPatterns = [
+          /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
+          /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{\s*\}/g,
+          /(?:^|[{};\n])\s*(?:(?:public|private|protected|static|async|override)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_$][^{};]*)?\{\s*\}/g,
+        ];
+        for (const regex of emptyPatterns) {
+          for (const match of executable.matchAll(regex)) {
+            if (findings.length >= 20) break;
+            if (/^(?:constructor|noop|if|for|while|switch|catch)$/i.test(match[1] ?? "")) continue;
+            const name = "empty named JavaScript/TypeScript implementation";
+            const dedupKey = `${fileScope}:${name}:${match[1] ?? ""}`;
+            if (seen.has(dedupKey)) continue;
+            seen.add(dedupKey);
+            findings.push({ ruleId: "integrity/no-stubs", pattern: name,
+              messageSnippet: extractSnippet(code, match.index, match[0].length),
+              description: `Empty named implementation detected in ${source}; implement it or use an explicit no-op callback contract.`,
+              ...(filePath ? { filePath, fingerprint: `${filePath}:${name}:${match[1]}` } : {}),
+            });
+          }
         }
       }
     };

@@ -812,6 +812,20 @@ function buildInterventionDetails(
   return details;
 }
 
+const PROSE_ONLY_REMEDIATION_RULES = new Set([
+  "task/instruction-fidelity",
+  "discipline/no-apology",
+  "discipline/no-evasion",
+]);
+
+function shouldRetainUnverifiedRemediationIntervention(
+  pendingRules: readonly string[],
+  findingsCount: number
+): boolean {
+  if (findingsCount > 0) return true;
+  return pendingRules.some((rule) => !PROSE_ONLY_REMEDIATION_RULES.has(rule));
+}
+
 function recordInspectionOutcome(
   result: EngineExecutionResult,
   sessionID: string,
@@ -827,6 +841,7 @@ function recordInspectionOutcome(
     }, directory);
   }
 
+  let retainUnverifiedIntervention = false;
   if (result.remediationStatus === "verified") {
     clearMeshIntervention(sessionID, "opencode-guardian");
     toastNotifier?.clear?.(sessionID);
@@ -840,11 +855,32 @@ function recordInspectionOutcome(
       reasons: verifiedRules.map((rule) => ({ rule, code: "remediation-verified" })),
     }, directory);
   } else if (result.remediationStatus === "unverified") {
+    const unverifiedRules = result.pendingRemediationRules?.length
+      ? result.pendingRemediationRules
+      : ["remediation-unverified"];
     recordGuardianEvent({
       kind: "remediation-unverified",
       session: sessionFingerprint(sessionID),
       rules: result.pendingRemediationRules ?? [],
     }, directory);
+    retainUnverifiedIntervention = shouldRetainUnverifiedRemediationIntervention(
+      unverifiedRules,
+      findings.length
+    );
+    if (retainUnverifiedIntervention) {
+      // Keep an active mesh intervention so sibling orchestrators do not silently
+      // mark a task done while a code/verification remediation remains unverified.
+      recordMeshIntervention({
+        sessionID,
+        directory,
+        owner: "opencode-guardian",
+        kind: "post-remediation",
+        ruleIds: unverifiedRules,
+        deterministic: false,
+        active: true,
+        updatedAt: Date.now(),
+      });
+    }
   } else if (result.remediationStatus === "failed") {
     const failedRules = result.pendingRemediationRules?.length
       ? result.pendingRemediationRules
@@ -869,7 +905,12 @@ function recordInspectionOutcome(
     });
   }
 
-  if (result.results.length > 0 && result.decision === "pass" && result.remediationStatus !== "failed") {
+  if (
+    result.results.length > 0 &&
+    result.decision === "pass" &&
+    result.remediationStatus !== "failed" &&
+    !retainUnverifiedIntervention
+  ) {
     clearMeshIntervention(sessionID, "opencode-guardian");
   }
 

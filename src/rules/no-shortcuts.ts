@@ -302,12 +302,21 @@ export const noShortcutsRule: GuardRule = {
             hasLexicalBoundaries(text, idx, pattern.length) &&
             !isWithinException(text, idx, pattern.length, exceptions)
           ) {
-            seen.add(lowerPattern);
-            const snippet = extractSnippet(text, idx, pattern.length);
             const lineStart = text.lastIndexOf("\n", idx) + 1;
             const lineEndRaw = text.indexOf("\n", idx);
             const lineEnd = lineEndRaw < 0 ? text.length : lineEndRaw;
             const matchedLine = text.slice(lineStart, lineEnd).trim();
+            if (
+              lowerPattern === "temporary" &&
+              /\b(?:since\s+removed|already\s+removed|was\s+removed|removed|cleaned\s+up|deleted|reverted)\b|(?<!\p{L})(?:kaldırıldı|silindi|temizlendi|geri\s+alındı)(?!\p{L})/iu.test(
+                matchedLine
+              )
+            ) {
+              searchFrom = idx + 1;
+              continue;
+            }
+            seen.add(lowerPattern);
+            const snippet = extractSnippet(text, idx, pattern.length);
             const shouldBlock =
               customPhraseSet.has(lowerPattern) ||
               HIGH_CONFIDENCE_HEDGING_PATTERNS.has(lowerPattern);

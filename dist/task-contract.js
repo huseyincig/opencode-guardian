@@ -58,9 +58,10 @@ export function extractTaskContract(messages, sessionID) {
         return undefined;
     // 1. Explicit machine-readable directive takes highest precedence
     const directive = parseExplicitTaskDirective(text);
-    const body = sanitizeUserInstruction(directive
+    const rawBody = directive
         ? text.slice(text.indexOf("\n") < 0 ? text.length : text.indexOf("\n") + 1).trim()
-        : text);
+        : text;
+    const body = sanitizeUserInstruction(rawBody);
     // 2. Advisory locale / semantic signals (compatibility layer)
     const advisory = extractAdvisoryTaskSignals(body);
     const exploratory = isExploratoryPrompt(body) || advisory.exploratory;
@@ -75,9 +76,10 @@ export function extractTaskContract(messages, sessionID) {
         : directive
             ? directive.verify
             : advisory.requiredVerifications;
-    // A natural-language prohibition cannot be overridden by a machine-readable header.
+    // A natural-language prohibition (including inline backticked commands like
+    // "Do NOT run `npm run check`") cannot be overridden by a machine-readable header.
     const allVerificationKinds = ["test", "build", "typecheck", "lint", "audit"];
-    const prohibitedVerifications = allVerificationKinds.filter((kind) => deniedVerification(body, kind));
+    const prohibitedVerifications = allVerificationKinds.filter((kind) => deniedVerification(rawBody, kind));
     const requiredVerifications = requestedVerifications.filter((kind) => !prohibitedVerifications.includes(kind));
     const signalLocale = directive ? "structured" : advisory.signalLocale;
     return {

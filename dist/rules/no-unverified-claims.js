@@ -106,6 +106,7 @@ export const noUnverifiedClaimsRule = {
         const findings = [];
         const contradictions = [];
         const strict = context.ruleConfig.blockUnverified === true;
+        const prohibited = extractTaskContract(context.currentTurn, context.sessionID)?.prohibitedVerifications ?? [];
         for (const message of context.currentTurn) {
             if (message.info.role !== "assistant")
                 continue;
@@ -146,6 +147,13 @@ export const noUnverifiedClaimsRule = {
                         if (!isUncertaintyClaim(sentence)) {
                             const evidence = evidenceForClaim(claim, context.evidence, context.directory);
                             if (evidence?.status === "success") {
+                                matchedFinding = true;
+                                break;
+                            }
+                            // When the user explicitly prohibited verification (e.g. "Do NOT run `npm run check`"),
+                            // do not warn on generic fix statements ("bug is fixed") for lacking verification evidence.
+                            // Explicit pass claims ("all tests passed") and contradictions against failed runs are still flagged.
+                            if (claim.mode === "verification" && !evidence && prohibited.length > 0) {
                                 matchedFinding = true;
                                 break;
                             }
@@ -197,7 +205,6 @@ export const noUnverifiedClaimsRule = {
             return `  - ${finding.messageSnippet} — ${finding.description}.${evidence}`;
         })
             .join("\n");
-        const prohibited = extractTaskContract(context.currentTurn, context.sessionID)?.prohibitedVerifications ?? [];
         const step2 = prohibited.length > 0
             ? `2. Do NOT run verification commands explicitly prohibited by the user (${prohibited.join(", ")}); instead retract any unverified pass claim and report only observed results.`
             : `2. Run the actual verification command (e.g. tests, typecheck, build) to produce concrete evidence before claiming success.`;

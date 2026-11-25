@@ -389,9 +389,10 @@ export function classifyAgentReport(input) {
     return { state, hasClearBlocker, isClosing, isInProgress };
 }
 // Task Contract extraction helpers
-const ITERATION = /(?:\b(?:repeat|restart|rerun|re-run|again|until|every\s+(?:time|round)|each\s+(?:time|round))\b|(?<!\p{L})(?:tekrar|yeniden|baştan|her\s+(?:turda|tura|seferinde|hata|bir\s+hata)|hata\s+kalmayana|bulmayana|sıfır\s+hata)(?!\p{L}))/iu;
+const UNTIL_LOOP_CLAUSE = "\\buntil\\s+(?:there\\s+(?:are|is)\\s+)?(?:(?:no|zero|0)\\s+(?:(?:more|new|further|remaining)\\s+)?(?:issues?|errors?|bugs?|defects?|findings?|failures?|warnings?|problems?)|all\\s+(?:issues?|errors?|bugs?|defects?|findings?|tests?)|every\\s+(?:issue|error|bug|defect|finding)|(?:everything|it|the\\s+(?:build|suite|code|repo))\\s+(?:is\\s+)?(?:clean|green|passing|fixed|resolved)|(?:clean|green|passing|pass(?:es)?|fixed|resolved|done))\\b";
+const ITERATION = new RegExp(`(?:\\b(?:repeat|restart|rerun|re-run|again|every\\s+(?:time|round)|each\\s+(?:time|round))\\b|${UNTIL_LOOP_CLAUSE}|(?<!\\p{L})(?:tekrar|yeniden|baştan|her\\s+(?:turda|tura|seferinde|hata|bir\\s+hata)|hata\\s+kalmayana|bulmayana|sıfır\\s+hata)(?!\\p{L}))`, "iu");
 const REVIEW = /(?:\b(?:audit|review|inspect|debug|scan|check|test|pass|iteration|issue|bug|error|defect|fix)\b|(?<!\p{L})(?:denetim|incele|kontrol|debug|test|tur|hata|sorun|düzelt|bulgu)(?!\p{L}))/iu;
-const CONTINUE = /(?:\b(?:until|restart|repeat|rerun|re-run|again|each\s+(?:time|round)|every\s+(?:time|round))\b|(?<!\p{L})(?:tekrar|yeniden|baştan|her\s+(?:turda|tura|seferinde|hata)|kalmayana|bulmayana)(?!\p{L}))/iu;
+const CONTINUE = new RegExp(`(?:${UNTIL_LOOP_CLAUSE}|\\b(?:restart|repeat|rerun|re-run|again|each\\s+(?:time|round)|every\\s+(?:time|round))\\b|(?<!\\p{L})(?:tekrar|yeniden|baştan|her\\s+(?:turda|tura|seferinde|hata)|kalmayana|bulmayana)(?!\\p{L}))`, "iu");
 const NEGATED_LOOP = /(?:\b(?:do\s+not|don't|dont|never|without|stop)\s+(?:repeat|restart|rerun|re-run|again)\b|(?<!\p{L})(?:tekrarlama|tekrarlamayın|tekrar\s+etme|tekrar\s+başla(?:t)?ma|yeniden\s+başla(?:t)?ma|baştan\s+başla(?:t)?ma)(?!\p{L}))/iu;
 const SOURCE_REVIEW = /(?:\b(?:full|entire|whole|from\s+scratch|restart)\b[^.!?]{0,70}\b(?:review|inspect|scan|audit|source|code)\b|(?:\b(?:review|inspect|scan)\b|(?<!\p{L})(?:incele|denet|tara)\p{L}*)[^.!?]{0,70}(?:\b(?:again|from\s+the\s+start)\b|(?<!\p{L})(?:baştan|yeniden|tekrar)(?!\p{L}))|(?<!\p{L})(?:baştan|yeniden|tüm|bütün|satır\s+satır)(?!\p{L})[^.!?]{0,70}(?<!\p{L})(?:incele|denet|tara|kod)\p{L}*)/iu;
 const ACTION_REQUEST = /\b(?:implement|fix|change|modify|build|develop|resume|continue|write|create|add|update|complete|run|execute|start)\b|(?<!\p{L})(?:yap|yapın|uygula|uygulayın|düzelt|düzeltin|geliştir|geliştirin|devam\s+et|başla|başlayın|ekle|ekleyin|oluştur|tamamla|tamamlayın|yaz|yazın|çalıştır|çalıştırın)(?!\p{L})/iu;
@@ -411,11 +412,39 @@ function isPureDiagnosticQuestion(text) {
         /^(?:(?:why|what|how|when|where)\b|(?:neden|niye|niçin|nasıl)(?!\p{L}))/iu.test(trimmed) &&
         !ACTION_REQUEST.test(trimmed));
 }
+/** Strips fenced code blocks and blockquotes while unwrapping inline backticks
+ * so explicit command prohibitions like "Do NOT run `npm run check`" remain visible. */
+export function sanitizeForProhibitions(text) {
+    return text
+        .replace(/<lazy_bound_skill\b[\s\S]*?<\/lazy_bound_skill>/gi, " ")
+        .replace(/<lazy_skill_suggestions\b[\s\S]*?<\/lazy_skill_suggestions>/gi, " ")
+        .replace(/```[\s\S]*?```/g, " ")
+        .replace(/^\s*>[^\n]*$/gm, " ")
+        .replace(/\x60([^\x60\n]+)\x60/g, "$1");
+}
+const PM_VERIFICATION_SCRIPTS = {
+    test: "(?:test(?::[a-z0-9_-]+)?|check|verify)",
+    build: "(?:build(?::[a-z0-9_-]+)?|check|verify)",
+    typecheck: "(?:typecheck(?::[a-z0-9_-]+)?|check|verify)",
+    lint: "(?:lint(?::[a-z0-9_-]+)?|check|verify)",
+    audit: "(?:audit(?::[a-z0-9_-]+)?)",
+};
+const DIRECT_TOOL_PROHIBITIONS = {
+    test: "(?:tests?|pytest|vitest|jest|node\\s+--test)",
+    build: "(?:build)",
+    typecheck: "(?:typecheck|tsc)",
+    lint: "(?:lint|oxlint|eslint|biome)",
+    audit: "(?:audit)",
+};
 export function deniedVerification(text, kind) {
-    const target = kind === "test" ? "tests?" : kind;
-    const denied = new RegExp(`\\b(?:do\\s+not|don't|dont|without|never)\\s+(?:run|execute)\\s+(?:the\\s+)?${target}\\b|(?<!\\p{L})${kind === "test" ? "testleri?" : kind}\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın)(?!\\p{L})`, "iu");
-    const negations = extractInternationalNegations(text);
-    return denied.test(text) || (kind === "test" && negations.test);
+    const clean = sanitizeForProhibitions(text);
+    const directTarget = DIRECT_TOOL_PROHIBITIONS[kind];
+    const pmScript = PM_VERIFICATION_SCRIPTS[kind];
+    const pmCommand = `(?:npm|pnpm|yarn|bun)\\s+(?:run\\s+)?${pmScript}`;
+    const denied = new RegExp(`\\b(?:do\\s+not|don't|dont|not|without|never|skip)\\s+(?:(?:run(?:ning)?|execute|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
+        `|(?<!\\p{L})(?:${pmCommand}|${kind === "test" ? "testleri?" : kind})\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın|koşturma|koşturmayın)(?!\\p{L})`, "iu");
+    const negations = extractInternationalNegations(clean);
+    return denied.test(clean) || (kind === "test" && negations.test);
 }
 export function extractAdvisoryTaskSignals(body) {
     const exploratory = isExploratoryPrompt(body);

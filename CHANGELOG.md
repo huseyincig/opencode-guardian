@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.18.2 — 2026-11-25
+
+### Fixed
+- **Verification wrapper & modern JS/TS toolchain recognition (`src/evidence.ts`):**
+  - Unwrapped benign POSIX command wrappers (`flock`, `timeout`, `nice`, `nohup`, `command`, `time`) and nested literal `sh`/`bash`/`zsh`/`dash -c '...'` (plus `flock <lock> -c '...'`) scripts in `executableShellStages` so locked/subshell verification commands are classified accurately instead of falling back to `"generic"`.
+  - Recognized `node` with leading flags before `--test` (e.g. `node --import ./setup.mjs --test`), `oxlint`, `biome lint/check`, `prettier --check`, `stylelint`, `shellcheck`, plain `tsc` (excluding exploratory flags), and colon-suffixed npm/pnpm/yarn/bun scripts (`test:*`, `build:*`, `lint:*`, `typecheck:*`).
+  - Allowed complete, anchored passing test-runner summaries (`parseTestSummary`) and anchored `oxlint` clean output (`Found 0 warnings and 0 errors.`) with exit code `0` to confirm verification even when piped to `tail`/`head`/`grep`/`tee` or chained via `;` with another verification stage, while rejecting any command containing output-spoofing stages (`echo`, `printf`, `cat`, `node -e`, etc.).
+- **Explicit `Do NOT run npm ...` / backticked verification prohibitions (`src/locale-intents.ts`, `src/task-contract.ts`, `src/rules/no-unverified-claims.ts`):**
+  - Preserved inline-backticked commands during prohibition extraction (`sanitizeForProhibitions`) and extended `deniedVerification` to recognize package-manager and script prohibitions (e.g. ``Do NOT run `npm run check` ``, `not run npm test`, `skip npm run build`, `npm test çalıştırma`).
+  - Respected `prohibitedVerifications` in `integrity/no-unverified-claims` so honest fix statements (e.g. *"bug is fixed; I did not run `npm run check`"*) do not emit false missing-verification warnings when verification was explicitly forbidden, while still flagging fabricated pass claims (*"all tests passed"*) and failed-run contradictions.
+- **Eliminated live false positives across `task/completion-gate`, `integrity/no-stubs`, and `quality/no-shortcuts`:**
+  - Scoped `until` in `ITERATION`/`CONTINUE` (`src/locale-intents.ts`) to genuine loop termination clauses (`until no errors remain`, `until all tests pass`, `until clean`, etc.) so technical clauses like *"denies writes until update adds paths"* never trigger false `task/completion-gate` iterative review loops.
+  - Exempted empty mock/test-double functions (`() => {}`, `async interrupt() {}`) inside test files (`tests/**`, `__tests__/**`, `*.test.*`, `*.spec.*`) from the `empty named JavaScript/TypeScript implementation` check in `src/rules/no-stubs.ts`, while keeping production stub enforcement and explicit `NotImplementedError` checks 100% strict.
+  - Ignored past-tense/removed debug notes (e.g. *"A temporary debug log (since removed)..."*) for the bare `"temporary"` keyword in `src/rules/no-shortcuts.ts`, while keeping active `"temporary fix"` / `"temporary solution"` enforcement unchanged.
+- **Unverified code/verification remediation mesh visibility (`src/index.ts`):**
+  - Retained active `post-remediation` mesh intervention state when `remediationStatus === "unverified"` involves non-prose-only rules (code, security, or verification rules) or remaining findings, preventing sibling V2 mesh orchestrators from silently closing an unresolved remediation as `done`, while still clearing cleanly on prose-only passes.
+- **Verification:**
+  - Added TDD regression suite `tests/live-false-positive-regressions.test.mjs` (**922 / 922** tests passing across 15 suites, **21 / 21** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks).
+
 ## 0.18.1 — 2026-11-25
 
 ### Fixed

@@ -179,11 +179,13 @@ interface ProvenanceRecord {
   owner: string;
   kind: MeshMessageKind;
   synthetic: boolean;
-  protected: boolean;
+  protected?: boolean | undefined;
   sanitizedBy?: readonly string[] | undefined;
   boundedBy?: string | undefined;
   taskID?: string | undefined;
   requiredSkills?: readonly string[] | undefined;
+  /** Optional SHA-256 digest of envelope claims for cross-revision bridge interoperability. */
+  claimDigest?: string | undefined;
   createdAt: number;
 }
 
@@ -559,6 +561,28 @@ const SYNTHETIC_MESH_KINDS: readonly MeshMessageKind[] = [
   "delegation",
 ];
 
+function meshClaimDigest(claims: {
+  protected?: unknown;
+  sanitizedBy?: unknown;
+  boundedBy?: unknown;
+  taskID?: unknown;
+  requiredSkills?: unknown;
+}): string {
+  const list = (v: unknown): string[] =>
+    Array.isArray(v) ? v.map((x) => String(x)) : [];
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        claims.protected === true,
+        list(claims.sanitizedBy),
+        typeof claims.boundedBy === "string" ? claims.boundedBy : "",
+        typeof claims.taskID === "string" ? claims.taskID : "",
+        list(claims.requiredSkills),
+      ])
+    )
+    .digest("hex");
+}
+
 export function stampMeshMetadata(
   sessionID: string,
   options: MeshStampOptions,
@@ -605,6 +629,13 @@ export function stampMeshMetadata(
       ...(options.boundedBy ? { boundedBy: options.boundedBy } : {}),
       ...(options.taskID ? { taskID: options.taskID } : {}),
       ...(requiredSkills ? { requiredSkills } : {}),
+      claimDigest: meshClaimDigest({
+        protected: Boolean(isProtected),
+        sanitizedBy,
+        boundedBy: options.boundedBy,
+        taskID: options.taskID,
+        requiredSkills,
+      }),
       createdAt: Date.now(),
     },
     MAX_TOKENS_PER_SESSION
@@ -731,27 +762,31 @@ export function verifyMeshMetadata(
     if (typeof meshEnv.owner === "string" && meshEnv.owner !== record.owner) return false;
     if (typeof meshEnv.kind === "string" && meshEnv.kind !== record.kind) return false;
     if (typeof meshEnv.synthetic === "boolean" && meshEnv.synthetic !== record.synthetic) return false;
-    if (typeof meshEnv.protected === "boolean" && meshEnv.protected !== record.protected) return false;
-    if (meshEnv.boundedBy !== undefined && meshEnv.boundedBy !== record.boundedBy) return false;
-    if (meshEnv.taskID !== undefined && meshEnv.taskID !== record.taskID) return false;
-    if (meshEnv.sanitizedBy !== undefined) {
-      if (
-        !Array.isArray(meshEnv.sanitizedBy) ||
-        !record.sanitizedBy ||
-        meshEnv.sanitizedBy.length !== record.sanitizedBy.length ||
-        meshEnv.sanitizedBy.some((item, idx) => item !== record.sanitizedBy?.[idx])
-      ) {
-        return false;
+    if (typeof record.claimDigest === "string") {
+      if (meshClaimDigest(meshEnv) !== record.claimDigest) return false;
+    } else {
+      if (typeof meshEnv.protected === "boolean" && meshEnv.protected !== record.protected) return false;
+      if (meshEnv.boundedBy !== undefined && meshEnv.boundedBy !== record.boundedBy) return false;
+      if (meshEnv.taskID !== undefined && meshEnv.taskID !== record.taskID) return false;
+      if (meshEnv.sanitizedBy !== undefined) {
+        if (
+          !Array.isArray(meshEnv.sanitizedBy) ||
+          !record.sanitizedBy ||
+          meshEnv.sanitizedBy.length !== record.sanitizedBy.length ||
+          meshEnv.sanitizedBy.some((item, idx) => item !== record.sanitizedBy?.[idx])
+        ) {
+          return false;
+        }
       }
-    }
-    if (meshEnv.requiredSkills !== undefined) {
-      if (
-        !Array.isArray(meshEnv.requiredSkills) ||
-        !record.requiredSkills ||
-        meshEnv.requiredSkills.length !== record.requiredSkills.length ||
-        meshEnv.requiredSkills.some((item, idx) => item !== record.requiredSkills?.[idx])
-      ) {
-        return false;
+      if (meshEnv.requiredSkills !== undefined) {
+        if (
+          !Array.isArray(meshEnv.requiredSkills) ||
+          !record.requiredSkills ||
+          meshEnv.requiredSkills.length !== record.requiredSkills.length ||
+          meshEnv.requiredSkills.some((item, idx) => item !== record.requiredSkills?.[idx])
+        ) {
+          return false;
+        }
       }
     }
   }

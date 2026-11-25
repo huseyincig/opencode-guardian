@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.18.1 — 2026-11-25
+
+### Fixed
+- **Eliminated post-turn race window with sibling V2 orchestrators (`src/index.ts`):**
+  - Acquired a short-TTL (`10s`, `reason: "guardian-inspecting"`) pre-inspection `active_remediation` mesh lease synchronously on `session.execution.succeeded` / `session.idle` before `idleQueue` coalescing and async `session.context` fetching begin, closing the race window where sibling orchestrators could prematurely close a child task before Guardian finished inspecting and dispatching remediation.
+  - Released the pre-inspection lease immediately on clean, skipped, aborted, read-only, or errored turns (and on human prompt, deletion, move, or disposal), and upgraded it seamlessly via `leaseToken` matching into the heartbeat-renewed `45s` `guardian-remediation` lease whenever remediation is dispatched. Never preempts higher-priority `user_interaction` (Priority `30`) leases.
+- **Surfaced blocking findings from read-only / non-writable subagents and failed remediations to the V2 mesh (`src/index.ts`):**
+  - Published active `recordMeshIntervention` records when read-only / non-writable subagents trigger blocking rule findings (`kind: "post-warning"`) or when remediation fails (`kind: "post-remediation"`), allowing sibling orchestrators to surface unresolved policy state to managers without injecting self-remediation prompts into read-only children.
+- **Cross-revision mesh provenance interoperability (`src/bridge.ts`):**
+  - Updated `stampMeshMetadata` and `verifyMeshMetadata` to write and validate both `claimDigest` (SHA-256 envelope claim digest) and legacy plain claim fields (`protected`, `sanitizedBy`, `boundedBy`, `taskID`, `requiredSkills`), ensuring seamless bidirectional provenance verification across all sibling V2 mesh plugins.
+- **Verification:**
+  - Added mesh pre-inspection lease, `user_interaction` priority, read-only subagent visibility, and `claimDigest` provenance regression coverage in `tests/runtime-v2-lifecycle.test.mjs` (**914 / 914** tests passing, **21 / 21** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, plus verified dual-plugin Guardian ↔ orchestrator E2E handshake).
+
 ## 0.18.0 — 2026-11-25
 
 ### Security & Policy Hardening

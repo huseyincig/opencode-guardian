@@ -1,6 +1,6 @@
 {
   "name": "opencode-guardian",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Autonomous quality, discipline, and runtime security guardian plugin for OpenCode V2 AI agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,7 +33,7 @@
     "build": "node -e \"import('node:fs').then(f=>f.rmSync('dist',{recursive:true,force:true}))\" && tsc",
     "postbuild": "node scripts/emit-tui.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
     "prepack": "npm run build",
     "lint": "oxlint src tests --deny-warnings",
     "typecheck:strict": "tsc --noEmit --noUnusedLocals --noUnusedParameters --noUncheckedIndexedAccess --exactOptionalPropertyTypes",

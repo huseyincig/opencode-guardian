@@ -347,6 +347,18 @@ const SYNTHETIC_MESH_KINDS = [
     "wake",
     "delegation",
 ];
+function meshClaimDigest(claims) {
+    const list = (v) => Array.isArray(v) ? v.map((x) => String(x)) : [];
+    return createHash("sha256")
+        .update(JSON.stringify([
+        claims.protected === true,
+        list(claims.sanitizedBy),
+        typeof claims.boundedBy === "string" ? claims.boundedBy : "",
+        typeof claims.taskID === "string" ? claims.taskID : "",
+        list(claims.requiredSkills),
+    ]))
+        .digest("hex");
+}
 export function stampMeshMetadata(sessionID, options, base = {}) {
     const state = getMeshState();
     const token = randomUUID();
@@ -381,6 +393,13 @@ export function stampMeshMetadata(sessionID, options, base = {}) {
         ...(options.boundedBy ? { boundedBy: options.boundedBy } : {}),
         ...(options.taskID ? { taskID: options.taskID } : {}),
         ...(requiredSkills ? { requiredSkills } : {}),
+        claimDigest: meshClaimDigest({
+            protected: Boolean(isProtected),
+            sanitizedBy,
+            boundedBy: options.boundedBy,
+            taskID: options.taskID,
+            requiredSkills,
+        }),
         createdAt: Date.now(),
     }, MAX_TOKENS_PER_SESSION);
     const envelope = {
@@ -499,26 +518,32 @@ export function verifyMeshMetadata(sessionID, valueOrMetadata, expectedKind, exp
             return false;
         if (typeof meshEnv.synthetic === "boolean" && meshEnv.synthetic !== record.synthetic)
             return false;
-        if (typeof meshEnv.protected === "boolean" && meshEnv.protected !== record.protected)
-            return false;
-        if (meshEnv.boundedBy !== undefined && meshEnv.boundedBy !== record.boundedBy)
-            return false;
-        if (meshEnv.taskID !== undefined && meshEnv.taskID !== record.taskID)
-            return false;
-        if (meshEnv.sanitizedBy !== undefined) {
-            if (!Array.isArray(meshEnv.sanitizedBy) ||
-                !record.sanitizedBy ||
-                meshEnv.sanitizedBy.length !== record.sanitizedBy.length ||
-                meshEnv.sanitizedBy.some((item, idx) => item !== record.sanitizedBy?.[idx])) {
+        if (typeof record.claimDigest === "string") {
+            if (meshClaimDigest(meshEnv) !== record.claimDigest)
                 return false;
-            }
         }
-        if (meshEnv.requiredSkills !== undefined) {
-            if (!Array.isArray(meshEnv.requiredSkills) ||
-                !record.requiredSkills ||
-                meshEnv.requiredSkills.length !== record.requiredSkills.length ||
-                meshEnv.requiredSkills.some((item, idx) => item !== record.requiredSkills?.[idx])) {
+        else {
+            if (typeof meshEnv.protected === "boolean" && meshEnv.protected !== record.protected)
                 return false;
+            if (meshEnv.boundedBy !== undefined && meshEnv.boundedBy !== record.boundedBy)
+                return false;
+            if (meshEnv.taskID !== undefined && meshEnv.taskID !== record.taskID)
+                return false;
+            if (meshEnv.sanitizedBy !== undefined) {
+                if (!Array.isArray(meshEnv.sanitizedBy) ||
+                    !record.sanitizedBy ||
+                    meshEnv.sanitizedBy.length !== record.sanitizedBy.length ||
+                    meshEnv.sanitizedBy.some((item, idx) => item !== record.sanitizedBy?.[idx])) {
+                    return false;
+                }
+            }
+            if (meshEnv.requiredSkills !== undefined) {
+                if (!Array.isArray(meshEnv.requiredSkills) ||
+                    !record.requiredSkills ||
+                    meshEnv.requiredSkills.length !== record.requiredSkills.length ||
+                    meshEnv.requiredSkills.some((item, idx) => item !== record.requiredSkills?.[idx])) {
+                    return false;
+                }
             }
         }
     }

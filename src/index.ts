@@ -855,6 +855,18 @@ function recordInspectionOutcome(
       rules: failedRules,
       reasons: failedRules.map((rule) => ({ rule, code: "remediation-failed" })),
     }, directory);
+    // Keep an active mesh intervention so sibling orchestrators do not silently
+    // mark the child task as `done` after remediation failed.
+    recordMeshIntervention({
+      sessionID,
+      directory,
+      owner: "opencode-guardian",
+      kind: "post-remediation",
+      ruleIds: failedRules,
+      deterministic: false,
+      active: true,
+      updatedAt: Date.now(),
+    });
   }
 
   if (result.results.length > 0 && result.decision === "pass" && result.remediationStatus !== "failed") {
@@ -1283,8 +1295,25 @@ async function handleSessionIdle(
         : undefined;
     const findings = recordInspectionOutcome(result, sessionID, directory, toastNotifier);
 
-    if (result.decision === "block" && result.combinedRemediationPrompt) {
-      if (effectiveIsSubagent && agentCapability !== "write-allowed") {
+    if (result.decision === "block") {
+      if (
+        !result.combinedRemediationPrompt ||
+        (effectiveIsSubagent && agentCapability !== "write-allowed")
+      ) {
+        // Surface blocking findings from read-only / non-writable subagents to
+        // sibling mesh orchestrators without injecting self-remediation prompts.
+        if (findings.length > 0) {
+          recordMeshIntervention({
+            sessionID,
+            directory,
+            owner: "opencode-guardian",
+            kind: "post-warning",
+            ruleIds: findings.map((item) => item.ruleId),
+            deterministic: false,
+            active: true,
+            updatedAt: Date.now(),
+          });
+        }
         releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
         return;
       }
@@ -1973,9 +2002,44 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     interventionSnapshots.delete(sessionID);
   };
   const toastNotifiersByDirectory = new Map<string, GuardianToastNotifier>();
+  const preInspectionLeaseTokens = new Map<string, string>();
+  const releasePreInspectionLease = (sid: string): void => {
+    const token = preInspectionLeaseTokens.get(sid);
+    if (!token) return;
+    preInspectionLeaseTokens.delete(sid);
+    releaseRemediationLeaseForSession(sid, instanceId, token);
+  };
+  const acquirePreInspectionLease = (sid: string): void => {
+    if (controller.signal.aborted) return;
+    if (activeRemediationLeases.has(sid)) return;
+    if (getBlockingSessionLease(sid, "active_remediation", "opencode-guardian")) return;
+    const rel = acquireSessionLease({
+      sessionID: sid,
+      owner: "opencode-guardian",
+      kind: "active_remediation",
+      ttlMs: 10_000,
+      reason: "guardian-inspecting",
+    });
+    setRemediationLeaseForSession(sid, rel, {
+      instanceId,
+      ttlMs: 10_000,
+      leaseToken: rel.leaseToken,
+    });
+    preInspectionLeaseTokens.delete(sid);
+    preInspectionLeaseTokens.set(sid, rel.leaseToken);
+    while (preInspectionLeaseTokens.size > 512) {
+      const oldest = preInspectionLeaseTokens.keys().next().value;
+      if (oldest === undefined) break;
+      releasePreInspectionLease(oldest);
+    }
+  };
   const idleQueue = createIdleQueue(controller.signal, () => {
     recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
   });
+  const forgetQueuedIdle = (sid: string): void => {
+    idleQueue.forget(sid);
+    releasePreInspectionLease(sid);
+  };
 
   if (typeof context.rpc?.register === "function") {
     try {
@@ -2722,7 +2786,8 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (runtime.config.enabled === false) {
           return;
         }
-        if (hadQueuedIdle) idleQueue.forget(event.sessionID);
+        if (hadQueuedIdle) forgetQueuedIdle(event.sessionID);
+        else releasePreInspectionLease(event.sessionID);
         releaseRemediationLeaseForSession(event.sessionID, instanceId);
         invalidateActiveMeshHandoff(event.sessionID);
         clearMeshIntervention(event.sessionID, "opencode-guardian");
@@ -2960,7 +3025,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (eventData.type === "session.deleted") {
           const deletedSessionID = extractEventSessionID();
           if (deletedSessionID) {
-            idleQueue.forget(deletedSessionID);
+            forgetQueuedIdle(deletedSessionID);
             streamWatcher.forget(deletedSessionID);
             forgetProcessSession(deletedSessionID);
             releaseRemediationLeaseForSession(deletedSessionID);
@@ -2985,7 +3050,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         ) {
           const failedSessionID = extractEventSessionID();
           if (failedSessionID) {
-            idleQueue.forget(failedSessionID);
+            forgetQueuedIdle(failedSessionID);
             foregroundHandoffs.delete(failedSessionID);
             backgroundSessions.delete(failedSessionID);
             sessionBackgroundJobs.delete(failedSessionID);
@@ -3020,7 +3085,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (eventData.type === "session.moved") {
           const movedSessionID = extractEventSessionID();
           if (movedSessionID) {
-            idleQueue.forget(movedSessionID);
+            forgetQueuedIdle(movedSessionID);
             streamWatcher.forget(movedSessionID);
             forgetProcessSession(movedSessionID);
             releaseRemediationLeaseForSession(movedSessionID);
@@ -3183,7 +3248,21 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           continue;
         }
 
+        // Acquire a short-TTL pre-inspection lease synchronously on turn completion so
+        // sibling orchestrators cannot race ahead and close a child task during the
+        // idleQueue coalescing / async context-fetch window.
+        const candidateDir = eventLocationDir ?? sessionDirectories.get(sessionID);
+        const canPreLease =
+          candidateDir !== undefined
+            ? isDirectoryInGuardianScope(directory, candidateDir) &&
+              runtimeForDirectory(candidateDir).config.enabled !== false
+            : !projectLocalInstall && runtimeForDirectory(directory).config.enabled !== false;
+        if (canPreLease) {
+          acquirePreInspectionLease(sessionID);
+        }
+
         idleQueue.enqueue(sessionID, async (idleSignal) => {
+          try {
           let activeDirectory: string;
           let directoryVerified = true;
           if (eventLocationDir) {
@@ -3345,6 +3424,13 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           } finally {
             releaseProcessIdleSlot();
           }
+          } finally {
+            // Releases the short-TTL pre-inspection lease if inspection finished
+            // clean/skipped/aborted/read-only. If handleSessionIdle upgraded to a
+            // real remediation lease, the token no longer matches and the active
+            // remediation lease remains intact.
+            releasePreInspectionLease(sessionID);
+          }
         });
         }
         if (controller.signal.aborted) return;
@@ -3407,6 +3493,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     for (const sessionID of Array.from(activeRemediationLeases.keys())) {
       releaseRemediationLeaseForSession(sessionID, instanceId);
     }
+    preInspectionLeaseTokens.clear();
     contracts.clear();
     verificationStore.clear();
     foregroundHandoffs.clear();

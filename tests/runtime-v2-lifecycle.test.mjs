@@ -5024,4 +5024,164 @@ describe("Deep Runtime & Config Merge Regressions", () => {
       "Part B #1: preflight-blocked command must not poison inFlightMutations and invalidate subsequent passing test snapshot"
     );
   });
+
+  test("Mesh alignment: pre-inspection lease closes idleQueue race, respects user_interaction, and surfaces read-only subagent findings", async (t) => {
+    const {
+      acquireSessionLease,
+      getBlockingSessionLease,
+      getLatestMeshIntervention,
+      stampMeshMetadata,
+      verifyMeshMetadata,
+      resetMeshStateForTests,
+    } = await import("../dist/bridge.js");
+    resetMeshStateForTests();
+    t.after(() => resetMeshStateForTests());
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-mesh-prelease-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    let emitEvent;
+    let releaseContext = null;
+    const sent = [];
+    const sessionMessages = new Map();
+
+    const cleanup = await Guardian.setup({
+      location: { directory: dir },
+      options: {
+        enabled: true,
+        remediationBudget: 1,
+        preflight: { enabled: false },
+        secrets: { enabled: false },
+        updateNotice: { enabled: false },
+        rules: { "discipline/no-evasion": "error" },
+      },
+      agent: {
+        async list() {
+          return [
+            { name: "worker-rw", permissions: [{ permission: "edit", pattern: "*", effect: "allow" }] },
+            { name: "worker-ro", permissions: [{ permission: "edit", pattern: "*", effect: "deny" }, { permission: "bash", pattern: "*", effect: "deny" }] },
+          ];
+        },
+      },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              const ev = await new Promise((resolve) => {
+                emitEvent = resolve;
+                signal.addEventListener("abort", () => resolve(null), { once: true });
+              });
+              if (!ev) break;
+              yield ev;
+            }
+          })();
+        },
+      },
+      session: {
+        async get({ sessionID }) {
+          if (sessionID === "child-clean" || sessionID === "child-bad" || sessionID === "child-sq") {
+            return { id: sessionID, parentID: "mgr-1", agent: "worker-rw", location: { directory: dir } };
+          }
+          if (sessionID === "child-ro") {
+            return { id: sessionID, parentID: "mgr-1", agent: "worker-ro", location: { directory: dir } };
+          }
+          return { id: sessionID, location: { directory: dir } };
+        },
+        async context({ sessionID }) {
+          if (sessionID === "child-clean" && releaseContext) {
+            await new Promise((resolve) => { releaseContext = resolve; });
+          }
+          return sessionMessages.get(sessionID) ?? [];
+        },
+        async synthetic(payload) {
+          sent.push(payload);
+        },
+      },
+    });
+    t.after(async () => {
+      emitEvent?.(null);
+      await cleanup?.();
+    });
+
+    // 1. Pre-inspection lease is held BEFORE context fetch finishes, then released immediately on clean turn
+    sessionMessages.set("child-clean", [
+      { id: "u1", type: "user", text: "Explain math." },
+      { id: "a1", type: "assistant", agent: "worker-rw", content: [{ type: "text", text: "2 + 2 = 4." }] },
+    ]);
+    releaseContext = () => {};
+    emitEvent({ type: "session.execution.succeeded", data: { sessionID: "child-clean" }, location: { directory: dir } });
+    await new Promise((r) => setTimeout(r, 2));
+    const leaseDuringWindow = getBlockingSessionLease("child-clean", "orchestration_dispatch", "opencode-hi");
+    assert.equal(leaseDuringWindow?.kind, "active_remediation", "pre-inspection lease must block orchestration_dispatch immediately on turn completion");
+    assert.equal(leaseDuringWindow?.owner, "opencode-guardian");
+
+    // Wait for context() to block, then release it
+    await new Promise((r) => setTimeout(r, 25));
+    releaseContext();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(
+      getBlockingSessionLease("child-clean", "orchestration_dispatch", "opencode-hi"),
+      undefined,
+      "pre-inspection lease must be released immediately after a clean turn"
+    );
+
+    // 2. Violation upgrades pre-inspection lease into active remediation lease (kept after job finishes)
+    sessionMessages.set("child-bad", [
+      { id: "u2", type: "user", text: "Fix tests." },
+      { id: "a2", type: "assistant", agent: "worker-rw", content: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+    ]);
+    emitEvent({ type: "session.execution.succeeded", data: { sessionID: "child-bad" }, location: { directory: dir } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(sent.filter((p) => p.sessionID === "child-bad").length, 1, "write-allowed worker receives remediation");
+    assert.equal(
+      getBlockingSessionLease("child-bad", "orchestration_dispatch", "opencode-hi")?.kind,
+      "active_remediation",
+      "upgraded active_remediation lease must stay held while worker remediates"
+    );
+
+    // 3. Higher-priority user_interaction lease is NEVER preempted by pre-inspection lease
+    const releaseSq = acquireSessionLease({
+      sessionID: "child-sq",
+      owner: "opencode-smart-questions",
+      kind: "user_interaction",
+      ttlMs: 30_000,
+    });
+    t.after(() => releaseSq());
+    sessionMessages.set("child-sq", [
+      { id: "u3", type: "user", text: "Fix tests." },
+      { id: "a3", type: "assistant", agent: "worker-rw", content: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+    ]);
+    emitEvent({ type: "session.execution.succeeded", data: { sessionID: "child-sq" }, location: { directory: dir } });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(
+      getBlockingSessionLease("child-sq", "orchestration_dispatch", "opencode-hi")?.kind,
+      "user_interaction",
+      "user_interaction lease must remain highest priority"
+    );
+    assert.equal(sent.filter((p) => p.sessionID === "child-sq").length, 0, "must not send remediation while user_interaction is active");
+
+    // 4. Read-only subagent with blocking violation publishes active mesh intervention without self-remediation
+    sessionMessages.set("child-ro", [
+      { id: "u4", type: "user", text: "Review PR." },
+      { id: "a4", type: "assistant", agent: "worker-ro", content: [{ type: "text", text: "The test failure is unrelated to this change." }] },
+    ]);
+    emitEvent({ type: "session.execution.succeeded", data: { sessionID: "child-ro" }, location: { directory: dir } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(sent.filter((p) => p.sessionID === "child-ro").length, 0, "read-only subagent must not receive self-remediation");
+    const roIntervention = getLatestMeshIntervention("child-ro");
+    assert.equal(roIntervention?.active, true, "read-only subagent blocking finding must publish active mesh intervention");
+    assert.ok(roIntervention?.ruleIds.includes("discipline/no-evasion"));
+
+    // 5. Provenance token verifies cleanly with claimDigest and detects tampered claims
+    const stamped = stampMeshMetadata("ses-prov-compat", {
+      owner: "opencode-guardian",
+      kind: "remediation",
+      protected: true,
+      taskID: "t-1",
+    });
+    assert.equal(verifyMeshMetadata("ses-prov-compat", stamped, "remediation", "opencode-guardian"), true);
+    const tampered = structuredClone(stamped);
+    tampered["opencode-mesh"].taskID = "t-spoofed";
+    assert.equal(verifyMeshMetadata("ses-prov-compat", tampered, "remediation", "opencode-guardian"), false);
+  });
 });

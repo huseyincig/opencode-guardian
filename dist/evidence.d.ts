@@ -20,6 +20,7 @@ export interface VerificationSnapshot {
     fingerprint?: string | undefined;
     files: string[];
     editIntegrity?: EditIntegrityEvidence;
+    incomplete?: boolean | undefined;
 }
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export declare class VerificationSnapshotStore {

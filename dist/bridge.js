@@ -359,12 +359,24 @@ export function stampMeshMetadata(sessionID, options, base = {}) {
     else {
         setBoundedMap(state.provenanceBySession, sID, sessionTokens, MAX_BOUNDED_SESSIONS);
     }
-    setBoundedMap(sessionTokens, token, { owner: options.owner, kind: options.kind, synthetic: isSynthetic, createdAt: Date.now() }, MAX_TOKENS_PER_SESSION);
     const isProtected = options.protected ??
         (options.kind === "remediation" ||
             options.kind === "handoff" ||
             options.kind === "task-contract" ||
             options.kind === "skill-injection");
+    const sanitizedBy = options.sanitizedBy?.length ? [...options.sanitizedBy] : undefined;
+    const requiredSkills = options.requiredSkills?.length ? [...options.requiredSkills] : undefined;
+    setBoundedMap(sessionTokens, token, {
+        owner: options.owner,
+        kind: options.kind,
+        synthetic: isSynthetic,
+        protected: Boolean(isProtected),
+        ...(sanitizedBy ? { sanitizedBy } : {}),
+        ...(options.boundedBy ? { boundedBy: options.boundedBy } : {}),
+        ...(options.taskID ? { taskID: options.taskID } : {}),
+        ...(requiredSkills ? { requiredSkills } : {}),
+        createdAt: Date.now(),
+    }, MAX_TOKENS_PER_SESSION);
     const envelope = {
         v: 2,
         owner: options.owner,
@@ -372,10 +384,10 @@ export function stampMeshMetadata(sessionID, options, base = {}) {
         token,
         ...(options.synthetic === false ? { synthetic: false } : isSynthetic ? { synthetic: true } : {}),
         ...(isProtected ? { protected: true } : {}),
-        ...(options.sanitizedBy?.length ? { sanitizedBy: [...options.sanitizedBy] } : {}),
+        ...(sanitizedBy ? { sanitizedBy: [...sanitizedBy] } : {}),
         ...(options.boundedBy ? { boundedBy: options.boundedBy } : {}),
         ...(options.taskID ? { taskID: options.taskID } : {}),
-        ...(options.requiredSkills?.length ? { requiredSkills: [...options.requiredSkills] } : {}),
+        ...(requiredSkills ? { requiredSkills: [...requiredSkills] } : {}),
     };
     const out = {
         ...base,
@@ -479,6 +491,30 @@ export function verifyMeshMetadata(sessionID, valueOrMetadata, expectedKind, exp
             return false;
         if (typeof meshEnv.kind === "string" && meshEnv.kind !== record.kind)
             return false;
+        if (typeof meshEnv.synthetic === "boolean" && meshEnv.synthetic !== record.synthetic)
+            return false;
+        if (typeof meshEnv.protected === "boolean" && meshEnv.protected !== record.protected)
+            return false;
+        if (meshEnv.boundedBy !== undefined && meshEnv.boundedBy !== record.boundedBy)
+            return false;
+        if (meshEnv.taskID !== undefined && meshEnv.taskID !== record.taskID)
+            return false;
+        if (meshEnv.sanitizedBy !== undefined) {
+            if (!Array.isArray(meshEnv.sanitizedBy) ||
+                !record.sanitizedBy ||
+                meshEnv.sanitizedBy.length !== record.sanitizedBy.length ||
+                meshEnv.sanitizedBy.some((item, idx) => item !== record.sanitizedBy?.[idx])) {
+                return false;
+            }
+        }
+        if (meshEnv.requiredSkills !== undefined) {
+            if (!Array.isArray(meshEnv.requiredSkills) ||
+                !record.requiredSkills ||
+                meshEnv.requiredSkills.length !== record.requiredSkills.length ||
+                meshEnv.requiredSkills.some((item, idx) => item !== record.requiredSkills?.[idx])) {
+                return false;
+            }
+        }
     }
     if (expectedOwner && record.owner !== expectedOwner)
         return false;
@@ -585,6 +621,37 @@ export function wasMeshBounded(valueOrMetadata) {
         return true;
     return false;
 }
+export function forgetMeshOwnerSession(sessionID, owner) {
+    if (!sessionID || !owner)
+        return;
+    const state = getMeshState();
+    const ledger = state.provenanceBySession.get(sessionID);
+    if (ledger) {
+        for (const [token, entry] of ledger) {
+            if (entry.owner === owner) {
+                ledger.delete(token);
+            }
+        }
+        if (ledger.size === 0) {
+            state.provenanceBySession.delete(sessionID);
+        }
+    }
+    const leases = state.leasesBySession.get(sessionID);
+    if (leases) {
+        for (const [key, lease] of leases) {
+            if (lease.owner === owner) {
+                leases.delete(key);
+            }
+        }
+        if (leases.size === 0) {
+            state.leasesBySession.delete(sessionID);
+        }
+    }
+    const intervention = state.interventionsBySession.get(sessionID);
+    if (intervention && intervention.owner === owner) {
+        state.interventionsBySession.delete(sessionID);
+    }
+}
 export function forgetMeshSession(sessionID) {
     if (!sessionID)
         return;
@@ -676,6 +743,25 @@ export function acquireSessionLease(input) {
             state.leasesBySession.delete(sID);
         }
     };
+}
+export function renewSessionLease(input) {
+    const sID = String(input.sessionID ?? "");
+    if (!sID)
+        return false;
+    const state = getMeshState();
+    const now = Date.now();
+    const leases = pruneExpiredLeases(state, sID, now);
+    if (!leases)
+        return false;
+    const key = `${input.owner}::${input.kind}`;
+    const existing = leases.get(key);
+    if (!existing)
+        return false;
+    const ttl = typeof input.ttlMs === "number" && Number.isFinite(input.ttlMs) && input.ttlMs > 0
+        ? input.ttlMs
+        : DEFAULT_LEASE_TTL_MS[input.kind];
+    existing.expiresAt = now + ttl;
+    return true;
 }
 export function getBlockingSessionLease(sessionID, callerKind, callerOwner) {
     const sID = String(sessionID ?? "");
@@ -953,17 +1039,20 @@ export function registerRoleProfileResolver(input) {
     const state = getMeshState();
     const dir = canonicalMeshDirectory(input.directory);
     const key = `${dir}::${input.owner}`;
-    state.roleResolversByKey.set(key, {
+    const entry = {
         owner: input.owner,
         directory: dir,
         resolve: input.resolve,
-    });
+    };
+    state.roleResolversByKey.set(key, entry);
     let disposed = false;
     return () => {
         if (disposed)
             return;
         disposed = true;
-        state.roleResolversByKey.delete(key);
+        if (state.roleResolversByKey.get(key) === entry) {
+            state.roleResolversByKey.delete(key);
+        }
     };
 }
 export async function resolveMeshAgentProfile(sessionID, directory) {
@@ -1020,13 +1109,16 @@ export function registerSkillCatalogProvider(provider) {
     const state = getMeshState();
     const dir = canonicalMeshDirectory(provider.directory);
     const key = `${dir}::${provider.owner}`;
-    state.skillProvidersByKey.set(key, { ...provider, directory: dir });
+    const entry = { ...provider, directory: dir };
+    state.skillProvidersByKey.set(key, entry);
     let disposed = false;
     return () => {
         if (disposed)
             return;
         disposed = true;
-        state.skillProvidersByKey.delete(key);
+        if (state.skillProvidersByKey.get(key) === entry) {
+            state.skillProvidersByKey.delete(key);
+        }
     };
 }
 export async function queryMeshSkills(query, options) {

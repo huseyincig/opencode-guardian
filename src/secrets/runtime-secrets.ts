@@ -17,21 +17,58 @@ const COMMON_SAFE_VALUES = new Set<string>([
 ]);
 
 export class RuntimeSecretRegistry {
-  private secrets = new Set<string>();
+  private envSecrets = new Set<string>();
+  private manualSecrets = new Set<string>();
+  private cleared = false;
+  private lastRefreshAt = 0;
+  private static readonly AUTO_REFRESH_INTERVAL_MS = 2_000;
 
   constructor() {
-    this.scanEnv();
+    this.refreshEnv();
+  }
+
+  private normalizeSecret(val: string): string | undefined {
+    if (!val || typeof val !== 'string') return undefined;
+    const trimmed = val.trim();
+    if (trimmed.length < 6) return undefined;
+    if (COMMON_SAFE_VALUES.has(trimmed.toLowerCase())) return undefined;
+    return trimmed;
+  }
+
+  /**
+   * Replaces environment-derived secrets with a fresh scan of `env`, evicting
+   * rotated or removed environment values while preserving manually added secrets.
+   */
+  public refreshEnv(env: Record<string, string | undefined> = process.env): number {
+    this.cleared = false;
+    this.lastRefreshAt = Date.now();
+    this.envSecrets.clear();
+    let added = 0;
+    for (const [key, val] of Object.entries(env)) {
+      if (!val || typeof val !== 'string') continue;
+      if (isSensitiveKey(key)) {
+        const normalized = this.normalizeSecret(val);
+        if (normalized && !this.envSecrets.has(normalized)) {
+          this.envSecrets.add(normalized);
+          added++;
+        }
+      }
+    }
+    return added;
   }
 
   /**
    * Scans an environment object (defaults to process.env) and registers sensitive values.
    */
   public scanEnv(env: Record<string, string | undefined> = process.env): number {
+    this.cleared = false;
     let added = 0;
     for (const [key, val] of Object.entries(env)) {
       if (!val || typeof val !== 'string') continue;
       if (isSensitiveKey(key)) {
-        if (this.addSecret(val)) {
+        const normalized = this.normalizeSecret(val);
+        if (normalized && !this.envSecrets.has(normalized)) {
+          this.envSecrets.add(normalized);
           added++;
         }
       }
@@ -43,11 +80,9 @@ export class RuntimeSecretRegistry {
    * Registers a single secret value if it satisfies safety constraints.
    */
   public addSecret(val: string): boolean {
-    if (!val || typeof val !== 'string') return false;
-    const trimmed = val.trim();
-    if (trimmed.length < 6) return false;
-    if (COMMON_SAFE_VALUES.has(trimmed.toLowerCase())) return false;
-    this.secrets.add(trimmed);
+    const normalized = this.normalizeSecret(val);
+    if (!normalized) return false;
+    this.manualSecrets.add(normalized);
     return true;
   }
 
@@ -55,21 +90,27 @@ export class RuntimeSecretRegistry {
    * Returns registered secrets sorted by length descending to prevent partial replacement.
    */
   public getSecrets(): string[] {
-    return Array.from(this.secrets).sort((a, b) => b.length - a.length);
+    if (!this.cleared && Date.now() - this.lastRefreshAt >= RuntimeSecretRegistry.AUTO_REFRESH_INTERVAL_MS) {
+      this.refreshEnv(process.env);
+    }
+    const combined = new Set<string>([...this.envSecrets, ...this.manualSecrets]);
+    return Array.from(combined).sort((a, b) => b.length - a.length);
   }
 
   /**
    * Clears all registered secrets (useful in tests).
    */
   public clear(): void {
-    this.secrets.clear();
+    this.envSecrets.clear();
+    this.manualSecrets.clear();
+    this.cleared = true;
   }
 
   /**
    * Diagnostic summary: never leaks values or lengths directly.
    */
   public count(): number {
-    return this.secrets.size;
+    return new Set<string>([...this.envSecrets, ...this.manualSecrets]).size;
   }
 }
 

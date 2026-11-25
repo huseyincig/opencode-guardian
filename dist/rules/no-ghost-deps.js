@@ -180,30 +180,70 @@ function parseRequirementName(line) {
     const name = match?.[1];
     return name ? normalizePackageName(name) : "";
 }
-function parseRequirementsFile(filePath, root, seen = new Set()) {
+const MAX_REQUIREMENTS_FILE_BYTES = 256 * 1024;
+const MAX_REQUIREMENTS_TOTAL_BYTES = 1024 * 1024;
+const MAX_REQUIREMENTS_DEPTH = 8;
+const MAX_REQUIREMENTS_FILES = 32;
+function parseRequirementsFile(filePath, root, seen = new Set(), budget = { bytes: 0, files: 0, depth: 0 }) {
     const deps = new Set();
-    const resolved = path.resolve(filePath);
-    const rootPrefix = `${path.resolve(root)}${path.sep}`;
-    if (seen.has(resolved) ||
-        (resolved !== path.resolve(root) && !resolved.startsWith(rootPrefix))) {
+    if (budget.depth > MAX_REQUIREMENTS_DEPTH || budget.files >= MAX_REQUIREMENTS_FILES) {
         return deps;
     }
-    seen.add(resolved);
-    let text = "";
+    let realRoot;
+    let realFile;
     try {
-        text = fs.readFileSync(resolved, "utf8");
+        realRoot = fs.realpathSync(path.resolve(root));
+        realFile = fs.realpathSync(path.resolve(filePath));
     }
     catch {
         return deps;
+    }
+    const relative = path.relative(realRoot, realFile);
+    if (seen.has(realFile) ||
+        relative === ".." ||
+        relative.startsWith(".." + path.sep) ||
+        path.isAbsolute(relative)) {
+        return deps;
+    }
+    seen.add(realFile);
+    let text = "";
+    let fd;
+    try {
+        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() ||
+            stat.size > MAX_REQUIREMENTS_FILE_BYTES ||
+            budget.bytes + stat.size > MAX_REQUIREMENTS_TOTAL_BYTES) {
+            return deps;
+        }
+        const buffer = Buffer.alloc(stat.size);
+        const bytesRead = stat.size > 0 ? fs.readSync(fd, buffer, 0, stat.size, 0) : 0;
+        budget.bytes += bytesRead;
+        budget.files += 1;
+        text = buffer.toString("utf8", 0, bytesRead);
+    }
+    catch {
+        return deps;
+    }
+    finally {
+        if (fd !== undefined) {
+            try {
+                fs.closeSync(fd);
+            }
+            catch { }
+        }
     }
     for (const rawLine of text.split(/\r?\n/)) {
         const line = rawLine.trim();
         const include = /^(?:-r|--requirement)\s+(.+)$/i.exec(line)?.[1]?.trim();
         if (include) {
-            const nested = path.resolve(path.dirname(resolved), include);
-            for (const dep of parseRequirementsFile(nested, root, seen)) {
+            const nested = path.resolve(path.dirname(realFile), include);
+            const childBudget = { bytes: budget.bytes, files: budget.files, depth: budget.depth + 1 };
+            for (const dep of parseRequirementsFile(nested, realRoot, seen, childBudget)) {
                 deps.add(dep);
             }
+            budget.bytes = childBudget.bytes;
+            budget.files = childBudget.files;
             continue;
         }
         const name = parseRequirementName(line);

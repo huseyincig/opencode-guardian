@@ -31,7 +31,7 @@ export const SAFE_RULE_IDS = new Set([
     "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
     "v2-event-stream-error", "v2-event-stream-unavailable",
-    "verification-snapshot-unavailable",
+    "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);
 export const SAFE_REASON_CODES = new Set([
     ...Object.values(RULE_CODES),
@@ -44,7 +44,7 @@ export const SAFE_REASON_CODES = new Set([
     "remediation-verified", "remediation-failed", "remediation-unverified",
     "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
     "v2-event-stream-error", "v2-event-stream-unavailable",
-    "verification-snapshot-unavailable",
+    "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);
 /** All output codes are hardcoded: untrusted finding.pattern is only compared, never logged. */
 export function auditReasons(results) {

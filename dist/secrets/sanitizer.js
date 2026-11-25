@@ -185,16 +185,17 @@ export function sanitizeString(text, options = {}) {
         if (lineModified) {
             result = lines.join('\n');
         }
-        // 3b. Inline key-value assignments (e.g. "token=xyz", "password: xyz", "password xyz", "--api-key=xyz")
-        const inlineKvRegex = /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)["']?([^\s,;)"'>\n\r]+)["']?/gi;
-        result = result.replace(inlineKvRegex, (match, lead, key, sep, val) => {
+        // 3b. Inline key-value assignments (e.g. "token=xyz", "password: xyz", "password=\"multi word\"", "--api-key=xyz")
+        const inlineKvRegex = /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)(?:"((?:\\.|[^"\\\r\n]){1,512})"|'((?:\\.|[^'\\\r\n]){1,512})'|([^\s,;)"'>\n\r]+))/gi;
+        result = result.replace(inlineKvRegex, (match, lead, key, sep, dqVal, sqVal, bareVal) => {
+            const val = (dqVal ?? sqVal ?? bareVal ?? "");
             if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
                 return match;
             }
             if (val === replacement || val === '[REDACTED:PRIVATE_KEY]' || safeValueSet?.has(val)) {
                 return match;
             }
-            if (/^\s+$/.test(sep)) {
+            if (/^\s+$/.test(sep) && dqVal === undefined && sqVal === undefined) {
                 if (val.length < 6 || INLINE_STOPWORDS.has(val.toLowerCase())) {
                     return match;
                 }
@@ -277,6 +278,42 @@ export function sanitizeString(text, options = {}) {
     }
 }
 const UUID_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NUMERIC_COUNTER_KEY_REGEX = /(?:[_-]?(?:count|total|len|length|size|limit|max|min|ttl|ms|sec|seconds|timeout|retries|attempts|version|port|age|timestamp|index|idx))$/i;
+function neutralizeInheritedSerializer(output, proto, options, replacement) {
+    if (!proto || proto === Object.prototype)
+        return;
+    if (typeof proto.toJSON === 'function') {
+        Object.defineProperty(output, 'toJSON', {
+            value() {
+                const plain = {};
+                for (const [k, v] of Object.entries(output)) {
+                    plain[k] = v;
+                }
+                return plain;
+            },
+            enumerable: false,
+            writable: true,
+            configurable: true,
+        });
+    }
+    let cursor = proto;
+    while (cursor && cursor !== Object.prototype) {
+        for (const propName of Object.getOwnPropertyNames(cursor)) {
+            if (propName === 'constructor' || propName === 'toJSON' || Object.hasOwn(output, propName))
+                continue;
+            const desc = Object.getOwnPropertyDescriptor(cursor, propName);
+            if (desc && typeof desc.get === 'function' && isSensitiveKey(propName, options.customSensitiveKeys, options.safeKeyNames)) {
+                Object.defineProperty(output, propName, {
+                    value: replacement,
+                    enumerable: desc.enumerable ?? false,
+                    writable: true,
+                    configurable: true,
+                });
+            }
+        }
+        cursor = Object.getPrototypeOf(cursor);
+    }
+}
 /**
  * Recursively sanitizes JavaScript objects, arrays, and Error instances.
  */
@@ -290,8 +327,16 @@ export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = fals
             if (value === null ||
                 value === undefined ||
                 typeof value === 'boolean' ||
-                typeof value === 'number' ||
                 value === '') {
+                return value;
+            }
+            if (typeof value === 'number') {
+                if (!NUMERIC_COUNTER_KEY_REGEX.test(key) &&
+                    isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
+                    redactedCount++;
+                    findings.push({ kind: 'key-value', category: 'Object Property', keyName: key });
+                    return replacement;
+                }
                 return value;
             }
             if (typeof value === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(value)) {
@@ -382,6 +427,7 @@ export function sanitizeObject(data, options = {}, rootInsideMeshEnvelope = fals
                         value: propertyValue(k, v, insideMeshEnvelope), enumerable: true, writable: true, configurable: true,
                     });
                 }
+                neutralizeInheritedSerializer(output, proto, options, replacement);
                 return output;
             }
             return val;
@@ -472,6 +518,7 @@ export function sanitizeMessages(messages, options = {}) {
                     writable: true,
                     configurable: true,
                 });
+                neutralizeInheritedSerializer(clonedMsg, msgProto, options, options.replacement ?? DEFAULT_REPLACEMENT);
                 return clonedMsg;
             }
             return sanitizeObject(msg, options).sanitized;

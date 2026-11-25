@@ -829,4 +829,65 @@ describe("Dynamic Shell & Example-File Credential Rules", () => {
     assert.equal(secretScan(".env.example", dynamic + "\n" + actual).decision, "block");
     assert.equal(secretScan(".env.example", example + "\n" + dynamic).decision, "pass");
   });
+
+  test("Dalga 3 (G-06): numeric credentials on sensitive non-counter keys are redacted while counters stay intact", async () => {
+    const { sanitizeObject } = await import("../dist/secrets/index.js");
+    const { sanitized } = sanitizeObject({
+      password: 849201,
+      api_key: 99887766,
+      passcode: 123456,
+      pass: 12,
+      secretCount: 3,
+      tokenLength: 32,
+    }, { includeRuntimeEnv: false });
+    assert.equal(sanitized.password, "[REDACTED]", "numeric password must be redacted");
+    assert.equal(sanitized.api_key, "[REDACTED]", "numeric api_key must be redacted");
+    assert.equal(sanitized.passcode, "[REDACTED]", "numeric passcode must be redacted");
+    assert.equal(sanitized.pass, 12, "non-sensitive pass counter must remain numeric");
+    assert.equal(sanitized.secretCount, 3, "counter suffix key must remain numeric");
+    assert.equal(sanitized.tokenLength, 32, "length suffix key must remain numeric");
+  });
+
+  test("Dalga 3 (G-07): inline quoted multi-word credentials are fully redacted", async () => {
+    const { sanitizeString } = await import("../dist/secrets/index.js");
+    const res1 = sanitizeString('login password="my super secret passphrase" done', { includeRuntimeEnv: false });
+    assert.ok(!res1.sanitized.includes("super") && !res1.sanitized.includes("passphrase"), `full quoted double-quote secret must be redacted: ${res1.sanitized}`);
+    assert.ok(res1.sanitized.includes("[REDACTED]"));
+
+    const res2 = sanitizeString("auth token='alpha beta gamma' ok", { includeRuntimeEnv: false });
+    assert.ok(!res2.sanitized.includes("beta") && !res2.sanitized.includes("gamma"), `full quoted single-quote secret must be redacted: ${res2.sanitized}`);
+  });
+
+  test("Dalga 3 (G-08): inherited toJSON serializer cannot reintroduce unsanitized secrets after sanitizeObject", async () => {
+    const { sanitizeObject } = await import("../dist/secrets/index.js");
+    const privateStore = new WeakMap();
+    class SecretCarrier {
+      constructor(publicText, hiddenSecret) {
+        this.text = publicText;
+        privateStore.set(this, hiddenSecret);
+      }
+      toJSON() {
+        return { text: this.text, leaked: privateStore.get(this) ?? "from-prototype-toJSON-secret" };
+      }
+    }
+    const carrier = new SecretCarrier("hello", "raw-private-secret-999");
+    const { sanitized } = sanitizeObject(carrier, { includeRuntimeEnv: false });
+    assert.equal(sanitized instanceof SecretCarrier, true, "class prototype must remain preserved");
+    const serialized = JSON.stringify(sanitized);
+    assert.ok(
+      !serialized.includes("from-prototype-toJSON-secret") && !serialized.includes("raw-private-secret-999"),
+      `inherited toJSON must not reintroduce unsanitized data: ${serialized}`
+    );
+  });
+
+  test("Dalga 3 (G-21): RuntimeSecretRegistry.refreshEnv adds late-loaded env secrets and evicts rotated ones", async () => {
+    const { RuntimeSecretRegistry } = await import("../dist/secrets/index.js");
+    const reg = new RuntimeSecretRegistry();
+    reg.clear();
+    reg.refreshEnv({ MY_API_TOKEN: "initial-secret-token-111" });
+    assert.ok(reg.getSecrets().includes("initial-secret-token-111"));
+    reg.refreshEnv({ MY_API_TOKEN: "rotated-secret-token-222" });
+    assert.ok(reg.getSecrets().includes("rotated-secret-token-222"), "rotated secret must be present");
+    assert.ok(!reg.getSecrets().includes("initial-secret-token-111"), "stale rotated-out secret must be evicted");
+  });
 });

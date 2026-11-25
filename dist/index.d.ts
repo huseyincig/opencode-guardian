@@ -1,5 +1,9 @@
 import type { Plugin as OpenCodeV2 } from "@opencode/plugin";
+import { GuardEngine } from "./engine.js";
 import type { SessionMessage } from "./types.js";
+import { type VerificationSnapshot } from "./evidence.js";
+import { type AgentMutationProfile } from "./agent-capability.js";
+import { type GuardianToastNotifier } from "./toast.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./degeneration.js";
@@ -42,6 +46,21 @@ export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REM
  * message shape consumed by the rules and engine.
  */
 export declare function normalizeV2Messages(messages: readonly unknown[], sessionID?: string): SessionMessage[];
+export declare function finalizeSubagentHandoff(input: {
+    sessionID: string;
+    directory: string;
+    engine: GuardEngine;
+    fetchMessages: () => Promise<SessionMessage[]>;
+    sendAndWait: (promptText: string) => Promise<void>;
+    snapshots?: (() => ReadonlyMap<string, VerificationSnapshot> | undefined) | undefined;
+    signal?: AbortSignal | undefined;
+    agentName?: string | undefined;
+    resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined;
+    toastNotifier?: GuardianToastNotifier | undefined;
+    onRemediated?: (() => void) | undefined;
+    leaseTtlMs?: number | undefined;
+    remediationTimeoutMs?: number | undefined;
+}): Promise<string | undefined>;
 export declare function hasUnfinishedBackgroundTool(messages: readonly SessionMessage[]): boolean;
 /**
  * OpenCode V2 Plugin Definition.

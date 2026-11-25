@@ -780,12 +780,20 @@ export function calculateProductFingerprint(
 }
 
 /** Captured by a real tool-after event, not reconstructed from message history. */
-export interface VerificationSnapshot { fingerprint?: string | undefined; files: string[]; editIntegrity?: EditIntegrityEvidence; }
+export interface VerificationSnapshot {
+  fingerprint?: string | undefined;
+  files: string[];
+  editIntegrity?: EditIntegrityEvidence;
+  incomplete?: boolean | undefined;
+}
 
 /** Live tool-after observations; never invent a historical disk snapshot at idle. */
 export class VerificationSnapshotStore {
   private readonly sessions = new Map<string, {
-    paths: Set<string>; snapshots: Map<string, VerificationSnapshot>; before: Map<string, BeforeEditState>;
+    paths: Set<string>;
+    snapshots: Map<string, VerificationSnapshot>;
+    before: Map<string, BeforeEditState>;
+    overflowed: boolean;
   }>();
   private static readonly MAX_SESSIONS = 512;
   private static readonly MAX_PATHS = 512;
@@ -793,7 +801,12 @@ export class VerificationSnapshotStore {
   private getOrCreateSession(sessionID: string) {
     let session = this.sessions.get(sessionID);
     if (!session) {
-      session = { paths: new Set<string>(), snapshots: new Map<string, VerificationSnapshot>(), before: new Map<string, BeforeEditState>() };
+      session = {
+        paths: new Set<string>(),
+        snapshots: new Map<string, VerificationSnapshot>(),
+        before: new Map<string, BeforeEditState>(),
+        overflowed: false,
+      };
       this.sessions.set(sessionID, session);
       while (this.sessions.size > VerificationSnapshotStore.MAX_SESSIONS) {
         const oldest = this.sessions.keys().next().value;
@@ -837,22 +850,41 @@ export class VerificationSnapshotStore {
       });
     }
     for (const mutation of evidence.fileMutations) {
-      if (mutation.status === "success") {
-        if (mutation.filePath && session.paths.size < VerificationSnapshotStore.MAX_PATHS) {
+      if (mutation.status === "success" && mutation.filePath) {
+        if (session.paths.has(mutation.filePath)) continue;
+        if (session.paths.size < VerificationSnapshotStore.MAX_PATHS) {
           session.paths.add(mutation.filePath);
+        } else {
+          session.overflowed = true;
         }
       }
     }
     if (session.paths.size && evidence.successfulVerifications.some((record) =>
       ["test", "build", "typecheck", "lint", "audit", "git-status"].includes(record.kind))) {
-      const fingerprint = calculateProductFingerprint(directory, session.paths);
-      if (fingerprint !== "unverified-state" && fingerprint !== "empty-state") {
-        const existing = session.snapshots.get(callID);
+      const existing = session.snapshots.get(callID);
+      if (session.overflowed) {
         session.snapshots.set(callID, {
           ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
-          fingerprint: `sha256:${fingerprint}`,
+          fingerprint: "unverified-state",
           files: [...session.paths],
+          incomplete: true,
         });
+      } else {
+        const fingerprint = calculateProductFingerprint(directory, session.paths);
+        if (fingerprint === "unverified-state") {
+          session.snapshots.set(callID, {
+            ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
+            fingerprint: "unverified-state",
+            files: [...session.paths],
+            incomplete: true,
+          });
+        } else if (fingerprint !== "empty-state") {
+          session.snapshots.set(callID, {
+            ...(existing?.editIntegrity ? { editIntegrity: existing.editIntegrity } : {}),
+            fingerprint: `sha256:${fingerprint}`,
+            files: [...session.paths],
+          });
+        }
       }
     }
     // Bound the call table even in very long sessions.

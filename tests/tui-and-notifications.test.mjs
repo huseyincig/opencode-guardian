@@ -428,7 +428,7 @@ describe("Toast Notifications & Scope Isolation", () => {
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     fs.writeFileSync(path.join(dir, "opencode-guardian.json"), JSON.stringify({
       enabled: true,
-      rules: { "integrity/no-evasion": "error" },
+      rules: { "discipline/no-evasion": "error" },
     }));
 
     const toasts = [];
@@ -1701,5 +1701,39 @@ describe("Version Update Notice", () => {
     const fixture = options(t);
     const fetcher = async () => ({ ok: true, json: async () => ({ name: "other-package", version: "9.0.0" }) });
     assert.equal(await checkGuardianUpdate({ ...fixture.input, fetcher }), undefined);
+  });
+
+  test("Dalga 3 (G-25): failed /guardian-reset does not invoke onReset/toast-clear and broken config is flagged distinctly", async (t) => {
+    const { registerGuardianV2Commands } = await import("../dist/tui.js");
+    const { configureGuardianTelemetry, clearGuardianTelemetryConfig } = await import("../dist/telemetry.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g25-tui-"));
+    t.after(() => {
+      clearGuardianTelemetryConfig();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    configureGuardianTelemetry(dir, { enabled: false, level: "off" });
+
+    let registeredCommands = [];
+    let onResetCalls = 0;
+    const alerts = [];
+    const ctx = {
+      keymap: {
+        layer(factory) {
+          registeredCommands = factory().commands;
+        },
+      },
+      ui: {
+        dialog: {
+          async confirm() { return true; },
+          async alert(msg) { alerts.push(msg); },
+        },
+      },
+    };
+    registerGuardianV2Commands(ctx, () => dir, () => { onResetCalls++; });
+    const resetCmd = registeredCommands.find((c) => c.id === "opencode-guardian.reset");
+    assert.ok(resetCmd);
+    await resetCmd.run();
+    assert.equal(onResetCalls, 0, "failed reset must NOT call onReset or clear intervention visibility");
+    assert.match(alerts[0]?.message ?? "", /Reset failed/i);
   });
 });

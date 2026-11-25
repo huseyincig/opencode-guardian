@@ -159,10 +159,10 @@ function v2CommandDirectory(context: GuardianV2Context, fallback: string): strin
   return context.data?.location?.default?.()?.directory ?? fallback;
 }
 
-/** A broken project config must not reject the host's UI render callback. */
+/** A broken project config must not reject the host's UI render callback, but must remain distinguishable from intentional disablement. */
 function v2UiConfig(directory: string, options: unknown) {
-  try { return resolveEffectiveConfig(loadConfig(directory), options); } catch {
-    return { enabled: false, notifications: { enabled: false }, updateNotice: { enabled: false } };
+  try { return { ...resolveEffectiveConfig(loadConfig(directory), options), configInvalid: false }; } catch {
+    return { enabled: false, notifications: { enabled: false }, updateNotice: { enabled: false }, configInvalid: true };
   }
 }
 
@@ -178,10 +178,13 @@ async function v2PerformCommand(
     });
     if (confirmed !== true) return;
     const result = guardianResetReport(directory);
-    if (onReset) {
-      onReset(directory);
-    } else {
-      dispatchGuardianToastClear({ directory });
+    const resetSucceeded = !result.message.startsWith("Reset failed");
+    if (resetSucceeded) {
+      if (onReset) {
+        onReset(directory);
+      } else {
+        dispatchGuardianToastClear({ directory });
+      }
     }
     await context.ui.dialog.alert(result);
     return;
@@ -265,6 +268,7 @@ function GuardianSidebar(props: {
   currentDirectory?: () => string;
   refreshVersion?: () => number;
   checkUpdates?: boolean;
+  configInvalid?: () => boolean;
 }) {
   const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
@@ -325,6 +329,7 @@ function GuardianSidebar(props: {
   };
 
   const statusLabel = () => {
+    if (props.configInvalid?.()) return "✕ invalid config";
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested": return "! stream stop";
@@ -347,6 +352,7 @@ function GuardianSidebar(props: {
   };
 
   const statusColor = () => {
+    if (props.configInvalid?.()) return errorColor();
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
@@ -926,6 +932,7 @@ const v2Plugin: Plugin.Definition = {
           currentDirectory={sessionDirectory}
           refreshVersion={sidebarVersion}
           checkUpdates={sessionConfig().updateNotice?.enabled !== false}
+          configInvalid={() => sessionConfig().configInvalid}
           colors={colors()} />;
       },
     });

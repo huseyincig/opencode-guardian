@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { MESH_SYMBOL, getActiveMeshHandoff, setActiveMeshHandoff } from "../dist/bridge.js";
+import { MESH_SYMBOL, acquireSessionLease, getActiveMeshHandoff, getBlockingSessionLease, registerRoleProfileResolver, registerSkillCatalogProvider, resolveMeshAgentProfile, queryMeshSkills, setActiveMeshHandoff } from "../dist/bridge.js";
+import { forgetGuardianProvenance, createGuardianMessageMetadata, isTrustedGuardianMetadata } from "../dist/provenance.js";
 import { GuardEngine as GuardEngine_1, REMEDIATION_MARKER } from "../dist/engine.js";
 import { COORDINATION_SYMBOL, createHandoffForBlockingResults, formatOpenCodeHandoff, getSmartQuestionsCapability, parseOpenCodeHandoff as parseOpenCodeHandoff_1, registerGuardianCapability } from "../dist/handoff.js";
 import Guardian, { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_ID, GUARDIAN_INTERVENTION_RPC_METHOD, GuardEngine, OpencodeGuardian, REMEDIATION_MARKER as REMEDIATION_MARKER_2, clearAllAgentCapabilities, extractCurrentTurn, extractTaskContract, forgetMeshSession, getCachedAgentCapability, getLatestMeshIntervention, isSessionRemediating, isTrustedMeshMessage, normalizeV2Messages, parseOpenCodeHandoff, recordMeshIntervention, sanitizeObject, sanitizeUserInstruction, stampMeshMetadata, taskCompletionRule, verifyMeshMetadata } from "../dist/index.js";
@@ -1496,6 +1497,405 @@ describe("Chat Turn Isolation & Hardening", () => {
       result3.decision,
       "pass",
       "the same finding pattern must remain bounded instead of looping on wording changes"
+    );
+  });
+
+  test("Dalga 1 (G-09): forgetGuardianProvenance and plugin dispose only clear Guardian state, preserving sibling mesh plugins", async (t) => {
+    const sessionID = "sess-mesh-owner-isolation";
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-mesh-iso-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      forgetMeshSession(sessionID);
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    // Sibling plugins stamp provenance, hold a lease, and set an active handoff
+    const hiMeta = stampMeshMetadata(sessionID, { owner: "opencode-hi", kind: "wake" });
+    const releaseSmartLease = acquireSessionLease({
+      sessionID,
+      owner: "opencode-smart-questions",
+      kind: "user_interaction",
+      ttlMs: 30_000,
+    });
+    setActiveMeshHandoff(sessionID, {
+      handoffId: "ho-sibling-1",
+      source: "opencode-hi",
+      action: "question_required",
+      kind: "choice",
+      autoSelect: "forbidden",
+      createdAt: Date.now(),
+    });
+    const guardianMeta = createGuardianMessageMetadata(sessionID, "remediation");
+
+    // Guardian forgets its own provenance (as done on LRU eviction / dispose)
+    forgetGuardianProvenance(sessionID);
+
+    assert.equal(
+      isTrustedGuardianMetadata(sessionID, guardianMeta, "remediation"),
+      false,
+      "Guardian's own provenance must be forgotten"
+    );
+    assert.equal(
+      verifyMeshMetadata(sessionID, hiMeta, "wake", "opencode-hi"),
+      true,
+      "sibling plugin provenance must NOT be wiped by forgetGuardianProvenance"
+    );
+    assert.ok(
+      getBlockingSessionLease(sessionID, "active_remediation", "opencode-guardian"),
+      "sibling plugin user_interaction lease must remain active"
+    );
+    assert.equal(
+      getActiveMeshHandoff(sessionID)?.handoffId,
+      "ho-sibling-1",
+      "sibling active mesh handoff must remain intact"
+    );
+    releaseSmartLease();
+  });
+
+  test("Dalga 1 (G-19): stale role/skill resolver disposer does not delete a newer registration for the same owner/directory", async () => {
+    const dir = "/tmp/guardian-resolver-race";
+    const disposeOldRole = registerRoleProfileResolver({
+      owner: "opencode-hi",
+      directory: dir,
+      resolve: () => ({ capability: "read-only", role: "old-role" }),
+    });
+    const disposeNewRole = registerRoleProfileResolver({
+      owner: "opencode-hi",
+      directory: dir,
+      resolve: () => ({ capability: "write-allowed", role: "new-role" }),
+    });
+    disposeOldRole();
+    try {
+      const resolved = await resolveMeshAgentProfile("sess-r1", dir);
+      assert.equal(resolved?.role, "new-role", "old role resolver disposer must not delete newer registration");
+    } finally {
+      disposeNewRole();
+    }
+
+    const disposeOldSkill = registerSkillCatalogProvider({
+      owner: "opencode-hi",
+      directory: dir,
+      search: () => [{ id: "old-skill", title: "Old", score: 1 }],
+    });
+    const disposeNewSkill = registerSkillCatalogProvider({
+      owner: "opencode-hi",
+      directory: dir,
+      search: () => [{ id: "new-skill", title: "New", score: 1 }],
+    });
+    disposeOldSkill();
+    try {
+      const hits = await queryMeshSkills("test", { directory: dir });
+      assert.equal(hits?.[0]?.id, "new-skill", "old skill provider disposer must not delete newer registration");
+    } finally {
+      disposeNewSkill();
+    }
+  });
+
+  test("Dalga 1 (G-12): foreground subagent remediation does not copy stale pre-remediation [TASK OUTCOME] onto revised result", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-subagent-outcome-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    const sessionID = "parent-outcome-1";
+    const childID = "child-outcome-1";
+    t.after(() => {
+      forgetMeshSession(sessionID);
+      forgetMeshSession(childID);
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const unregisterRole = registerRoleProfileResolver({
+      owner: "test-orch",
+      directory,
+      resolve: (sid) => (sid === childID ? { capability: "write-allowed", role: "coder" } : undefined),
+    });
+    t.after(() => unregisterRole());
+
+    let toolBeforeHook;
+    let toolAfterHook;
+    let childMsgs = [
+      { id: "cu1", type: "user", text: "Fix src/app.ts" },
+      { id: "ca1", type: "assistant", content: [{ type: "text", text: "I apologize, I cannot fix it right now." }] },
+    ];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((resolve) => {
+              if (signal.aborted) resolve();
+              else signal.addEventListener("abort", resolve, { once: true });
+            });
+          })();
+        },
+      },
+      tool: {
+        hook(kind, fn) {
+          if (kind === "execute.before") toolBeforeHook = fn;
+          if (kind === "execute.after") toolAfterHook = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) {
+          return { id: sid, parentID: sid === childID ? sessionID : undefined, location: { directory } };
+        },
+        async context({ sessionID: sid }) {
+          return sid === childID ? childMsgs : [];
+        },
+        async synthetic() {
+          // Remediation fixes the response with a new outcome
+          childMsgs = [
+            ...childMsgs,
+            { id: "cg1", type: "user", text: "[opencode-guardian remediation] fix it", metadata: { "opencode-guardian": true } },
+            { id: "ca2", type: "assistant", content: [{ type: "text", text: "Implemented the fix in src/app.ts." }] },
+          ];
+        },
+        async wait() {},
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      await toolBeforeHook({
+        id: "call-outcome-1",
+        sessionID,
+        tool: "subagent",
+        input: { prompt: "Fix src/app.ts", background: false },
+      });
+      const afterEvent = {
+        id: "call-outcome-1",
+        sessionID,
+        tool: "subagent",
+        status: "completed",
+        input: { prompt: "Fix src/app.ts", background: false },
+        result: {
+          output: {
+            sessionID: childID,
+            status: "completed",
+            output: "I apologize, I cannot fix it right now.\n[TASK OUTCOME] task_id=t1 status=blocked reason=gave-up",
+          },
+          content: "<subagent sessionID=\"child-outcome-1\" state=\"completed\">\nI apologize, I cannot fix it right now.\n[TASK OUTCOME] task_id=t1 status=blocked reason=gave-up\n</subagent>",
+          metadata: { sessionID: childID, status: "completed" },
+        },
+      };
+      await toolAfterHook(afterEvent);
+      assert.equal(
+        afterEvent.result.output.output,
+        "Implemented the fix in src/app.ts.",
+        "stale pre-remediation [TASK OUTCOME] status=blocked must NOT be appended onto remediated output"
+      );
+      assert.ok(
+        !afterEvent.result.content.includes("status=blocked"),
+        "stale pre-remediation blocked outcome must not leak into content"
+      );
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("Dalga 2 (G-10): host read-only session permissions override a mesh write-allowed role profile", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g10-perm-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    const parentID = "parent-g10";
+    const childID = "child-g10-readonly";
+    t.after(() => {
+      forgetMeshSession(parentID);
+      forgetMeshSession(childID);
+      clearAllAgentCapabilities();
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    // Stale/permissive peer mesh profile claims write-allowed, but host agent permissions deny edit & shell!
+    const unregisterRole = registerRoleProfileResolver({
+      owner: "stale-mesh-peer",
+      directory,
+      resolve: (sid) => (sid === childID ? { capability: "write-allowed", role: "coder", agentName: "readonly-agent" } : undefined),
+    });
+    t.after(() => unregisterRole());
+
+    let toolBeforeHook;
+    let toolAfterHook;
+    const synthetics = [];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      agent: {
+        async list() {
+          return [{
+            id: "readonly-agent",
+            name: "readonly-agent",
+            permissions: [
+              { permission: "edit", pattern: "*", action: "deny" },
+              { permission: "bash", pattern: "*", action: "deny" },
+              { permission: "shell", pattern: "*", action: "deny" },
+            ],
+          }];
+        },
+      },
+      tool: {
+        hook(kind, fn) {
+          if (kind === "execute.before") toolBeforeHook = fn;
+          if (kind === "execute.after") toolAfterHook = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) {
+          return { id: sid, parentID: sid === childID ? parentID : undefined, agent: "readonly-agent", location: { directory } };
+        },
+        async context() {
+          return [
+            { id: "cu1", type: "user", text: "Inspect code" },
+            { id: "ca1", type: "assistant", content: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          ];
+        },
+        async synthetic(input) { synthetics.push(input); },
+        async wait() {},
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      await toolBeforeHook({ id: "call-g10", sessionID: parentID, tool: "subagent", input: { prompt: "Inspect", background: false } });
+      await toolAfterHook({
+        id: "call-g10",
+        sessionID: parentID,
+        tool: "subagent",
+        status: "completed",
+        input: { prompt: "Inspect", background: false },
+        result: {
+          output: { sessionID: childID, status: "completed", output: "This test failure is unrelated to my changes." },
+          metadata: { sessionID: childID, status: "completed" },
+        },
+      });
+      assert.equal(synthetics.length, 0, "host read-only permissions must prevent write remediation even if mesh resolver claims write-allowed");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("Dalga 2 (G-11): finalizeSubagentHandoff renews active_remediation lease while sendAndWait exceeds initial TTL", async (t) => {
+    const { finalizeSubagentHandoff } = await import("../dist/index.js");
+    const sessionID = "child-g11-long-remediation";
+    t.after(() => forgetMeshSession(sessionID));
+
+    const engine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    let round = 0;
+    let leaseStillActiveMidFlight = false;
+    await finalizeSubagentHandoff({
+      sessionID,
+      directory: process.cwd(),
+      engine,
+      leaseTtlMs: 120,
+      resolveCapability: async () => ({ capability: "write-allowed", evidence: { reasons: ["test"] } }),
+      fetchMessages: async () => {
+        round++;
+        if (round === 1) {
+          return [
+            { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the bug" }] },
+            { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          ];
+        }
+        return [
+          { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix the bug" }] },
+          { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          { info: { id: "g1", role: "user" }, parts: [{ type: "text", text: REMEDIATION_MARKER + "\nFix it.", synthetic: true, metadata: { "opencode-guardian": true } }] },
+          { info: { id: "a2", role: "assistant" }, parts: [{ type: "text", text: "Fixed the bug directly." }] },
+        ];
+      },
+      sendAndWait: async () => {
+        // Exceed initial 120ms lease TTL (wait 220ms) and check orchestrator view of lease
+        await new Promise((r) => setTimeout(r, 220));
+        leaseStillActiveMidFlight = Boolean(
+          getBlockingSessionLease(sessionID, "orchestration_dispatch", "opencode-hi")
+        );
+      },
+    });
+
+    assert.equal(
+      leaseStillActiveMidFlight,
+      true,
+      "active_remediation lease must stay renewed via heartbeat while sendAndWait runs past initial TTL"
+    );
+    assert.equal(
+      getBlockingSessionLease(sessionID, "orchestration_dispatch", "opencode-hi"),
+      undefined,
+      "active_remediation lease must be released once remediation finishes"
+    );
+  });
+
+  test("Dalga 3 (G-20): verifyMeshMetadata rejects tampered trust-critical envelope fields against immutable ledger", (t) => {
+    const sessionID = "sess-g20-tamper";
+    t.after(() => forgetMeshSession(sessionID));
+
+    const meta = stampMeshMetadata(sessionID, {
+      owner: "opencode-guardian",
+      kind: "remediation",
+      protected: true,
+      sanitizedBy: ["opencode-guardian"],
+      boundedBy: "opencode-guardian",
+      taskID: "task-1",
+      requiredSkills: ["skill-a"],
+    });
+    assert.equal(verifyMeshMetadata(sessionID, meta, "remediation", "opencode-guardian"), true);
+
+    const tamperedTask = {
+      ...meta,
+      "opencode-mesh": { ...meta["opencode-mesh"], taskID: "task-hijacked" },
+    };
+    assert.equal(
+      verifyMeshMetadata(sessionID, tamperedTask, "remediation", "opencode-guardian"),
+      false,
+      "tampered taskID must fail provenance verification"
+    );
+
+    const tamperedProtected = {
+      ...meta,
+      "opencode-mesh": { ...meta["opencode-mesh"], protected: false },
+    };
+    assert.equal(
+      verifyMeshMetadata(sessionID, tamperedProtected, "remediation", "opencode-guardian"),
+      false,
+      "tampered protected flag must fail provenance verification"
+    );
+
+    const tamperedSkills = {
+      ...meta,
+      "opencode-mesh": { ...meta["opencode-mesh"], requiredSkills: ["skill-a", "evil-skill"] },
+    };
+    assert.equal(
+      verifyMeshMetadata(sessionID, tamperedSkills, "remediation", "opencode-guardian"),
+      false,
+      "tampered requiredSkills must fail provenance verification"
     );
   });
 });

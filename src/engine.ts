@@ -186,13 +186,14 @@ function validateConfig(value: Record<string, unknown>): GuardConfig {
     const tel = value.telemetry as Record<string, unknown>;
     if (tel.enabled !== undefined && typeof tel.enabled !== "boolean") fail("telemetry.enabled");
     if (tel.level !== undefined && !["all", "violations", "off"].includes(tel.level as string)) fail("telemetry.level");
-    if (tel.maxBytes !== undefined && (typeof tel.maxBytes !== "number" || !Number.isFinite(tel.maxBytes) || (tel.maxBytes as number) <= 0)) {
+    if (tel.maxBytes !== undefined && (typeof tel.maxBytes !== "number" || !Number.isInteger(tel.maxBytes) || (tel.maxBytes as number) < 1)) {
       fail("telemetry.maxBytes");
     }
   }
   if (value.rules !== undefined) {
     if (!value.rules || typeof value.rules !== "object" || Array.isArray(value.rules)) fail("rules");
     for (const [name, setting] of Object.entries(value.rules as Record<string, unknown>)) {
+      if (!Object.hasOwn(BUILTIN_RULES, name)) fail("rules." + name);
       if (typeof setting === "string") {
         if (!["error", "warn", "off"].includes(setting)) fail("rules." + name);
       } else if (setting && typeof setting === "object" && !Array.isArray(setting)) {
@@ -263,6 +264,8 @@ export function resolveEffectiveConfig(
 
   for (const [ruleID, next] of Object.entries(validated.rules ?? {})) {
     const previous = mergedRules[ruleID];
+    const effectiveBaseRule =
+      previous ?? (base.allowProjectOverrides === false ? DEFAULT_CONFIG.rules?.[ruleID] : undefined);
     if (next && typeof next === "object" && !Array.isArray(next)) {
       const previousObject =
         typeof previous === "string"
@@ -277,8 +280,8 @@ export function resolveEffectiveConfig(
     } else {
       mergedRules[ruleID] = next;
     }
-    if (base.allowProjectOverrides === false && previous !== undefined) {
-      const baseSev = extractSeverity(previous);
+    if (base.allowProjectOverrides === false && effectiveBaseRule !== undefined) {
+      const baseSev = extractSeverity(effectiveBaseRule);
       const nextEntry = mergedRules[ruleID];
       const nextSev = extractSeverity(nextEntry);
       if (baseSev && severityRank(nextSev) < severityRank(baseSev)) {
@@ -286,6 +289,26 @@ export function resolveEffectiveConfig(
           nextEntry && typeof nextEntry === "object" && !Array.isArray(nextEntry)
             ? { ...nextEntry, severity: baseSev }
             : baseSev;
+      }
+      const lockedEntry = mergedRules[ruleID];
+      if (lockedEntry && typeof lockedEntry === "object" && !Array.isArray(lockedEntry)) {
+        const baseObj =
+          effectiveBaseRule && typeof effectiveBaseRule === "object" && !Array.isArray(effectiveBaseRule)
+            ? effectiveBaseRule
+            : undefined;
+        const sanitizedRule: GuardRuleConfig = { ...lockedEntry };
+        // Project overrides must never inject or widen rule exceptions when locked.
+        if (baseObj?.exceptions !== undefined) {
+          sanitizedRule.exceptions = [...baseObj.exceptions];
+        } else {
+          delete sanitizedRule.exceptions;
+        }
+        // Custom phrases only tighten matching; preserve global phrases alongside any project additions.
+        if (baseObj?.customPhrases !== undefined) {
+          const combined = new Set([...baseObj.customPhrases, ...(lockedEntry.customPhrases ?? [])]);
+          sanitizedRule.customPhrases = [...combined];
+        }
+        mergedRules[ruleID] = sanitizedRule;
       }
     }
   }
@@ -322,28 +345,62 @@ export function resolveEffectiveConfig(
     merged.allowProjectOverrides = false;
     if (base.enabled !== false) merged.enabled = true;
     if (base.preflight?.enabled === true) {
+      // Omitted preflight.mode defaults to "strict" at runtime; lock that effective floor.
+      const effectiveBaseMode = base.preflight.mode ?? "strict";
       const lockedMode =
-        base.preflight.mode === "strict" || merged.preflight?.mode === "strict"
+        effectiveBaseMode === "strict" || merged.preflight?.mode === "strict"
           ? "strict"
-          : (base.preflight.mode ?? merged.preflight?.mode);
+          : effectiveBaseMode;
+      const mergedShellTools =
+        base.preflight.shellTools || validated.preflight?.shellTools
+          ? [...new Set([...(base.preflight.shellTools ?? []), ...(validated.preflight?.shellTools ?? [])])]
+          : undefined;
       merged.preflight = {
         ...merged.preflight,
         enabled: true,
-        ...(lockedMode ? { mode: lockedMode } : {}),
+        mode: lockedMode,
+        ...(mergedShellTools ? { shellTools: mergedShellTools } : {}),
       };
     }
     if (base.secrets?.enabled !== false) {
-      merged.secrets = {
+      const lockedSecrets: NonNullable<GuardConfig["secrets"]> = {
         ...merged.secrets,
         enabled: true,
+        includeRuntimeEnv: base.secrets?.includeRuntimeEnv === false
+          ? (merged.secrets?.includeRuntimeEnv ?? false)
+          : true,
       };
+      // Project config must never widen safeKeyNames or safeValues when overrides are locked.
+      if (base.secrets?.safeKeyNames !== undefined) {
+        lockedSecrets.safeKeyNames = [...base.secrets.safeKeyNames];
+      } else {
+        delete lockedSecrets.safeKeyNames;
+      }
+      if (base.secrets?.safeValues !== undefined) {
+        lockedSecrets.safeValues = [...base.secrets.safeValues];
+      } else {
+        delete lockedSecrets.safeValues;
+      }
+      if (base.secrets?.customSensitiveKeys !== undefined) {
+        lockedSecrets.customSensitiveKeys = [
+          ...base.secrets.customSensitiveKeys,
+          ...(validated.secrets?.customSensitiveKeys ?? []),
+        ];
+      }
+      if (base.secrets?.customSecretValues !== undefined) {
+        lockedSecrets.customSecretValues = [
+          ...new Set([
+            ...base.secrets.customSecretValues,
+            ...(validated.secrets?.customSecretValues ?? []),
+          ]),
+        ];
+      }
+      merged.secrets = lockedSecrets;
     }
-    if (typeof base.remediationBudget === "number") {
-      merged.remediationBudget = Math.max(base.remediationBudget, merged.remediationBudget ?? 0);
-    }
-    if (typeof base.iterationBudget === "number") {
-      merged.iterationBudget = Math.max(base.iterationBudget, merged.iterationBudget ?? 0);
-    }
+    const baseRemBudget = base.remediationBudget ?? DEFAULT_CONFIG.remediationBudget ?? 1;
+    merged.remediationBudget = Math.max(baseRemBudget, merged.remediationBudget ?? baseRemBudget);
+    const baseIterBudget = base.iterationBudget ?? DEFAULT_CONFIG.iterationBudget ?? 3;
+    merged.iterationBudget = Math.max(baseIterBudget, merged.iterationBudget ?? baseIterBudget);
   }
 
   return merged;
@@ -634,11 +691,18 @@ export class GuardEngine {
   private sessionState = new SessionStateStore();
 
   constructor(config?: GuardConfig) {
+    this.config = this.buildEffectiveConfig(config);
+    for (const rule of Object.values(BUILTIN_RULES)) {
+      this.registerRule(rule);
+    }
+  }
+
+  private buildEffectiveConfig(config?: GuardConfig): GuardConfig {
     const secrets = config?.secrets !== undefined ? {
       ...DEFAULT_CONFIG.secrets,
       ...config.secrets,
     } : DEFAULT_CONFIG.secrets;
-    this.config = {
+    return {
       ...DEFAULT_CONFIG,
       ...config,
       ...(secrets ? { secrets } : {}),
@@ -647,9 +711,11 @@ export class GuardEngine {
         ...config?.rules,
       },
     };
-    for (const rule of Object.values(BUILTIN_RULES)) {
-      this.registerRule(rule);
-    }
+  }
+
+  /** Hot-update policy config without discarding live SessionStateStore or inspected message history. */
+  public updateConfig(config?: GuardConfig): void {
+    this.config = this.buildEffectiveConfig(config);
   }
 
   public registerRule(rule: GuardRule): void {

@@ -1,5 +1,5 @@
 import {
-  forgetMeshSession,
+  forgetMeshOwnerSession,
   resetMeshStateForTests,
   stampMeshMetadata,
   verifyMeshMetadata,
@@ -33,7 +33,7 @@ export function isTrustedGuardianMetadata(
 }
 
 export function forgetGuardianProvenance(sessionID: string): void {
-  forgetMeshSession(sessionID);
+  forgetMeshOwnerSession(sessionID, "opencode-guardian");
 }
 
 export function clearGuardianProvenance(): void {

@@ -382,7 +382,7 @@ describe("V2 Stage 2a Shell, Fork & Stream Hooks", () => {
 
   // 4. OpenCode v2.3.0 session.fork / session.forked + top-level location.directory + background: true subagents
   test("V2 session.fork/forked treated as root, top-level location.directory honored, and background subagents isolated", async (t) => {
-    const dirA = tempProject(t, { enabled: true, rules: { "integrity/no-evasion": "error" }, secrets: { enabled: false } });
+    const dirA = tempProject(t, { enabled: true, rules: { "discipline/no-evasion": "error" }, secrets: { enabled: false } });
     const dirB = tempProject(t, { enabled: false });
     const synthetics = [];
     const hooks = new Map();
@@ -3694,5 +3694,579 @@ describe("Deep Runtime & Config Merge Regressions", () => {
 
     assert.equal(evaluatePreflight("bash", { command: 'git commit -m "wip"' }, [], "critical"), undefined);
     assert.equal(evaluatePreflight("bash", { command: 'git commit -m "wip"' }, [], "strict"), "lazy-commit-message");
+  });
+
+  test("16. Dalga 1 (G-01, G-02): allowProjectOverrides:false locks default rules, exceptions, secrets, budgets, and default strict preflight mode", (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-global-lock-floor-"));
+    const globalDir = path.join(root, "global-config");
+    const projDir = path.join(root, "untrusted-repo");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.mkdirSync(projDir, { recursive: true });
+
+    const origConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    process.env.OPENCODE_CONFIG_DIR = globalDir;
+    t.after(() => {
+      if (origConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+      else process.env.OPENCODE_CONFIG_DIR = origConfigDir;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    // Global config locks overrides WITHOUT repeating all 14 built-in rules or explicit preflight.mode
+    fs.writeFileSync(
+      path.join(globalDir, "opencode-guardian.json"),
+      JSON.stringify({
+        enabled: true,
+        allowProjectOverrides: false,
+        preflight: { enabled: true },
+        secrets: { enabled: true, safeKeyNames: ["GLOBAL_SAFE"] },
+        rules: { "discipline/no-evasion": { severity: "error", exceptions: ["global-ok"] } },
+      })
+    );
+    // Untrusted project attempts to weaken unlisted defaults, preflight mode, exceptions, secrets, and budgets
+    fs.writeFileSync(
+      path.join(projDir, "opencode-guardian.json"),
+      JSON.stringify({
+        remediationBudget: 0,
+        iterationBudget: 0,
+        preflight: { mode: "critical" },
+        secrets: {
+          includeRuntimeEnv: false,
+          safeKeyNames: ["API_KEY", "SECRET_TOKEN"],
+          safeValues: ["sk-live-secret"],
+        },
+        rules: {
+          "security/no-secrets": "off",
+          "safety/destructive-operations": "off",
+          "discipline/no-evasion": { severity: "warn", exceptions: ["untrusted-bypass"] },
+        },
+      })
+    );
+
+    const effective = resolveEffectiveConfig(loadConfig(projDir));
+    assert.equal(effective.rules?.["security/no-secrets"], "error", "default error rule must not be downgraded when locked");
+    assert.equal(effective.rules?.["safety/destructive-operations"], "warn", "default warn rule must not be downgraded when locked");
+    assert.deepEqual(
+      effective.rules?.["discipline/no-evasion"],
+      { severity: "error", exceptions: ["global-ok"] },
+      "project must not inject rule exceptions or downgrade severity when locked"
+    );
+    assert.equal(effective.preflight?.mode, "strict", "omitted global preflight.mode defaults to strict and must stay locked");
+    assert.equal(effective.secrets?.includeRuntimeEnv, true, "project must not disable includeRuntimeEnv when locked");
+    assert.deepEqual(effective.secrets?.safeKeyNames, ["GLOBAL_SAFE"], "project must not expand safeKeyNames when locked");
+    assert.equal(effective.secrets?.safeValues, undefined, "project must not inject safeValues when locked");
+    assert.equal(effective.remediationBudget, 1, "project must not reduce remediationBudget below default when locked");
+    assert.equal(effective.iterationBudget, 3, "project must not reduce iterationBudget below default when locked");
+  });
+
+  test("17. Dalga 1 (G-13): event loop retries resubscribe when a transient subscribe call throws", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-resub-retry-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    let subscribeCalls = 0;
+    let inspected = 0;
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          subscribeCalls++;
+          if (subscribeCalls === 1) {
+            // Initial stream fails mid-iteration
+            return (async function* () { throw new Error("initial drop"); })();
+          }
+          if (subscribeCalls === 2) {
+            // First resubscribe attempt throws synchronously
+            throw new Error("transient resubscribe failure");
+          }
+          // Second resubscribe attempt succeeds and delivers idle event
+          return (async function* () {
+            yield { type: "session.idle", data: { sessionID: "resub-recovered-session" } };
+            await new Promise((resolve) => {
+              if (signal.aborted) resolve();
+              else signal.addEventListener("abort", resolve, { once: true });
+            });
+          })();
+        },
+      },
+      session: {
+        async context() { inspected++; return []; },
+        async synthetic() {},
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      const deadline = Date.now() + 2500;
+      while (inspected === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(subscribeCalls, 3, "event loop must use remaining retry attempts after a failed resubscribe");
+      assert.equal(inspected, 1, "recovered event stream must resume inspecting idle sessions");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("18. Dalga 1 (G-17): experimental.job.updated clears backgroundSessions when job is keyed by jobID !== id", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-jobid-clear-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const queue = [];
+    let notify = null;
+    const pushEvent = (ev) => {
+      queue.push(ev);
+      if (notify) { const fn = notify; notify = null; fn(); }
+    };
+    const synthetics = [];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              if (queue.length === 0) {
+                await new Promise((resolve) => {
+                  notify = resolve;
+                  signal.addEventListener("abort", resolve, { once: true });
+                });
+                continue;
+              }
+              yield queue.shift();
+            }
+          })();
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) {
+          return { id: sid, location: { directory } };
+        },
+        async context() {
+          return [
+            { id: "u1", type: "user", text: "Fix the bug" },
+            { id: "a1", type: "assistant", content: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          ];
+        },
+        async synthetic(input) { synthetics.push(input); },
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      const sessionID = "sess-jobid-mismatch";
+      pushEvent({
+        type: "experimental.job.updated",
+        data: { info: { id: "rec-1", jobID: "job-canonical-99", sessionID, status: "running", kind: "shell" } },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      pushEvent({
+        type: "experimental.job.updated",
+        data: { info: { id: "rec-1", jobID: "job-canonical-99", sessionID, status: "completed", kind: "shell" } },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      pushEvent({ type: "session.execution.succeeded", data: { sessionID } });
+
+      const deadline = Date.now() + 1500;
+      while (synthetics.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(synthetics.length >= 1, "completed job keyed by jobID must unlock backgroundSessions for post-turn inspection");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("19. Dalga 2 (G-03, G-04): runtimeForDirectory fails closed when secondary project enables preflight without tool.execute.before, and missing shell.hook records visible degradation", async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-preflight-ready-"));
+    const startupDir = path.join(root, "startup");
+    const subDir = path.join(startupDir, "child-strict");
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(path.join(startupDir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    fs.writeFileSync(path.join(subDir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: true },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(root, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    // Host has NO tool.hook at all (startup had preflight:false, so setup succeeds),
+    // then child-strict session triggers shell.create.before -> must fail closed!
+    let shellBeforeHook;
+    const host1 = {
+      location: { directory: startupDir },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      shell: {
+        hook(kind, fn) {
+          if (kind === "create.before") shellBeforeHook = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get() { return { id: "s-sub", location: { directory: subDir } }; },
+        async context() { return []; },
+        async synthetic() {},
+      },
+    };
+    const cleanup1 = await Guardian.setup(host1);
+    try {
+      await assert.rejects(
+        () => shellBeforeHook({ sessionID: "s-sub", command: "echo ok", location: { directory: subDir } }),
+        /preflight/i,
+        "secondary project with preflight:true must fail closed when tool.execute.before is unavailable"
+      );
+    } finally {
+      await cleanup1?.();
+    }
+
+    // G-04: Host has tool.hook but NO shell.hook while preflight:true -> must record shell-preflight-unavailable
+    const strictDir = path.join(root, "strict-no-shell");
+    fs.mkdirSync(strictDir, { recursive: true });
+    fs.writeFileSync(path.join(strictDir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: true },
+      secrets: { enabled: false },
+    }));
+    const host2 = {
+      location: { directory: strictDir },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      tool: { hook() { return { dispose() {} }; } },
+      session: {
+        async context() { return []; },
+        async synthetic() {},
+      },
+    };
+    const cleanup2 = await Guardian.setup(host2);
+    try {
+      const logContent = fs.readFileSync(guardianEventPath(strictDir), "utf8");
+      assert.ok(
+        logContent.includes("shell-preflight-unavailable"),
+        "missing context.shell.hook under strict preflight must emit a visible shell-preflight-unavailable audit event"
+      );
+    } finally {
+      await cleanup2?.();
+    }
+  });
+
+  test("20. Dalga 2 (G-05): failed session.get lookup does not run startup-project post-turn remediation or telemetry for an unverified session", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-unverified-dir-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+      telemetry: { enabled: true, level: "all" },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const queue = [];
+    let notify = null;
+    const pushEvent = (ev) => {
+      queue.push(ev);
+      if (notify) { const fn = notify; notify = null; fn(); }
+    };
+    const synthetics = [];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              if (queue.length === 0) {
+                await new Promise((r) => {
+                  notify = r;
+                  signal.addEventListener("abort", r, { once: true });
+                });
+                continue;
+              }
+              yield queue.shift();
+            }
+          })();
+        },
+      },
+      session: {
+        async get() { throw new Error("session lookup unavailable"); },
+        async context() {
+          return [
+            { id: "u1", type: "user", text: "Fix bug" },
+            { id: "a1", type: "assistant", content: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          ];
+        },
+        async synthetic(input) { synthetics.push(input); },
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      pushEvent({ type: "session.idle", data: { sessionID: "unknown-foreign-session" } });
+      await new Promise((r) => setTimeout(r, 120));
+      assert.equal(synthetics.length, 0, "unverified session directory must not trigger startup-project remediation");
+      const status = readGuardianStatus(directory);
+      assert.equal(status.inspected, 0, "unverified session must not record post-inspected telemetry under startup project");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("21. Dalga 2 (G-15, G-16): premature session.idle does not clear foreground handoff before execute.after, and failed execute.after disposes orphan execute.before when preflight/secrets are off", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g15-g16-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    // G-16: secrets:false, preflight:false, execute.after fails -> before must be disposed!
+    let beforeDisposed = 0;
+    const host16 = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      tool: {
+        hook(kind) {
+          if (kind === "execute.before") return { dispose() { beforeDisposed++; } };
+          throw new Error("after unavailable");
+        },
+      },
+      session: {
+        async context() { return []; },
+        async synthetic() {},
+      },
+    };
+    const cleanup16 = await Guardian.setup(host16);
+    try {
+      assert.equal(beforeDisposed, 1, "orphan execute.before must be disposed when execute.after fails and preflight/secrets are off");
+    } finally {
+      await cleanup16?.();
+    }
+
+    // G-15: premature session.idle between execute.before and execute.after must NOT drop foreground handoff
+    const queue = [];
+    let notify = null;
+    const pushEvent = (ev) => {
+      queue.push(ev);
+      if (notify) { const fn = notify; notify = null; fn(); }
+    };
+    let toolBefore;
+    let toolAfter;
+    const childMsgs = [
+      { id: "cu1", type: "user", text: "Summarize" },
+      { id: "ca1", type: "assistant", content: [{ type: "text", text: "Final verified child summary." }] },
+    ];
+    const host15 = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              if (queue.length === 0) {
+                await new Promise((r) => {
+                  notify = r;
+                  signal.addEventListener("abort", r, { once: true });
+                });
+                continue;
+              }
+              yield queue.shift();
+            }
+          })();
+        },
+      },
+      tool: {
+        hook(kind, fn) {
+          if (kind === "execute.before") toolBefore = fn;
+          if (kind === "execute.after") toolAfter = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) {
+          return { id: sid, parentID: sid === "child-g15" ? "parent-g15" : undefined, location: { directory } };
+        },
+        async context({ sessionID: sid }) { return sid === "child-g15" ? childMsgs : []; },
+        async synthetic() {},
+        async wait() {},
+      },
+    };
+    const cleanup15 = await Guardian.setup(host15);
+    try {
+      await toolBefore({ id: "call-g15", sessionID: "parent-g15", tool: "subagent", input: { prompt: "Summarize", background: false } });
+      // Premature parent idle arrives before execute.after
+      pushEvent({ type: "session.idle", data: { sessionID: "parent-g15" } });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const afterEvent = {
+        id: "call-g15",
+        sessionID: "parent-g15",
+        tool: "subagent",
+        status: "completed",
+        input: { prompt: "Summarize", background: false },
+        result: {
+          output: { sessionID: "child-g15", status: "completed", output: "Stale summary" },
+          content: "<subagent sessionID=\"child-g15\" state=\"completed\">\nStale summary\n</subagent>",
+          metadata: { sessionID: "child-g15", status: "completed" },
+        },
+      };
+      await toolAfter(afterEvent);
+      assert.equal(
+        afterEvent.result.output.output,
+        "Final verified child summary.",
+        "premature session.idle must not clear foreground handoff before execute.after finalizes child result"
+      );
+    } finally {
+      await cleanup15?.();
+    }
+  });
+
+  test("22. Dalga 2 (G-18): config.updated preserves active GuardEngine session state instead of wiping runtimeByDirectory", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-config-reload-state-"));
+    const configFile = path.join(directory, "opencode-guardian.json");
+    fs.writeFileSync(configFile, JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+      remediationBudget: 1,
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const queue = [];
+    let notify = null;
+    const pushEvent = (ev) => {
+      queue.push(ev);
+      if (notify) { const fn = notify; notify = null; fn(); }
+    };
+    const synthetics = [];
+    let messages = [
+      { id: "u1", type: "user", text: "Fix the bug" },
+      { id: "a1", type: "assistant", content: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+    ];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              if (queue.length === 0) {
+                await new Promise((r) => {
+                  notify = r;
+                  signal.addEventListener("abort", r, { once: true });
+                });
+                continue;
+              }
+              yield queue.shift();
+            }
+          })();
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) { return { id: sid, location: { directory } }; },
+        async context() { return messages; },
+        async synthetic(input) { synthetics.push(input); },
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      // Turn 1 triggers remediation (records pendingRemediation in GuardEngine's SessionStateStore)
+      pushEvent({ type: "session.idle", data: { sessionID: "s-reload" } });
+      const deadline1 = Date.now() + 1000;
+      while (synthetics.length === 0 && Date.now() < deadline1) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(synthetics.length, 1);
+
+      // Now config.updated fires mid-turn (updating e.g. iterationBudget)
+      fs.writeFileSync(configFile, JSON.stringify({
+        enabled: true,
+        preflight: { enabled: false },
+        secrets: { enabled: false },
+        remediationBudget: 1,
+        iterationBudget: 4,
+      }));
+      pushEvent({ type: "config.updated", data: {} });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Agent finishes remediating cleanly -> GuardEngine MUST still remember pendingRemediation and record remediation-verified!
+      messages = [
+        ...messages,
+        { id: "g1", type: "synthetic", text: synthetics[0].text, metadata: synthetics[0].metadata },
+        { id: "a2", type: "assistant", content: [{ type: "text", text: "Fixed the root cause directly in src/app.ts." }] },
+      ];
+      pushEvent({ type: "session.idle", data: { sessionID: "s-reload" } });
+      const deadline2 = Date.now() + 1000;
+      while (readGuardianStatus(directory).unverified === 0 && readGuardianStatus(directory).verified === 0 && Date.now() < deadline2) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const reloadStatus = readGuardianStatus(directory);
+      assert.ok(
+        reloadStatus.verified + reloadStatus.unverified >= 1,
+        "config.updated must preserve pendingRemediation in GuardEngine so remediation outcome is recorded"
+      );
+    } finally {
+      await cleanup?.();
+    }
   });
 });

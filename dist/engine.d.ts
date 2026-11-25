@@ -32,6 +32,9 @@ export declare class GuardEngine {
     private inspectedMessages;
     private sessionState;
     constructor(config?: GuardConfig);
+    private buildEffectiveConfig;
+    /** Hot-update policy config without discarding live SessionStateStore or inspected message history. */
+    updateConfig(config?: GuardConfig): void;
     registerRule(rule: GuardRule): void;
     forgetSession(sessionID: string): void;
     rollbackInspection(sessionID: string): void;

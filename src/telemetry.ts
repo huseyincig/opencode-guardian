@@ -295,22 +295,61 @@ export function resolveTelemetrySettings(directory?: string): {
   }
 
   let maxBytes =
-    registered?.maxBytes && Number.isFinite(registered.maxBytes) && registered.maxBytes > 0
+    registered?.maxBytes !== undefined &&
+    Number.isFinite(registered.maxBytes) &&
+    registered.maxBytes >= 1
       ? Math.floor(registered.maxBytes)
       : DEFAULT_GUARDIAN_LOG_BYTES;
 
-  if (Number.isFinite(envMaxBytes) && envMaxBytes > 0) {
+  if (Number.isFinite(envMaxBytes) && envMaxBytes >= 1) {
     maxBytes = Math.floor(envMaxBytes);
   }
 
   return { enabled, level, maxBytes };
 }
 
+const ROTATION_LOCK_STALE_MS = 5_000;
+function acquireRotationLock(lockPath: string): (() => void) | undefined {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const lockFd = fs.openSync(
+        lockPath,
+        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0),
+        0o600
+      );
+      try { fs.closeSync(lockFd); } catch {}
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.unlinkSync(lockPath); } catch {}
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
+        return undefined;
+      }
+      try {
+        const lockStat = fs.lstatSync(lockPath);
+        if (
+          !lockStat.isSymbolicLink() &&
+          Date.now() - lockStat.mtimeMs > ROTATION_LOCK_STALE_MS
+        ) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 let reportedWriteFailure = false;
 export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryArg?: string): boolean {
   const settings = resolveTelemetrySettings(directoryArg);
   if (!settings.enabled || settings.level === "off") {
-    return true;
+    // Explicit statistics-reset cannot persist a reset marker when telemetry is disabled.
+    return event.kind === "statistics-reset" ? false : true;
   }
 
   if (settings.level === "violations") {
@@ -354,23 +393,42 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
       }
       if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
       if (info.size + Buffer.byteLength(line) > settings.maxBytes) {
-        // Keep exactly one bounded archive. Refuse unsafe pre-existing archive paths.
-        if (fs.existsSync(archive) || fs.lstatSync(archive, { throwIfNoEntry: false })) {
-          checkFile(archive);
+        const releaseLock = acquireRotationLock(filePath + ".lock");
+        if (releaseLock) {
+          try {
+            // Re-check file size after acquiring lock so concurrent processes do not double-rotate.
+            const freshStat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+            if (freshStat && freshStat.isFile() && freshStat.size + Buffer.byteLength(line) > settings.maxBytes) {
+              // Keep exactly one bounded archive. Refuse unsafe pre-existing archive paths.
+              if (fs.existsSync(archive) || fs.lstatSync(archive, { throwIfNoEntry: false })) {
+                checkFile(archive);
+              }
+              fs.closeSync(fd);
+              fd = -1;
+              try {
+                fs.unlinkSync(archive);
+              } catch (err) {
+                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+              }
+              try {
+                fs.renameSync(filePath, archive);
+              } catch (err) {
+                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+              }
+              fd = fs.openSync(filePath,
+                fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
+                (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+              const current = fs.fstatSync(fd);
+              if (!current.isFile() ||
+                  (typeof process.getuid === "function" && current.uid !== process.getuid())) {
+                throw new Error("Rotated Guardian log is not owned by this user");
+              }
+              if (process.platform !== "win32" && (current.mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
+            }
+          } finally {
+            releaseLock();
+          }
         }
-        fs.closeSync(fd);
-        fd = -1;
-        if (fs.existsSync(archive)) fs.unlinkSync(archive);
-        fs.renameSync(filePath, archive);
-        fd = fs.openSync(filePath,
-          fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
-          (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-        const current = fs.fstatSync(fd);
-        if (!current.isFile() ||
-            (typeof process.getuid === "function" && current.uid !== process.getuid())) {
-          throw new Error("Rotated Guardian log is not owned by this user");
-        }
-        if (process.platform !== "win32" && (current.mode & 0o777) !== 0o600) fs.fchmodSync(fd, 0o600);
       }
       if (fs.writeSync(fd, line) !== Buffer.byteLength(line)) {
         throw new Error("Guardian audit write was incomplete");

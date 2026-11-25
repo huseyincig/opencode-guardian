@@ -69,10 +69,24 @@ function fileState(directory: string, target: string): Omit<BeforeEditState, "fi
 
 export function captureBeforeEdit(tool: string, input: Record<string, unknown>, directory: string): BeforeEditState | undefined {
   const action = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1) ?? "";
-  if (!/^(?:write|write_file|write_to_file|create_file|save_file|replace_file_content|file_write|file_mutate|edit|edit_file)$/.test(action)) return undefined;
-  if (!Object.hasOwn(input, "content") || typeof input.content !== "string" ||
-      typeof input.old_string === "string" || typeof input.oldString === "string") return undefined;
-  const target = input.path ?? input.filePath ?? input.file ?? input.targetFile;
+  if (!/^(?:write|write_file|write_to_file|create_file|save_file|replace_file_content|file_write|file_mutate|file_edit|edit|edit_file|str_replace_editor)$/.test(action)) return undefined;
+  const hasFullContent =
+    (Object.hasOwn(input, "content") && typeof input.content === "string") ||
+    (Object.hasOwn(input, "CodeContent") && typeof input.CodeContent === "string") ||
+    (Object.hasOwn(input, "text") && typeof input.text === "string") ||
+    (Object.hasOwn(input, "file_text") && typeof input.file_text === "string");
+  const isPartialEdit =
+    typeof input.old_string === "string" ||
+    typeof input.oldString === "string" ||
+    typeof input.old_str === "string" ||
+    typeof input.ReplacementContent === "string" ||
+    typeof input.StartLine === "number" ||
+    typeof input.EndLine === "number" ||
+    typeof input.patch === "string" ||
+    typeof input.patchText === "string" ||
+    Array.isArray(input.edits);
+  if (!hasFullContent || isPartialEdit) return undefined;
+  const target = input.path ?? input.filePath ?? input.file ?? input.targetFile ?? input.TargetFile;
   if (typeof target !== "string" || !target.trim()) return undefined;
   return { filePath: target, directory, ...fileState(directory, target) };
 }

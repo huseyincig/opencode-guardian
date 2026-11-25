@@ -1537,4 +1537,71 @@ describe("Aborted Tools & Service Restart Handling", () => {
     assert.equal(r3.decision, "pass", "attachment-only human prompt must establish a fresh turn boundary");
     assert.equal(r3.combinedRemediationPrompt, undefined);
   });
+
+  test("Dalga 2 (G-14): VerificationSnapshotStore marks overflowed >512 file turns as unverified-state instead of partial sha256", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g14-overflow-"));
+    try {
+      const store = new VerificationSnapshotStore();
+      const sid = "sess-g14-overflow";
+      // Create 1 real file + observe 513 distinct mutated paths
+      const firstFile = path.join(dir, "f0.ts");
+      fs.writeFileSync(firstFile, "export const v = 0;\n");
+      for (let i = 0; i < 513; i++) {
+        store.observe(sid, `edit-${i}`, "write", { path: `f${i}.ts`, content: `export const v = ${i};\n` }, "ok", {}, dir, "completed");
+      }
+      store.observe(sid, "verify-1", "bash", { command: "npm test" }, "3 passed", { exit: 0 }, dir, "completed");
+      const snap = store.snapshots(sid).get("verify-1");
+      assert.ok(snap, "snapshot entry must exist for verification call");
+      assert.equal(
+        snap.fingerprint,
+        "unverified-state",
+        "overflowed file set (>512 paths) must be marked unverified-state rather than emitting a partial sha256 fingerprint"
+      );
+      assert.equal(snap.incomplete, true, "overflowed snapshot must carry incomplete: true");
+
+      const messages = [
+        { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Update files and verify" }] },
+        {
+          info: { id: "a1", role: "assistant" },
+          parts: [
+            { type: "tool", tool: "write", callID: "edit-0", state: { status: "completed", input: { path: "f0.ts" }, output: "ok", metadata: {} } },
+            { type: "tool", tool: "bash", callID: "verify-1", state: { status: "completed", input: { command: "npm test" }, output: "3 passed", metadata: { exit: 0 } } },
+            { type: "text", text: "All tests passed and everything is verified." },
+          ],
+        },
+      ];
+      const evidence = collectTurnEvidence(messages, dir, store.snapshots(sid));
+      const res = noUnverifiedClaimsRule.inspect({
+        sessionID: sid,
+        directory: dir,
+        messages,
+        currentTurn: messages,
+        ruleConfig: { blockUnverified: true },
+        evidence,
+      });
+      assert.equal(res.decision, "block", "completion claim backed only by an overflowed unverified-state snapshot must block");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Dalga 3 (G-22): captureBeforeEdit observes full-file replacement payloads using CodeContent or text fields", async () => {
+    const { captureBeforeEdit } = await import("../dist/edit-integrity.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g22-edit-"));
+    try {
+      const target = path.join(dir, "app.ts");
+      fs.writeFileSync(target, "export function alpha() { return 1; }\nexport function beta() { return 2; }\n");
+
+      const obs1 = captureBeforeEdit("write_to_file", { TargetFile: "app.ts", CodeContent: "export function alpha() { return 1; }\n" }, dir);
+      assert.ok(obs1 && obs1.hash, "CodeContent full-file replacement must be captured");
+
+      const obs2 = captureBeforeEdit("write_file", { path: "app.ts", text: "export function alpha() { return 1; }\n" }, dir);
+      assert.ok(obs2 && obs2.hash, "text full-file replacement must be captured");
+
+      const partial = captureBeforeEdit("replace_file_content", { TargetFile: "app.ts", ReplacementContent: "x", StartLine: 1, EndLine: 1 }, dir);
+      assert.equal(partial, undefined, "partial line-range replacement must remain excluded from full-file edit integrity");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

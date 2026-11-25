@@ -318,7 +318,8 @@ Guardian works out of the box with zero configuration. You can customize rules a
   - `"violations"`: (Default) Logs only security violations, preflight blocks, warnings, and remediation actions. Bypasses clean turns and benign commands (`preflight-allowed`, `post-inspected`), reducing disk I/O by 90–95%.
   - `"all"`: Logs all events including benign command executions and clean turn evaluations.
   - `"off"`: Disables all file writes (zero I/O), ideal for headless CI/CD runs.
-- `telemetry.maxBytes`: Maximum size before rotating to `guardian-events.jsonl.1` (default: 512 KiB).
+- `telemetry.maxBytes`: Maximum size in bytes (positive integer `>= 1`) before rotating to `guardian-events.jsonl.1` (default: 512 KiB). Rotation uses an atomic `.lock` guard with stale-lock recovery.
+- Unknown rule IDs in `rules` are rejected during config validation so typos cannot silently disable protection. When telemetry is disabled (`enabled: false` or `level: "off"`), `/guardian-reset` reports failure instead of falsely claiming counters were reset.
 
 ### 🌐 Environment Variables (Pipeline & CI Overrides):
 - `OPENCODE_GUARDIAN_STATE_DIR=/path/to/state`: Explicit override for the telemetry state directory.
@@ -363,17 +364,17 @@ Blocks catastrophic, irreversible shell commands (`rm -rf`, `git reset --hard`, 
 }
 ```
 
-- Setting `"allowProjectOverrides": false` in your global `~/.config/opencode/opencode-guardian.json` ensures that an untrusted cloned repository cannot weaken or disable your global Guardian, preflight, secret redaction, or rule severities via a repo-local `opencode-guardian.json`.
+- Setting `"allowProjectOverrides": false` in your global `~/.config/opencode/opencode-guardian.json` locks the effective security floor — including unlisted built-in rule defaults, rule `exceptions`, secret `safeKeyNames` / `safeValues` / `includeRuntimeEnv`, effective default `preflight.mode` (`"strict"` when omitted), and remediation/iteration budgets — so an untrusted cloned repository cannot weaken protection via a repo-local `opencode-guardian.json`.
 
-### Chat Transcript Notices (opt-in)
+### Detailed Conversation Banners (opt-in)
 
-By default Guardian interventions appear as a toast and a short-lived conversation banner. To also leave a persistent line in the chat that scrolls up with the conversation (like V1), enable:
+By default Guardian interventions appear as a compact toast and short-lived conversation banner. To show expanded per-finding bullets in the TUI conversation banner (`session.composer.top`) without injecting synthetic turns into model chat history, enable:
 
 ```json
 { "notifications": { "transcript": true } }
 ```
 
-Each intervention (warning, remediation, preflight block, stream stop) posts one `[Guardian] <title>: <message>` line containing only the safe rule ID and the action taken. The message is a Guardian `visible` notice: it never wakes the model (`resume: false`), is removed from model context, and is ignored by Guardian's own inspection. Identical notices are de-duplicated for 10 seconds per session.
+Detailed notices are delivered exclusively via the TUI RPC bridge (never via `session.synthetic`), automatically redacted before display, auto-expire via TTL, clear on the next human prompt, and support click-to-dismiss.
 
 ### 2. Full `"strict"` Mode (Maximum Pre-Execution Lockdown)
 

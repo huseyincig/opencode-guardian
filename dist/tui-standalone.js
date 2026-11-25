@@ -177,10 +177,13 @@ function v2CommandDirectory(context, fallback) {
   return context.data?.location?.default?.()?.directory ?? fallback;
 }
 
-/** A broken project config must not reject the host's UI render callback. */
+/** A broken project config must not reject the host's UI render callback, but must remain distinguishable from intentional disablement. */
 function v2UiConfig(directory, options) {
   try {
-    return resolveEffectiveConfig(loadConfig(directory), options);
+    return {
+      ...resolveEffectiveConfig(loadConfig(directory), options),
+      configInvalid: false
+    };
   } catch {
     return {
       enabled: false,
@@ -189,7 +192,8 @@ function v2UiConfig(directory, options) {
       },
       updateNotice: {
         enabled: false
-      }
+      },
+      configInvalid: true
     };
   }
 }
@@ -205,12 +209,15 @@ async function v2PerformCommand(context, command, directory, onReset) {
     });
     if (confirmed !== true) return;
     const result = guardianResetReport(directory);
-    if (onReset) {
-      onReset(directory);
-    } else {
-      dispatchGuardianToastClear({
-        directory
-      });
+    const resetSucceeded = !result.message.startsWith("Reset failed");
+    if (resetSucceeded) {
+      if (onReset) {
+        onReset(directory);
+      } else {
+        dispatchGuardianToastClear({
+          directory
+        });
+      }
     }
     await context.ui.dialog.alert(result);
     return;
@@ -318,6 +325,7 @@ function GuardianSidebar(props) {
     return props.colors.muted;
   };
   const statusLabel = () => {
+    if (props.configInvalid?.()) return "✕ invalid config";
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested":
@@ -355,6 +363,7 @@ function GuardianSidebar(props) {
     }
   };
   const statusColor = () => {
+    if (props.configInvalid?.()) return errorColor();
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
@@ -1081,6 +1090,7 @@ const v2Plugin = {
           get checkUpdates() {
             return sessionConfig().updateNotice?.enabled !== false;
           },
+          configInvalid: () => sessionConfig().configInvalid,
           get colors() {
             return colors();
           }

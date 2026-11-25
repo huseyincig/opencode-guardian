@@ -640,6 +640,34 @@ describe("Report Audit Regressions", () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("Dalga 1 (G-22A): Python requirements include refuses symlinks escaping project root and oversized files", () => {
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-req-outer-"));
+    const root = path.join(outer, "project");
+    fs.mkdirSync(root, { recursive: true });
+    try {
+      const outside = path.join(outer, "secret-reqs.txt");
+      fs.writeFileSync(outside, "escaped-pkg>=1.0\n");
+      fs.symlinkSync(outside, path.join(root, "link-reqs.txt"));
+      fs.writeFileSync(path.join(root, "requirements.txt"), "-r link-reqs.txt\n");
+      clearDeclaredDepsCache();
+
+      const ctx = context([tool({
+        path: path.join(root, "app.py"),
+        content: "import escaped_pkg\n",
+      })]);
+      ctx.directory = root;
+      ctx.ruleConfig = { blockPythonGhostDeps: true };
+      assert.equal(
+        noGhostDepsRule.inspect(ctx).decision,
+        "block",
+        "symlink escaping workspace root must not be read as declared Python dependency"
+      );
+    } finally {
+      clearDeclaredDepsCache();
+      fs.rmSync(outer, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Report Follow-up Regressions", () => {

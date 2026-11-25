@@ -36,7 +36,7 @@ export const SAFE_RULE_IDS: ReadonlySet<string> = new Set([
   "remediation-verified", "remediation-failed", "remediation-unverified",
   "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
   "v2-event-stream-error", "v2-event-stream-unavailable",
-  "verification-snapshot-unavailable",
+  "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);
 
 export const SAFE_REASON_CODES: ReadonlySet<string> = new Set([
@@ -50,7 +50,7 @@ export const SAFE_REASON_CODES: ReadonlySet<string> = new Set([
   "remediation-verified", "remediation-failed", "remediation-unverified",
   "prompt-delivery-failed", "message-fetch-failed", "engine-inspection-failed",
   "v2-event-stream-error", "v2-event-stream-unavailable",
-  "verification-snapshot-unavailable",
+  "verification-snapshot-unavailable", "shell-preflight-unavailable",
 ]);
 
 export interface AuditReason {

@@ -247,6 +247,7 @@ export declare function isTrustedMeshMessage(value: unknown, sessionID?: string,
 export declare function isMeshProtectedPart(part: unknown, parentMessage?: unknown): boolean;
 export declare function wasMeshSanitized(valueOrMetadata: unknown, owner?: string): boolean;
 export declare function wasMeshBounded(valueOrMetadata: unknown): boolean;
+export declare function forgetMeshOwnerSession(sessionID: string, owner: string): void;
 export declare function forgetMeshSession(sessionID: string): void;
 export declare function acquireSessionLease(input: {
     sessionID: string;
@@ -255,6 +256,12 @@ export declare function acquireSessionLease(input: {
     ttlMs?: number | undefined;
     reason?: string | undefined;
 }): () => void;
+export declare function renewSessionLease(input: {
+    sessionID: string;
+    owner: string;
+    kind: MeshLeaseKind;
+    ttlMs?: number | undefined;
+}): boolean;
 export declare function getBlockingSessionLease(sessionID: string, callerKind: MeshLeaseKind, callerOwner?: string): MeshSessionLease | undefined;
 export declare function isSessionWaitingOnUser(sessionID: string): boolean;
 export declare function isSessionRemediating(sessionID: string): boolean;

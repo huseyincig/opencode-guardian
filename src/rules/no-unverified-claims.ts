@@ -52,6 +52,9 @@ function staleAfterMutation(
   if (latestMutationSequence(evidence) > record.sequence) {
     return true;
   }
+  if (record.stateFingerprint === "unverified-state") {
+    return true;
+  }
   if (record.stateFingerprint?.startsWith("sha256:")) {
     const files = record.snapshotFiles?.length ? record.snapshotFiles : evidence?.mutatedFiles;
     if (!directory || !files || (Array.isArray(files) ? !files.length : !files.size)) return true;

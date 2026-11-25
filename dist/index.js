@@ -10,12 +10,12 @@ import { VerificationSnapshotStore } from "./evidence.js";
 import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, cacheV2SessionPermissions, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
-import { resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
+import { defaultRuntimeSecrets, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
 import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
 import { StreamLoopWatcher } from "./stream-loop.js";
-import { acquireSessionLease, clearMeshIntervention, getBlockingSessionLease, getLatestMeshIntervention, invalidateActiveMeshHandoff, isTrustedMeshMessage, recordMeshIntervention, registerMeshStateRpc, resolveMeshAgentProfile, } from "./bridge.js";
+import { acquireSessionLease, clearMeshIntervention, forgetMeshSession, getBlockingSessionLease, getLatestMeshIntervention, invalidateActiveMeshHandoff, isTrustedMeshMessage, recordMeshIntervention, registerMeshStateRpc, renewSessionLease, resolveMeshAgentProfile, } from "./bridge.js";
 export * from "./types.js";
 export * from "./engine.js";
 export * from "./degeneration.js";
@@ -644,7 +644,7 @@ function recordInspectionOutcome(result, sessionID, directory, toastNotifier) {
     toastNotifier?.[INTERVENTION_TRACKER]?.recordOutcome(sessionID, result, findings.length, toastNotifier);
     return findings;
 }
-async function finalizeSubagentHandoff(input) {
+export async function finalizeSubagentHandoff(input) {
     let remediated = false;
     let resolvedCapability;
     if (input.resolveCapability) {
@@ -701,13 +701,31 @@ async function finalizeSubagentHandoff(input) {
                 result.rollback?.();
                 throw new Error("[opencode-guardian handoff] remediation did not converge before the safety limit.");
             }
+            const leaseTtlMs = typeof input.leaseTtlMs === "number" && Number.isFinite(input.leaseTtlMs) && input.leaseTtlMs > 0
+                ? input.leaseTtlMs
+                : 45_000;
+            const remediationTimeoutMs = typeof input.remediationTimeoutMs === "number" && Number.isFinite(input.remediationTimeoutMs) && input.remediationTimeoutMs > 0
+                ? input.remediationTimeoutMs
+                : 10 * 60_000;
             const releaseRemediationLease = acquireSessionLease({
                 sessionID: input.sessionID,
                 owner: "opencode-guardian",
                 kind: "active_remediation",
-                ttlMs: 45_000,
+                ttlMs: leaseTtlMs,
                 reason: "guardian-subagent-remediation",
             });
+            const heartbeatMs = Math.max(30, Math.floor(leaseTtlMs / 3));
+            const leaseHeartbeat = setInterval(() => {
+                if (input.signal?.aborted)
+                    return;
+                renewSessionLease({
+                    sessionID: input.sessionID,
+                    owner: "opencode-guardian",
+                    kind: "active_remediation",
+                    ttlMs: leaseTtlMs,
+                });
+            }, heartbeatMs);
+            leaseHeartbeat.unref?.();
             recordMeshIntervention({
                 sessionID: input.sessionID,
                 directory: input.directory,
@@ -719,9 +737,28 @@ async function finalizeSubagentHandoff(input) {
                 updatedAt: Date.now(),
                 message: "guardian-subagent-remediation",
             });
+            let deadlineTimer;
+            let onAbortHandler;
             try {
-                await input.sendAndWait(result.combinedRemediationPrompt);
+                const waitPromise = input.sendAndWait(result.combinedRemediationPrompt);
+                const guardedWait = new Promise((resolve, reject) => {
+                    deadlineTimer = setTimeout(() => {
+                        reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
+                    }, remediationTimeoutMs);
+                    deadlineTimer.unref?.();
+                    onAbortHandler = () => {
+                        reject(new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation."));
+                    };
+                    if (input.signal?.aborted) {
+                        onAbortHandler();
+                        return;
+                    }
+                    input.signal?.addEventListener("abort", onAbortHandler, { once: true });
+                    waitPromise.then(resolve, reject);
+                });
+                await guardedWait;
                 remediated = true;
+                input.onRemediated?.();
                 recordGuardianEvent({
                     kind: "post-remediation",
                     session: sessionFingerprint(input.sessionID),
@@ -747,6 +784,12 @@ async function finalizeSubagentHandoff(input) {
                 throw new Error("[opencode-guardian handoff] could not complete subagent remediation.");
             }
             finally {
+                clearInterval(leaseHeartbeat);
+                if (deadlineTimer !== undefined)
+                    clearTimeout(deadlineTimer);
+                if (onAbortHandler && input.signal) {
+                    input.signal.removeEventListener("abort", onAbortHandler);
+                }
                 releaseRemediationLease();
             }
             continue;
@@ -1252,6 +1295,7 @@ const setup = async (context) => {
     // Resolve the explicit security setting first: strict preflight must never
     // silently disappear merely because another v2 capability is unavailable.
     const directory = context?.location?.directory ?? process.cwd();
+    defaultRuntimeSecrets.refreshEnv();
     const mergedConfig = resolveEffectiveConfig(loadConfig(directory), context.options);
     configureGuardianTelemetry(directory, mergedConfig.telemetry);
     if (mergedConfig.enabled === false) {
@@ -1275,6 +1319,23 @@ const setup = async (context) => {
         }
         return;
     }
+    const MAX_BOUNDED_DIRECTORIES = 64;
+    const setBoundedDirectoryEntry = (map, key, value, protectedDirs) => {
+        map.delete(key);
+        map.set(key, value);
+        if (map.size <= MAX_BOUNDED_DIRECTORIES)
+            return;
+        for (const candidate of map.keys()) {
+            if (map.size <= MAX_BOUNDED_DIRECTORIES)
+                break;
+            if (candidate === directory || candidate === key || protectedDirs?.has(candidate))
+                continue;
+            map.delete(candidate);
+            if (map === runtimeByDirectory) {
+                configureGuardianTelemetry(candidate, undefined);
+            }
+        }
+    };
     const runtimeByDirectory = new Map();
     const controller = new AbortController();
     const instanceRegistration = registerGuardianInstance(directory);
@@ -1323,10 +1384,18 @@ const setup = async (context) => {
     }
     let toolOutputProtectionReady = false;
     let modelRequestProtectionReady = false;
+    let toolPreflightReady = false;
+    let toolAfterReady = false;
+    const shellHookAvailable = typeof context.shell?.hook === "function";
+    let shellPreflightReady = false;
+    const isPreflightReady = () => toolPreflightReady && (!shellHookAvailable || shellPreflightReady);
     const runtimeForDirectory = (runtimeDirectory) => {
         const key = runtimeDirectory || directory;
         const cached = runtimeByDirectory.get(key);
-        if (cached && (!cached.config.enabled || (toolOutputProtectionReady && modelRequestProtectionReady) || !cached.sanitizer)) {
+        if (cached &&
+            (!cached.config.enabled ||
+                ((!cached.sanitizer || (toolOutputProtectionReady && modelRequestProtectionReady)) &&
+                    (cached.config.preflight?.enabled !== true || isPreflightReady())))) {
             return cached;
         }
         if (!isDirectoryInGuardianScope(directory, key)) {
@@ -1336,7 +1405,7 @@ const setup = async (context) => {
                 sanitizer: null,
                 engine: new GuardEngine(disabledConfig),
             };
-            runtimeByDirectory.set(key, disabledRuntime);
+            setBoundedDirectoryEntry(runtimeByDirectory, key, disabledRuntime, new Set(sessionDirectories.values()));
             return disabledRuntime;
         }
         const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
@@ -1350,7 +1419,10 @@ const setup = async (context) => {
             (!toolOutputProtectionReady || !modelRequestProtectionReady)) {
             throw new Error("[opencode-guardian secrets] Required V2 security hooks are unavailable for this project; secret protection cannot be enabled safely.");
         }
-        runtimeByDirectory.set(key, runtime);
+        if (config.enabled !== false && config.preflight?.enabled === true && !isPreflightReady()) {
+            throw new Error("[opencode-guardian preflight] Required V2 preflight hooks are unavailable for this project; strict preflight cannot be enabled.");
+        }
+        setBoundedDirectoryEntry(runtimeByDirectory, key, runtime, new Set(sessionDirectories.values()));
         return runtime;
     };
     runtimeByDirectory.set(directory, {
@@ -1373,23 +1445,27 @@ const setup = async (context) => {
         }
         return resolved;
     };
-    const resolveSessionDirectory = async (sessionID) => {
+    const resolveSessionDirectoryDetailed = async (sessionID) => {
         const cached = sessionDirectories.get(sessionID);
         if (cached)
-            return cached;
-        try {
-            if (typeof context.session.get === "function") {
-                const session = await context.session.get({ sessionID });
-                const sessionDirectory = session.location?.directory;
-                if (typeof sessionDirectory === "string" && sessionDirectory.trim()) {
-                    return rememberSessionDirectory(sessionID, sessionDirectory);
-                }
-            }
+            return { directory: cached, verified: true };
+        if (typeof context.session.get !== "function") {
+            return { directory, verified: true };
         }
-        catch { }
-        // Retry failed location lookups instead of caching the startup project.
-        return directory;
+        try {
+            const session = await context.session.get({ sessionID });
+            const sessionDirectory = session.location?.directory;
+            if (typeof sessionDirectory === "string" && sessionDirectory.trim()) {
+                return { directory: rememberSessionDirectory(sessionID, sessionDirectory), verified: true };
+            }
+            return { directory, verified: true };
+        }
+        catch {
+            // Do not cache the startup project or pretend an unverified lookup belongs to startup scope.
+            return { directory, verified: false };
+        }
     };
+    const resolveSessionDirectory = async (sessionID) => (await resolveSessionDirectoryDetailed(sessionID)).directory;
     const forgetSessionRuntime = (sessionID) => {
         for (const runtime of runtimeByDirectory.values()) {
             runtime.engine.forgetSession(sessionID);
@@ -1528,7 +1604,7 @@ const setup = async (context) => {
                 runtime.config.notifications?.transcript === true,
             sanitizer: runtime.sanitizer,
         });
-        toastNotifiersByDirectory.set(key, notifier);
+        setBoundedDirectoryEntry(toastNotifiersByDirectory, key, notifier, new Set(sessionDirectories.values()));
         return notifier;
     };
     const toastNotifier = createTrackedToastNotifier({
@@ -1639,13 +1715,13 @@ const setup = async (context) => {
                     const runtime = runtimeForDirectory(runtimeDirectory);
                     if (runtime.config.enabled === false)
                         return;
-                    if (event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
+                    if (toolAfterReady && event.input && typeof event.input === "object" && !Array.isArray(event.input)) {
                         verificationStore.observeBefore(event.sessionID, event.id, event.tool, event.input, runtimeDirectory);
                     }
                     if (runtime.config.preflight?.enabled === true) {
                         inspectPreflight(event.tool, event.input, event.sessionID, runtimeDirectory, runtime.config.preflight?.shellTools, toastNotifier, runtime.config.preflight?.mode ?? "strict");
                     }
-                    if (canFinalizeSubagent && event.tool === "subagent") {
+                    if (toolAfterReady && canFinalizeSubagent && event.tool === "subagent") {
                         const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
                             ? event.input
                             : {};
@@ -1658,6 +1734,7 @@ const setup = async (context) => {
                     throw new Error("V2 tool.execute.before hook did not return a valid registration.");
                 }
                 toolRegistrations.push(before);
+                toolPreflightReady = true;
             }
             catch (error) {
                 if (strictPreflight) {
@@ -1738,6 +1815,7 @@ const setup = async (context) => {
                                 : typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
                                     ? rawChildAgent.trim()
                                     : undefined;
+                            let subagentRemediated = false;
                             const revised = childRuntime.config.enabled === false
                                 ? undefined
                                 : await finalizeSubagentHandoff({
@@ -1745,11 +1823,17 @@ const setup = async (context) => {
                                     directory: childDirectory,
                                     engine: childRuntime.engine,
                                     agentName: childAgent,
+                                    onRemediated: () => {
+                                        subagentRemediated = true;
+                                    },
                                     resolveCapability: async () => {
+                                        const cached = getCachedAgentCapability(childID);
+                                        if (cached)
+                                            return cached;
                                         const meshProfile = await resolveMeshAgentProfile(childID, childDirectory);
-                                        if (meshProfile && meshProfile.capability !== "unknown") {
+                                        if (meshProfile && meshProfile.capability === "read-only") {
                                             const resolved = {
-                                                capability: meshProfile.capability,
+                                                capability: "read-only",
                                                 evidence: {
                                                     agentName: meshProfile.agentName ?? childAgent,
                                                     reasons: [`mesh:${meshProfile.managedBy}`],
@@ -1758,10 +1842,7 @@ const setup = async (context) => {
                                             cacheAgentCapability(childID, resolved);
                                             return resolved;
                                         }
-                                        const cached = getCachedAgentCapability(childID);
-                                        if (cached)
-                                            return cached;
-                                        let resolvedName = childAgent;
+                                        let resolvedName = meshProfile?.agentName ?? childAgent;
                                         if (!resolvedName) {
                                             try {
                                                 const ctxMsgs = normalizeV2Messages(await context.session.context({ sessionID: childID }), childID);
@@ -1769,11 +1850,26 @@ const setup = async (context) => {
                                             }
                                             catch { }
                                         }
-                                        const p = await resolveV2AgentCapability(context, childID, resolvedName, undefined, childDirectory);
-                                        if (p.capability !== "unknown") {
-                                            cacheAgentCapability(childID, p);
+                                        const hostProfile = await resolveV2AgentCapability(context, childID, resolvedName, undefined, childDirectory);
+                                        if (hostProfile.capability === "read-only") {
+                                            cacheAgentCapability(childID, hostProfile);
+                                            return hostProfile;
                                         }
-                                        return p;
+                                        if (meshProfile && meshProfile.capability === "write-allowed") {
+                                            const resolved = {
+                                                capability: "write-allowed",
+                                                evidence: {
+                                                    agentName: resolvedName,
+                                                    reasons: [`mesh:${meshProfile.managedBy}`, ...hostProfile.evidence.reasons],
+                                                },
+                                            };
+                                            cacheAgentCapability(childID, resolved);
+                                            return resolved;
+                                        }
+                                        if (hostProfile.capability !== "unknown") {
+                                            cacheAgentCapability(childID, hostProfile);
+                                        }
+                                        return hostProfile;
                                     },
                                     fetchMessages: async () => normalizeV2Messages(await context.session.context({ sessionID: childID }), childID),
                                     sendAndWait: async (text) => {
@@ -1796,23 +1892,33 @@ const setup = async (context) => {
                                 });
                             if (revised !== undefined) {
                                 const existingText = extractV2OutputText(current.output, current.content).replace(/\r?\n?<\/subagent>\s*$/i, "");
-                                const trailingOutcomeLine = /(?:^|\r?\n)(\[TASK OUTCOME\][^\r\n]*)\s*$/.exec(existingText)?.[1];
-                                const finalRevised = trailingOutcomeLine && !revised.includes(trailingOutcomeLine)
+                                const revisedHasOutcome = /^\s*\[TASK OUTCOME\]/m.test(revised);
+                                const trailingOutcomeLine = !subagentRemediated && !revisedHasOutcome
+                                    ? /(?:^|\r?\n)(\[TASK OUTCOME\][^\r\n]*)\s*$/.exec(existingText)?.[1]
+                                    : undefined;
+                                const finalRevised = trailingOutcomeLine
                                     ? `${revised}\n${trailingOutcomeLine}`
                                     : revised;
+                                const outcomeStatus = /^\s*\[TASK OUTCOME\][^\r\n]*\bstatus=([a-z_-]+)/im.exec(finalRevised)?.[1]?.toLowerCase();
+                                const existingStatus = typeof structured?.status === "string" && structured.status.trim().length > 0
+                                    ? structured.status.trim()
+                                    : typeof current.metadata?.status === "string" && current.metadata.status.trim().length > 0
+                                        ? current.metadata.status.trim()
+                                        : undefined;
+                                const finalStatus = outcomeStatus ?? (subagentRemediated ? "completed" : (existingStatus ?? "completed"));
                                 event.result = {
                                     ...event.result,
                                     output: {
                                         ...structured,
                                         sessionID: childID,
-                                        status: "completed",
+                                        status: finalStatus,
                                         output: finalRevised,
                                     },
-                                    content: `<subagent sessionID="${childID}" state="completed">\n${finalRevised}\n</subagent>`,
+                                    content: `<subagent sessionID="${childID}" state="${finalStatus}">\n${finalRevised}\n</subagent>`,
                                     metadata: {
                                         ...current.metadata,
                                         sessionID: childID,
-                                        status: "completed",
+                                        status: finalStatus,
                                     },
                                 };
                             }
@@ -1842,12 +1948,14 @@ const setup = async (context) => {
             }
             toolRegistrations.push(after);
             toolOutputProtectionReady = true;
+            toolAfterReady = true;
         }
         catch {
             recordGuardianEvent({ kind: "verification-unavailable",
                 rules: ["verification-snapshot-unavailable"] }, directory);
             if (sanitizerOpts) {
                 controller.abort();
+                toolPreflightReady = false;
                 for (const registration of toolRegistrations.splice(0).reverse()) {
                     try {
                         await registration.dispose();
@@ -1862,10 +1970,19 @@ const setup = async (context) => {
                 }
                 throw new Error("[opencode-guardian secrets] V2 execute.after security hook registration failed; POST redaction cannot be enabled safely.");
             }
+            if (!strictPreflight) {
+                toolPreflightReady = false;
+                for (const registration of toolRegistrations.splice(0).reverse()) {
+                    try {
+                        await registration.dispose();
+                    }
+                    catch { }
+                }
+            }
         }
         registrations.push(...toolRegistrations);
     }
-    if (typeof context.shell?.hook === "function") {
+    if (shellHookAvailable) {
         try {
             const shellBefore = await context.shell.hook("create.before", async (event) => {
                 if (controller.signal.aborted)
@@ -1900,6 +2017,7 @@ const setup = async (context) => {
                 throw new Error("V2 shell.create.before hook did not return a valid registration.");
             }
             registrations.push(shellBefore);
+            shellPreflightReady = true;
         }
         catch (error) {
             if (strictPreflight) {
@@ -1913,6 +2031,13 @@ const setup = async (context) => {
                 throw new Error("[opencode-guardian preflight] V2 shell hook registration failed; strict preflight cannot be enabled.", { cause: error });
             }
         }
+    }
+    else if (strictPreflight) {
+        recordGuardianEvent({
+            kind: "verification-unavailable",
+            rules: ["shell-preflight-unavailable"],
+            reasons: [{ rule: "shell-preflight-unavailable", code: "shell-preflight-unavailable" }],
+        }, directory);
     }
     if (sanitizerOpts && typeof context.session.hook !== "function") {
         controller.abort();
@@ -2098,6 +2223,13 @@ const setup = async (context) => {
         // Retry a bounded number of times and keep strict tool hooks registered.
         for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt++) {
             try {
+                if (!activeEvents) {
+                    const next = context.event.subscribe({ signal: controller.signal });
+                    if (!next || typeof next[Symbol.asyncIterator] !== "function") {
+                        throw new Error("V2 event resubscription did not return an async iterable.");
+                    }
+                    activeEvents = next;
+                }
                 for await (const event of activeEvents) {
                     if (controller.signal.aborted)
                         break;
@@ -2143,7 +2275,7 @@ const setup = async (context) => {
                             contracts.delete(deletedSessionID);
                             foregroundHandoffs.delete(deletedSessionID);
                             clearAgentCapability(deletedSessionID);
-                            forgetGuardianProvenance(deletedSessionID);
+                            forgetMeshSession(deletedSessionID);
                             provenanceSessions.delete(deletedSessionID);
                         }
                         continue;
@@ -2153,6 +2285,7 @@ const setup = async (context) => {
                         const failedSessionID = extractEventSessionID();
                         if (failedSessionID) {
                             idleQueue.forget(failedSessionID);
+                            foregroundHandoffs.delete(failedSessionID);
                             backgroundSessions.delete(failedSessionID);
                             sessionBackgroundJobs.delete(failedSessionID);
                             releaseRemediationLeaseForSession(failedSessionID);
@@ -2216,10 +2349,32 @@ const setup = async (context) => {
                             if (jobStatus === "running") {
                                 const key = backgroundJobKey(jobInfo);
                                 const set = sessionBackgroundJobs.get(jobSessionID) ?? new Set();
-                                if (key)
+                                if (key) {
+                                    set.delete(key);
                                     set.add(key);
+                                    while (set.size > 128) {
+                                        const oldestKey = set.values().next().value;
+                                        if (oldestKey === undefined)
+                                            break;
+                                        set.delete(oldestKey);
+                                    }
+                                }
+                                sessionBackgroundJobs.delete(jobSessionID);
                                 sessionBackgroundJobs.set(jobSessionID, set);
+                                while (sessionBackgroundJobs.size > 512) {
+                                    const oldest = sessionBackgroundJobs.keys().next().value;
+                                    if (oldest === undefined)
+                                        break;
+                                    sessionBackgroundJobs.delete(oldest);
+                                }
+                                backgroundSessions.delete(jobSessionID);
                                 backgroundSessions.add(jobSessionID);
+                                while (backgroundSessions.size > 512) {
+                                    const oldest = backgroundSessions.values().next().value;
+                                    if (oldest === undefined)
+                                        break;
+                                    backgroundSessions.delete(oldest);
+                                }
                             }
                             else if (jobStatus === "completed" ||
                                 jobStatus === "error" ||
@@ -2227,6 +2382,8 @@ const setup = async (context) => {
                                 const set = sessionBackgroundJobs.get(jobSessionID);
                                 if (set) {
                                     for (const candidate of [
+                                        backgroundJobKey(jobInfo),
+                                        jobInfo?.jobID,
                                         jobInfo?.id,
                                         jobInfo?.shellID,
                                         jobInfo?.childSessionID,
@@ -2253,8 +2410,22 @@ const setup = async (context) => {
                         continue;
                     }
                     if (eventData.type === "config.updated") {
+                        defaultRuntimeSecrets.refreshEnv();
                         clearAllAgentCapabilities();
-                        runtimeByDirectory.clear();
+                        for (const [runtimeKey, existing] of Array.from(runtimeByDirectory.entries())) {
+                            try {
+                                if (!isDirectoryInGuardianScope(directory, runtimeKey))
+                                    continue;
+                                const nextConfig = resolveEffectiveConfig(loadConfig(runtimeKey), context.options);
+                                configureGuardianTelemetry(runtimeKey, nextConfig.telemetry);
+                                existing.config = nextConfig;
+                                existing.sanitizer = resolveSanitizerOptions(nextConfig);
+                                existing.engine.updateConfig(nextConfig);
+                            }
+                            catch {
+                                // Keep previous engine state intact if reload encounters a transient/invalid config read.
+                            }
+                        }
                         toastNotifiersByDirectory.clear();
                         continue;
                     }
@@ -2270,12 +2441,20 @@ const setup = async (context) => {
                     if (eventLocationDir && !isGuardianOwnerForDirectory(instanceId, directory, eventLocationDir)) {
                         continue;
                     }
-                    foregroundHandoffs.delete(sessionID);
                     idleQueue.enqueue(sessionID, async (idleSignal) => {
-                        foregroundHandoffs.delete(sessionID);
-                        let activeDirectory = eventLocationDir
-                            ? rememberSessionDirectory(sessionID, eventLocationDir)
-                            : await resolveSessionDirectory(sessionID);
+                        let activeDirectory;
+                        let directoryVerified = true;
+                        if (eventLocationDir) {
+                            activeDirectory = rememberSessionDirectory(sessionID, eventLocationDir);
+                        }
+                        else {
+                            const resolvedDir = await resolveSessionDirectoryDetailed(sessionID);
+                            activeDirectory = resolvedDir.directory;
+                            directoryVerified = resolvedDir.verified;
+                        }
+                        if (!directoryVerified) {
+                            return;
+                        }
                         let sessionIsSubagent;
                         let sessionParentID;
                         let sessionAgentName;
@@ -2341,10 +2520,13 @@ const setup = async (context) => {
                                 });
                             }, runtime.engine, verificationStore.snapshots(sessionID), idleSignal, sessionIsSubagent, (sessionIsSubagent ?? true)
                                 ? async () => {
+                                    const cached = getCachedAgentCapability(sessionID);
+                                    if (cached)
+                                        return cached;
                                     const meshProfile = await resolveMeshAgentProfile(sessionID, activeDirectory);
-                                    if (meshProfile && meshProfile.capability !== "unknown") {
+                                    if (meshProfile && meshProfile.capability === "read-only") {
                                         const resolved = {
-                                            capability: meshProfile.capability,
+                                            capability: "read-only",
                                             evidence: {
                                                 agentName: meshProfile.agentName ?? sessionAgentName,
                                                 reasons: [`mesh:${meshProfile.managedBy}`],
@@ -2354,10 +2536,7 @@ const setup = async (context) => {
                                             cacheAgentCapability(sessionID, resolved);
                                         return resolved;
                                     }
-                                    const cached = getCachedAgentCapability(sessionID);
-                                    if (cached)
-                                        return cached;
-                                    let agentName = sessionAgentName;
+                                    let agentName = meshProfile?.agentName ?? sessionAgentName;
                                     if (!agentName) {
                                         try {
                                             const normalized = fetchedNormalizedMessages ??
@@ -2366,11 +2545,28 @@ const setup = async (context) => {
                                         }
                                         catch { }
                                     }
-                                    const p = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
-                                    if (!idleSignal.aborted && p.capability !== "unknown") {
-                                        cacheAgentCapability(sessionID, p);
+                                    const hostProfile = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
+                                    if (hostProfile.capability === "read-only") {
+                                        if (!idleSignal.aborted)
+                                            cacheAgentCapability(sessionID, hostProfile);
+                                        return hostProfile;
                                     }
-                                    return p;
+                                    if (meshProfile && meshProfile.capability === "write-allowed") {
+                                        const resolved = {
+                                            capability: "write-allowed",
+                                            evidence: {
+                                                agentName,
+                                                reasons: [`mesh:${meshProfile.managedBy}`, ...hostProfile.evidence.reasons],
+                                            },
+                                        };
+                                        if (!idleSignal.aborted)
+                                            cacheAgentCapability(sessionID, resolved);
+                                        return resolved;
+                                    }
+                                    if (!idleSignal.aborted && hostProfile.capability !== "unknown") {
+                                        cacheAgentCapability(sessionID, hostProfile);
+                                    }
+                                    return hostProfile;
                                 }
                                 : undefined, toastNotifier);
                         }
@@ -2384,6 +2580,7 @@ const setup = async (context) => {
                 throw new Error("V2 event stream ended before plugin teardown.");
             }
             catch {
+                activeEvents = undefined;
                 if (controller.signal.aborted)
                     return;
                 recordGuardianEvent({ kind: "inspection-error",
@@ -2411,25 +2608,6 @@ const setup = async (context) => {
                 else
                     controller.signal.addEventListener("abort", onAbort, { once: true });
             });
-            if (controller.signal.aborted)
-                return;
-            try {
-                const next = context.event.subscribe({ signal: controller.signal });
-                if (!next || typeof next[Symbol.asyncIterator] !== "function") {
-                    throw new Error("V2 event resubscription did not return an async iterable.");
-                }
-                activeEvents = next;
-            }
-            catch {
-                if (!controller.signal.aborted) {
-                    recordGuardianEvent({ kind: "inspection-error",
-                        rules: ["v2-event-stream-error"],
-                        reasons: [{ rule: "v2-event-stream-error", code: "v2-event-stream-error" }],
-                    }, directory);
-                    // The failure has been recorded without exposing exception data.
-                }
-                return;
-            }
         }
     };
     const unregisterGuardianCapability = registerGuardianCapability(directory);

@@ -1,6 +1,16 @@
 export declare class RuntimeSecretRegistry {
-    private secrets;
+    private envSecrets;
+    private manualSecrets;
+    private cleared;
+    private lastRefreshAt;
+    private static readonly AUTO_REFRESH_INTERVAL_MS;
     constructor();
+    private normalizeSecret;
+    /**
+     * Replaces environment-derived secrets with a fresh scan of `env`, evicting
+     * rotated or removed environment values while preserving manually added secrets.
+     */
+    refreshEnv(env?: Record<string, string | undefined>): number;
     /**
      * Scans an environment object (defaults to process.env) and registers sensitive values.
      */

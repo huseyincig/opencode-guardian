@@ -702,4 +702,63 @@ describe("Default Telemetry Level Semantics", () => {
     const report = await guardianCommandReport("status", dir, "0.0.0");
     assert.match(report.message, /Telemetry mode: all/);
   });
+
+  test("Dalga 3 (G-23): resetGuardianStatistics returns false when telemetry is disabled or off instead of reporting false success", async (t) => {
+    const { resetGuardianStatistics, configureGuardianTelemetry } = await import("../dist/telemetry.js");
+    const { guardianResetReport } = await import("../dist/commands.js");
+    const dir = project(t, { telemetry: { enabled: false, level: "off" } });
+    configureGuardianTelemetry(dir, { enabled: false, level: "off" });
+    assert.equal(resetGuardianStatistics(dir), false, "reset must return false when telemetry is off");
+    const report = guardianResetReport(dir);
+    assert.match(report.message, /Reset failed/i, "reset report must not claim success when telemetry is off");
+  });
+
+  test("Dalga 3 (G-27, G-28): validateConfig rejects unknown rule IDs and fractional maxBytes < 1", async () => {
+    const { resolveEffectiveConfig } = await import("../dist/engine.js");
+    assert.throws(
+      () => resolveEffectiveConfig({}, { rules: { "security/no-secret-typo": "error" } }),
+      /rules\.security\/no-secret-typo/,
+      "unknown rule IDs must be rejected by config validation"
+    );
+    assert.throws(
+      () => resolveEffectiveConfig({}, { telemetry: { maxBytes: 0.5 } }),
+      /telemetry\.maxBytes/,
+      "fractional maxBytes that floors to 0 must be rejected"
+    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-g28-env-"));
+    const prev = process.env.OPENCODE_GUARDIAN_LOG_MAX_BYTES;
+    process.env.OPENCODE_GUARDIAN_LOG_MAX_BYTES = "0.5";
+    try {
+      const settings = resolveTelemetrySettings(dir);
+      assert.ok(settings.maxBytes >= 1, `resolved maxBytes must never floor to 0, got ${settings.maxBytes}`);
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_GUARDIAN_LOG_MAX_BYTES;
+      else process.env.OPENCODE_GUARDIAN_LOG_MAX_BYTES = prev;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Dalga 3 (G-24): telemetry rotation recovers cleanly from a stale rotation lockfile", async (t) => {
+    const { configureGuardianTelemetry } = await import("../dist/telemetry.js");
+    const dir = project(t, { telemetry: { enabled: true, level: "all", maxBytes: 350 } });
+    configureGuardianTelemetry(dir, { enabled: true, level: "all", maxBytes: 350 });
+    const orig = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    const stateDir = path.join(dir, "state");
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = stateDir;
+    t.after(() => {
+      if (orig === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = orig;
+    });
+    const logPath = guardianEventPath(dir);
+    const lockPath = logPath + ".lock";
+    fs.writeFileSync(lockPath, "stale", { mode: 0o600 });
+    const oldTime = new Date(Date.now() - 15_000);
+    fs.utimesSync(lockPath, oldTime, oldTime);
+    for (let i = 0; i < 6; i++) {
+      assert.equal(recordGuardianEvent({ kind: "post-warning", rules: ["discipline/no-evasion"] }, dir), true);
+    }
+    assert.equal(fs.existsSync(lockPath), false, "stale lockfile must be cleaned up after rotation");
+    assert.equal(fs.existsSync(logPath + ".1"), true, "rotation archive must be created cleanly");
+  });
 });

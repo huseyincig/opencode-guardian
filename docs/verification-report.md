@@ -1,35 +1,35 @@
 # Verification and Acceptance Report
 
-This document reports the **v0.17.9 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **25 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**. (OpenCode V1 support ended in `v0.14.0`; historical release notes are preserved in [CHANGELOG.md](../CHANGELOG.md).)
+This document reports the **v0.18.0 automated verification suite and live OpenCode v2.4.1 + Bun 1.4.4 host acceptance**, evaluated on **25 November 2026** with **Node 26.13.1**, **Bun 1.4.4**, and **OpenCode v2.4.1**. (OpenCode V1 support ended in `v0.14.0`; historical release notes are preserved in [CHANGELOG.md](../CHANGELOG.md).)
 
 ---
 
 ## Executive Summary
 
-- **Package Version:** OpenCode Guardian `v0.17.9` (Pure OpenCode V2 `>=2.3.0`)
+- **Package Version:** OpenCode Guardian `v0.18.0` (Pure OpenCode V2 `>=2.3.0`)
 - **Automated Source Suite:** **913 / 913 tests passed** across 14 domain suites (`tests/*.test.mjs`), zero failed, cancelled, or skipped
-- **Sandbox Scenarios:** **18 / 18 isolated end-to-end scenarios passed**
-- **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode `v2.4.1` (`/usr/bin/opencode`) + Bun `1.4.4` + packed `.tgz`
+- **Sandbox Scenarios:** **21 / 21 isolated end-to-end scenarios passed** (including 4-rule and 3-rule single-remediation batching and redundant-handoff fidelity)
+- **Live V2 Host Acceptance:** **10 / 10 checks passed** on installed OpenCode `v2.4.1` (`/usr/bin/opencode`) + Bun `1.4.4` + packed `.tgz`, plus **21 / 21** real-LLM live scenarios across all 14 rules, preflight, secret redaction, and multi-rule batching
 - **Static & Supply-Chain Gates:** Strict TypeScript, Oxlint (`0 warnings, 0 errors` across 65 files), Markdown/SVG link validation, and `npm audit --omit=dev` (`0 vulnerabilities`)
 
-> v0.17.9 resolves GitHub Issue #4 by classifying OpenCode V2 aborted/interrupted tool outcomes (`{ type: "aborted", message: "Tool execution interrupted" }`, `opencode service restart`) as `status: "unknown"` (`outcomeReason: "cancelled"`) rather than unresolved command failures, and ensures attachment-only `type: "user"` prompts always establish a fresh human turn boundary.
+> v0.18.0 delivers comprehensive R1–R5 security, isolation, redaction, snapshot, and lifecycle hardening, provider-agnostic dynamic MCP inspection, lease-token & per-round subagent capability enforcement, remote TUI RPC status/reset resilience, and full 14-rule + combined multi-rule live OpenCode `v2.4.1` verification.
 
 ---
 
-## Automated Source Verification Results — v0.17.9
+## Automated Source Verification Results — v0.18.0
 
 | Verification Suite | Target & Description | Result |
 | :--- | :--- | :---: |
-| **Unit & Regression Suite** | 913 tests across 14 domain suites covering all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), aborted/interrupted tool & `opencode service restart` classification (#4), attachment-only user turn boundary hardening, peer-wake turn scoping & restart-safe persisted remediation budget accounting, crash-free detailed TUI conversation banners (`notifications.transcript: true` via `session.composer.top` RPC, zero `session_inbox` synthetic mutations, trailing-assistant defense-in-depth in `session.context`), multi-location single-owner event arbitration & process-shared `(sessionID, assistantMessageID)` / in-flight deduplication, OpenCode `v2.4.1` execution lifecycle (`session.execution.succeeded`, background subagent & Code Mode tracking, `ses_aut_*` automation isolation, TUI `plugin.updated`/`config.updated` recovery), single-pass `sanitizeToolResultWithMeta`, nanosecond `statusFileCache`, adaptive TUI RPC polling, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), project scope isolation & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, evidence summaries, edit integrity, secret redaction, external low-I/O telemetry, and handoff protocol | **913 / 913 PASS** |
-| **End-to-End Sandbox** | 18 multi-turn failure and recovery scenarios across all rules (`sandbox/comprehensive-test.mjs`) | **18 / 18 PASS** |
+| **Unit & Regression Suite** | 913 tests across 14 domain suites covering all 14 rules, V2 `setup(ctx)` hooks (`experimental.idle` included), provider-agnostic MCP inspection, lease-token & per-round subagent capability checks, credentialed URL & object-key redaction, snapshot overlap & disk hash verification, remote TUI RPC status/reset & `RpcTimeoutError` handling, aborted/interrupted tool & `opencode service restart` classification (#4), attachment-only user turn boundary hardening, peer-wake turn scoping & restart-safe persisted remediation budget accounting, crash-free detailed TUI conversation banners (`notifications.transcript: true` via `session.composer.top` RPC), multi-location single-owner event arbitration, OpenCode `v2.4.1` execution lifecycle, Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), project scope isolation & `allowProjectOverrides: false` security floor, `"critical"` vs `"strict"` preflight modes, `./tui`, `./rpc`, `shell.hook("create.before")`, `StreamLoopWatcher`, edit integrity, and external low-I/O telemetry | **913 / 913 PASS** |
+| **End-to-End Sandbox** | 21 multi-turn failure, combined multi-rule batching, and recovery scenarios across all rules (`sandbox/comprehensive-test.mjs`) | **21 / 21 PASS** |
 | **Smoke Test** | V2 `setup(ctx)` plugin initialization, idle inspection, and expected remediation (`sandbox/smoke-test.mjs`) | **PASS** |
 | **Typecheck** | Standard TypeScript + strict hardening (`noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) | **PASS** |
 | **Lint** | Oxlint (`src` + `tests`, warnings denied; 65 files) | **PASS** |
 | **Documentation & Links** | Markdown navigation, local link resolution, and SVG validator (`scripts/check-docs.mjs`) | **PASS** |
 | **Production Audit** | `npm audit --omit=dev` | **PASS** (0 vulnerabilities) |
 | **Development Audit** | `node scripts/check-dev-audit.mjs` (Full lockfile dev dependency audit) | **PASS** |
-| **Packaging Dry Run** | `npm pack --dry-run` (`v0.17.9` metadata) | **PASS** |
-| **Live OpenCode V2 Acceptance** | Packed `.tgz` in Node `26.13.1` + Bun `1.4.4`, V2.4.1 server/RPC/TUI, and real `/usr/bin/opencode` (`v2.4.1`) (`sandbox/v2-live-acceptance.mjs`) | **10 / 10 PASS** |
+| **Packaging Dry Run** | `npm pack --dry-run` (`v0.18.0` metadata) | **PASS** |
+| **Live OpenCode V2 Acceptance** | Packed `.tgz` in Node `26.13.1` + Bun `1.4.4`, V2.4.1 server/RPC/TUI, credentialed URL redaction, and real `/usr/bin/opencode` (`v2.4.1`) (`sandbox/v2-live-acceptance.mjs`) | **10 / 10 PASS** |
 
 ---
 

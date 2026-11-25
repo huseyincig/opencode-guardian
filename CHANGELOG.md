@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.18.0 — 2026-11-25
+
+### Security & Policy Hardening
+- **Provider-Agnostic MCP Tool Inspection (`src/preflight.ts`, `src/tool-input.ts`, `src/evidence.ts`, `src/rules/*`):**
+  - Removed all hardcoded third-party MCP provider names and fixtures across source code, tests, docs, and distribution artifacts.
+  - Replaced provider-specific lists with generic dynamic `mcp__<provider>__<action>` normalization (`extractToolAction`), preserving full preflight, shell-risk, file-mutation, and evidence inspection coverage for any MCP server.
+- **Global Security Floor & Scope Isolation (`src/engine.ts`, `src/index.ts`, `src/bridge.ts`):**
+  - Hardened `allowProjectOverrides: false` security floors across `enabled`, `preflight.enabled`, `preflight.mode`, `secrets.enabled`, remediation/iteration budgets, and rule severities.
+  - Enforced verified project-local scope isolation across `session.context`, `session.prompt`, `tool.execute.before`, `tool.execute.after`, `shell.create.before`, and RPC handlers; prevented disabled projects from mutating sibling peer mesh state.
+  - Scoped Guardian RPC intervention clearing to owner `"opencode-guardian"` so sibling mesh peers' active interventions are never overwritten.
+- **Multi-Layer Secret Redaction & Preflight Improvements (`src/secrets/patterns.ts`, `src/secrets/sanitizer.ts`, `src/rules/no-secrets.ts`, `src/preflight.ts`, `src/edit-integrity.ts`):**
+  - Extended `CONNECTION_STRING_PASSWORD_REGEX` to cover `http(s)://user:pass@host` and database schemes while excluding `?` and `#` from userinfo classes so normal URLs with ports and `@` in query/fragment parameters remain untouched.
+  - Added object key and `Error` non-standard own-property key sanitization with unconditional collision-safe key suffixing.
+  - Updated `security/no-secrets` `customSensitiveKeys` scanning to scan files `<= 640 KiB` contiguously and cover head `512 KiB` + tail `128 KiB` for larger files, eliminating blind seams.
+  - Hardened preflight `move`/`copy` handling with normalized null-device detection (`isNullDevice` covering `/dev/null`, `//dev/null`, `/dev/./null`, `NUL`) and removed the `>2 MiB` early bypass in `findTruncationPlaceholder`.
+
+### Runtime, Evidence & Subagent Lifecycle
+- **Subagent Handoff, Lease & Background Job Integrity (`src/index.ts`, `src/bridge.ts`, `src/agent-capability.ts`):**
+  - Re-resolved agent write capability on every round inside `finalizeSubagentHandoff` (querying live `context.session.get` first so mid-handoff `session.agent.selected` downgrades stop further remediation rounds cleanly).
+  - Restricted `[TASK OUTCOME]` terminal status propagation to an explicit allowlist (`TERMINAL_SUBAGENT_STATUSES`) using O(N) trailing non-empty line parsing (`lastNonEmptyLine`), eliminating mid-body quote spoofing and quadratic regex backtracking.
+  - Added `leaseToken` ownership validation to `acquireSessionLease` / `renewSessionLease` and acquired `active_remediation` leases before `await sendPrompt` with abort-safe cleanup and budget rollback on mesh `user_interaction` blocks.
+  - Added timestamped TTL pruning (`pruneStaleBackgroundJobs`) and `"__anonymous__"` tracking for keyless background jobs across `experimental.idle` and `experimental.job.updated`.
+  - Kept awaited handoff deadline, interrupt grace, and TUI RPC timeout timers properly ref'd for Node 22.x event-loop compatibility.
+  - Bounded directory caches with soft-64 / hard-128 eviction (`setBoundedDirectoryEntry`).
+- **Verification Snapshot & Task Policy Accuracy (`src/evidence.ts`, `src/task-policy.ts`, `src/task-contract.ts`, `src/engine.ts`, `src/rules/task-completion.ts`, `src/rules/no-unverified-claims.ts`):**
+  - Moved `verificationStore.observeBefore` after `inspectPreflight` so preflight-rejected calls never leave stale entries in `inFlightMutations`.
+  - Added shared `isVerificationSnapshotCurrent` disk hash checks, `inFlightMutations` overlap invalidation, `dest`/`target` path aliases, LRU snapshot eviction tracking (`evictedSnapshotMaps` WeakSet) that only degrades `"success"` records on snapshot-tracked kinds, and `isFailedOutcome` precedence in `evaluateTaskPolicy`.
+  - Tightened `reviewPathMatchesMutated` to allow suffix matching only across absolute/relative boundaries and verified source-only `task/completion-gate` iterative remediation against fresh post-mutation source review evidence.
+- **Telemetry, TUI & Remote RPC Resilience (`src/telemetry.ts`, `src/tui.tsx`, `src/index.ts`):**
+  - Added `activeStat.size > 0` rotation guards and compact event fallback for constrained `maxBytes` logs, plus `config-reload-failed` audit recording on invalid `config.updated` reloads.
+  - Added directory-scoped server RPC `status` and `reset` methods for remote TUI clients, and introduced `RpcTimeoutError` so `/guardian reset` timeouts fail closed without falling back to local state reset.
+
+### Verification & Testing
+- Consolidated test suites into 14 focused domain files (`tests/*.test.mjs`) and expanded automated coverage from **852** to **913 / 913** passing tests (70 suites, 0 failures/skips).
+- Extended `sandbox/comprehensive-test.mjs` from **18 / 18** to **21 / 21** isolated end-to-end scenarios (adding 4-rule and 3-rule single-remediation batching and `task/instruction-fidelity` redundant-handoff scenarios) and extended `sandbox/v2-live-acceptance.mjs` (`10 / 10` PASS) with credentialed URL redaction & non-credential port+`@` query preservation checks.
+- Completed full **21 / 21** real-LLM live verification on OpenCode `v2.4.1` (`opencode serve`, `opencode-go/beam-free` and `opencode-go/hungerg-free`) covering all 14 discipline rules, Preflight, Secret Redaction, zero-false-positive baselines, and 3 combined multi-rule batching/iterative scenarios.
+- Passed all local and CI release gates across Node `22.x`, `24.x`, and `26.x` (strict TypeScript, Oxlint `0 warnings / 0 errors`, docs/SVG checks, production + dev supply-chain audits, and `npm pack --dry-run`).
+
 ## 0.17.9 — 2026-11-25
 
 ### Fixed

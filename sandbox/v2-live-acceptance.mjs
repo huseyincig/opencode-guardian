@@ -216,18 +216,28 @@ try {
   );
   console.log("    ✓ Preflight blocks destructive commands in both tool.execute.before and shell.create.before");
 
-  // Error secret redaction
+  // Error & credentialed URL secret redaction (preserving non-credential port + @ query URLs)
   const secretToken = "sk-proj-abcdef1234567890abcdef1234567890";
   const errEv = {
     tool: "bash", sessionID: "s-live", id: "c2",
     input: { command: "curl" }, status: "error",
-    error: new Error(`Auth Bearer ${secretToken}`),
+    error: new Error(`Auth Bearer ${secretToken} https://admin:DbPass99@db.internal:5432/app`),
   };
   for (const cb of registeredHooks.get("tool.execute.after")) {
     await cb(errEv);
   }
   assert.equal(errEv.error.message.includes(secretToken), false);
-  console.log("    ✓ Error secret redaction verified");
+  assert.equal(errEv.error.message.includes("DbPass99"), false);
+  const safeUrlEv = {
+    tool: "read", sessionID: "s-live", id: "c2b",
+    input: { filePath: "notes.txt" }, status: "completed",
+    result: { output: "http://localhost:3000?email=alice@example.com" },
+  };
+  for (const cb of registeredHooks.get("tool.execute.after")) {
+    await cb(safeUrlEv);
+  }
+  assert.equal(safeUrlEv.result.output, "http://localhost:3000?email=alice@example.com");
+  console.log("    ✓ Error & credentialed URL secret redaction verified (normal port+@ query URLs preserved)");
 
   // Post-turn remediation & RPC intervention active -> clean turn clears
   // OpenCode v2.4.1 emits session.execution.succeeded (not legacy session.idle).
@@ -307,7 +317,7 @@ try {
   fs.mkdirSync(ocWorkspace, { recursive: true });
   fs.writeFileSync(
     path.join(ocWorkspace, "opencode.json"),
-    JSON.stringify({ plugins: [`file://${repoDir}`] }, null, 2)
+    JSON.stringify({ plugin: [repoDir] }, null, 2)
   );
   const ocVer = spawnSync(ocBin, ["--version"], { cwd: ocWorkspace, encoding: "utf8" });
   assert.equal(ocVer.status, 0, `opencode --version failed: ${ocVer.stderr}`);

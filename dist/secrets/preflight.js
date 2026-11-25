@@ -1,26 +1,56 @@
-import { splitShellStages } from '../shell-risk.js';
+import { literalShellScripts, literalWindowsShellScripts, splitShellStages, stripShellWrappersAndPath, } from '../shell-risk.js';
 const HIGH_RISK_COMMAND_PATTERNS = [
     {
         category: 'docker-env',
-        regex: /^\s*(?:sudo\s+)?docker(?:\.exe)?\s+exec\b.*?\s+(?:env|printenv)\b/i,
+        regex: /^docker(?:\.exe)?\s+(?:container\s+)?exec\b.*?\s+(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:env|printenv)\b/i,
         advisory: 'Broad container environment dump detected (docker exec ... env).',
     },
     {
         category: 'printenv',
-        regex: /^(?:\s*sudo\s+)?(?:printenv|env)(?:\s+-[a-zA-Z0-9]+)*\s*$/i,
+        regex: /^(?:printenv|env)(?:\s+(?:(?:-u|--unset|-C|--chdir|-[i0v]+[uC])\s+\S+|-[i0v]*[uC]\S+|--(?:unset|chdir|ignore-signal|default-signal|block-signal)=\S+|--?[a-zA-Z0-9-]*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)|(?:(?:\d*>>?|\d*<&|\d*>&|&>>?)\s*\S+|\d*>&\d+)))*\s*$/i,
         advisory: 'Broad process environment dump detected (env/printenv).',
     },
     {
         category: 'docker-inspect',
-        regex: /^\s*(?:sudo\s+)?docker(?:\.exe)?\s+inspect\b/i,
+        regex: /^docker(?:\.exe)?\s+(?:container\s+)?inspect\b/i,
         advisory: 'Docker inspect command may dump container environment variables.',
     },
     {
         category: 'systemctl-env',
-        regex: /^\s*(?:sudo\s+)?systemctl\s+show\b.*?\b(?:Environment|EnvironmentFiles)\b/i,
+        regex: /^systemctl\s+show\b.*?\b(?:Environment|EnvironmentFiles)\b/i,
         advisory: 'Systemctl service environment dump detected.',
     },
 ];
+function assessCommandPreflightRecursive(command, originalCommand, depth) {
+    const trimmed = command.trim();
+    const stages = splitShellStages(trimmed).flat();
+    const candidates = stages.length > 0 ? stages : [trimmed];
+    for (const stage of candidates) {
+        const stripped = stripShellWrappersAndPath(stage, { stripNegation: true });
+        for (const item of HIGH_RISK_COMMAND_PATTERNS) {
+            if (item.regex.test(stripped)) {
+                return {
+                    isHighRiskEnvDump: true,
+                    command: originalCommand,
+                    category: item.category,
+                    advisory: item.advisory,
+                };
+            }
+        }
+    }
+    if (depth < 4) {
+        const nestedScripts = [
+            ...literalShellScripts(trimmed),
+            ...literalWindowsShellScripts(trimmed),
+        ];
+        for (const script of nestedScripts) {
+            const nested = assessCommandPreflightRecursive(script, originalCommand, depth + 1);
+            if (nested.isHighRiskEnvDump)
+                return nested;
+        }
+    }
+    return { isHighRiskEnvDump: false };
+}
 /**
  * Assesses a shell tool command input for high-risk broad environment dumps.
  */
@@ -29,19 +59,5 @@ export function assessCommandPreflight(command) {
         return { isHighRiskEnvDump: false };
     }
     const trimmed = command.trim();
-    const stages = splitShellStages(trimmed).flat();
-    const candidates = stages.length > 0 ? stages : [trimmed];
-    for (const stage of candidates) {
-        for (const item of HIGH_RISK_COMMAND_PATTERNS) {
-            if (item.regex.test(stage)) {
-                return {
-                    isHighRiskEnvDump: true,
-                    command: trimmed,
-                    category: item.category,
-                    advisory: item.advisory,
-                };
-            }
-        }
-    }
-    return { isHighRiskEnvDump: false };
+    return assessCommandPreflightRecursive(trimmed, trimmed, 0);
 }

@@ -88,8 +88,11 @@ function hasLexicalBoundaries(text, start, length) {
     const after = start + length < text.length ? text[start + length] : "";
     return (!before || !word.test(before)) && (!after || !word.test(after));
 }
-function extractCodeComments(code) {
+function extractCodeComments(code, filePath) {
     const comments = [];
+    const isJsTs = /\.[cm]?[jt]sx?$/i.test(filePath ?? "");
+    const isRust = /\.rs$/i.test(filePath ?? "");
+    const isHashCommentLang = /\.(?:py[wi]?|rb|sh|bash|zsh|ya?ml|toml|pl|r|conf|ini|env)$/i.test(filePath ?? "");
     let i = 0;
     const readUntil = (endToken) => {
         const start = i;
@@ -99,8 +102,130 @@ function extractCodeComments(code) {
     };
     while (i < code.length) {
         const ch = code[i];
+        // Skip JS/TS regex literals so `/'/` or `/https?:\/\//` do not confuse quote/comment scanning.
+        if (isJsTs &&
+            ch === "/" &&
+            code[i + 1] !== "/" &&
+            code[i + 1] !== "*" &&
+            /(?:^|[=(:,!&|?;{[\n]|\breturn|\bcase|\bthrow)\s*$/.test(code.slice(Math.max(0, i - 30), i))) {
+            i++;
+            let inClass = false;
+            while (i < code.length && code[i] !== "\n") {
+                if (code[i] === "\\") {
+                    i += 2;
+                    continue;
+                }
+                if (code[i] === "[")
+                    inClass = true;
+                else if (code[i] === "]")
+                    inClass = false;
+                else if (code[i] === "/" && !inClass) {
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (ch === "'" && isRust && /^'[A-Za-z_][A-Za-z0-9_]*(?!')/.test(code.slice(i))) {
+            i++;
+            continue;
+        }
         if (ch === "'" || ch === '"' || ch === "`") {
             const quote = ch;
+            if (isJsTs && quote === "`") {
+                const skipTemplate = (nesting = 0) => {
+                    i++;
+                    while (i < code.length) {
+                        if (code[i] === "\\") {
+                            i += 2;
+                            continue;
+                        }
+                        if (code[i] === "`") {
+                            i++;
+                            return;
+                        }
+                        if (code[i] === "$" && code[i + 1] === "{") {
+                            i += 2;
+                            let depth = 1;
+                            while (i < code.length && depth > 0) {
+                                const inner = code[i];
+                                if (inner === "{") {
+                                    depth++;
+                                    i++;
+                                }
+                                else if (inner === "}") {
+                                    depth--;
+                                    i++;
+                                }
+                                else if (inner === "'" || inner === '"') {
+                                    const iq = inner;
+                                    i++;
+                                    while (i < code.length) {
+                                        if (code[i] === "\\") {
+                                            i += 2;
+                                            continue;
+                                        }
+                                        if (code[i] === iq) {
+                                            i++;
+                                            break;
+                                        }
+                                        i++;
+                                    }
+                                }
+                                else if (inner === "/" && code[i + 1] === "/") {
+                                    const cStart = i;
+                                    i += 2;
+                                    while (i < code.length && code[i] !== "\n")
+                                        i++;
+                                    comments.push(code.slice(cStart, i));
+                                }
+                                else if (inner === "/" && code[i + 1] === "*") {
+                                    const cStart = i;
+                                    i += 2;
+                                    while (i < code.length && !(code[i] === "*" && code[i + 1] === "/"))
+                                        i++;
+                                    if (i < code.length)
+                                        i += 2;
+                                    comments.push(code.slice(cStart, Math.min(i, code.length)));
+                                }
+                                else if (inner === "/" &&
+                                    code[i + 1] !== "/" &&
+                                    code[i + 1] !== "*" &&
+                                    /(?:^|[=(:,!&|?;{[\n]|\breturn|\bcase|\bthrow)\s*$/.test(code.slice(Math.max(0, i - 30), i))) {
+                                    i++;
+                                    let inClass = false;
+                                    while (i < code.length && code[i] !== "\n") {
+                                        if (code[i] === "\\") {
+                                            i += 2;
+                                            continue;
+                                        }
+                                        if (code[i] === "[")
+                                            inClass = true;
+                                        else if (code[i] === "]")
+                                            inClass = false;
+                                        else if (code[i] === "/" && !inClass) {
+                                            i++;
+                                            break;
+                                        }
+                                        i++;
+                                    }
+                                }
+                                else if (inner === "`" && nesting < 16) {
+                                    skipTemplate(nesting + 1);
+                                }
+                                else {
+                                    i++;
+                                }
+                            }
+                            continue;
+                        }
+                        i++;
+                    }
+                };
+                skipTemplate();
+                continue;
+            }
             const triple = quote !== "`" && code[i + 1] === quote && code[i + 2] === quote;
             i += triple ? 3 : 1;
             while (i < code.length) {
@@ -128,19 +253,24 @@ function extractCodeComments(code) {
             comments.push(`<!--${readUntil("-->")}`);
             continue;
         }
-        if (code.startsWith("/*", i)) {
+        if (!isHashCommentLang && code.startsWith("/*", i)) {
             i += 2;
             comments.push(`/*${readUntil("*/")}`);
             continue;
         }
-        if (code.startsWith("//", i) || ch === "#") {
+        if ((!isHashCommentLang && code.startsWith("//", i)) ||
+            (ch === "#" &&
+                !(isJsTs && /^#[A-Za-z_$][\w$]*/.test(code.slice(i))) &&
+                !(isRust && (code[i + 1] === "[" || (code[i + 1] === "!" && code[i + 2] === "["))))) {
             const start = i;
             const end = code.indexOf("\n", i);
             i = end === -1 ? code.length : end;
             comments.push(code.slice(start, i));
             continue;
         }
-        if (code.startsWith("--", i) &&
+        const isCStyleDecrementLang = isJsTs || /\.(?:c|cc|cpp|cxx|h|hpp|java|kt|cs|go|rs|swift|php)$/i.test(filePath ?? "");
+        if (!isCStyleDecrementLang &&
+            code.startsWith("--", i) &&
             (i === 0 || /\s/.test(code[i - 1] ?? ""))) {
             const start = i;
             const end = code.indexOf("\n", i);
@@ -258,8 +388,17 @@ export const noShortcutsRule = {
                         const lineEndRaw = text.indexOf("\n", idx);
                         const lineEnd = lineEndRaw < 0 ? text.length : lineEndRaw;
                         const matchedLine = text.slice(lineStart, lineEnd).trim();
+                        const sentLeft = Math.max(text.lastIndexOf(".", idx - 1), text.lastIndexOf("!", idx - 1), text.lastIndexOf("?", idx - 1), text.lastIndexOf("\n", idx - 1));
+                        const sentRightCandidates = [
+                            text.indexOf(".", idx + pattern.length),
+                            text.indexOf("!", idx + pattern.length),
+                            text.indexOf("?", idx + pattern.length),
+                            text.indexOf("\n", idx + pattern.length),
+                        ].filter((pos) => pos >= 0);
+                        const sentRight = sentRightCandidates.length > 0 ? Math.min(...sentRightCandidates) : text.length;
+                        const matchedSentence = text.slice(sentLeft + 1, sentRight + 1).trim();
                         if (lowerPattern === "temporary" &&
-                            /\b(?:since\s+removed|already\s+removed|was\s+removed|removed|cleaned\s+up|deleted|reverted)\b|(?<!\p{L})(?:kaldırıldı|silindi|temizlendi|geri\s+alındı)(?!\p{L})/iu.test(matchedLine)) {
+                            /\b(?:since\s+removed|already\s+removed|was\s+removed|removed|cleaned\s+up|deleted|reverted)\b|(?<!\p{L})(?:kaldırıldı|silindi|temizlendi|geri\s+alındı)(?!\p{L})/iu.test(matchedSentence)) {
                             searchFrom = idx + 1;
                             continue;
                         }
@@ -320,7 +459,7 @@ export const noShortcutsRule = {
                 continue;
             for (const part of msg.parts) {
                 if (part.type === "text" && part.text) {
-                    checkText(sanitizeProseForInspection(part.text), "assistant response");
+                    checkText(sanitizeProseForInspection(part.text, { preserveParagraphs: true }), "assistant response");
                 }
                 if (part.type === "tool" && part.state?.input) {
                     const input = part.state.input;
@@ -339,19 +478,22 @@ export const noShortcutsRule = {
                         ["new_string", "file edit comments"],
                         ["newString", "file edit comments"],
                         ["new_str", "file edit comments"],
+                        ["appendContent", "file edit comments"],
+                        ["prependContent", "file edit comments"],
                         ["ReplacementContent", "file edit comments"],
                     ]) {
                         if (typeof input[key] === "string") {
-                            checkText(extractCodeComments(input[key]), label, true, targetFile);
+                            checkText(extractCodeComments(input[key], targetFile), label, true, targetFile);
                         }
                     }
                     for (const edit of extractStructuredEditTexts(input, targetFile)) {
-                        checkText(extractCodeComments(edit.text), "structured file edit comments", true, edit.filePath);
+                        checkText(extractCodeComments(edit.text, edit.filePath), "structured file edit comments", true, edit.filePath);
                     }
                     for (const section of splitFilePatches(patchRaw)) {
                         const patchText = extractAddedPatchLines(section.patch);
+                        const sectionFile = section.filePath ?? targetFile;
                         if (patchText) {
-                            checkText(extractCodeComments(patchText), "patch added comments", true, section.filePath ?? targetFile);
+                            checkText(extractCodeComments(patchText, sectionFile), "patch added comments", true, sectionFile);
                         }
                     }
                     const shellMutation = extractLikelyShellMutation(input);

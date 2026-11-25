@@ -61,6 +61,8 @@ export const FILE_WRITE_EDIT_KEYS = [
     "new_string",
     "newString",
     "new_str",
+    "appendContent",
+    "prependContent",
     "ReplacementContent",
 ];
 export const FILE_WRITE_ALL_KEYS = [
@@ -175,6 +177,41 @@ export function extractToolCommand(input) {
                     ].join(" ")
                     : "";
 }
+/** Blank characters inside single/double quotes while preserving unquoted operators. */
+function stripShellQuotedLiterals(command) {
+    let out = "";
+    let quote = null;
+    for (let i = 0; i < command.length; i++) {
+        const ch = command[i];
+        if (ch === "\\" && quote !== "'") {
+            if (quote) {
+                out += "  ";
+                i++;
+            }
+            else {
+                out += ch + (command[++i] ?? "");
+            }
+            continue;
+        }
+        if (quote) {
+            if (ch === quote) {
+                quote = null;
+                out += ch;
+            }
+            else {
+                out += ch === "\n" ? "\n" : " ";
+            }
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            quote = ch;
+            out += ch;
+            continue;
+        }
+        out += ch;
+    }
+    return out;
+}
 /**
  * Returns shell source only when the command appears to mutate file contents.
  * This covers common heredoc/redirection and in-place scripting paths without
@@ -184,11 +221,12 @@ export function extractLikelyShellMutation(input) {
     const command = extractToolCommand(input);
     if (!command)
         return "";
-    const mutatesFile = /(?:^|[;&|]\s*|\n)\s*(?:cat|printf|echo)\b[\s\S]*?(?<!\d)>{1,2}\s*(?!&)(?!\/dev\/null\b)\S+/im.test(command) ||
-        /\btee(?:\s+-a)?\s+(?!\/dev\/null\b)\S+/i.test(command) ||
-        /\bsed\b[^\n;]*\s-i(?:\s|['"]|$)/i.test(command) ||
-        /\bperl\b[^\n;]*\s-(?:pi|ip)\b/i.test(command) ||
-        /\b(?:python(?:3)?|node)\b[\s\S]*(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|open\s*\([^)]*,\s*["'][wax])/i.test(command);
+    const unquoted = stripShellQuotedLiterals(command);
+    const mutatesFile = /(?:^|[;&|]\s*|\n)\s*(?:cat|printf|echo)\b[\s\S]*?(?<!\d)>{1,2}\s*(?!&)(?!\/dev\/null\b)\S+/im.test(unquoted) ||
+        /(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?tee(?:\s+-a)?\s+(?!\/dev\/null\b)\S+/im.test(unquoted) ||
+        /(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?sed\b[^\n;]*\s-i(?:\s|['"]|$)/im.test(unquoted) ||
+        /(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?perl\b[^\n;]*\s-(?:pi|ip)\b/im.test(unquoted) ||
+        /(?:^|[;&|]\s*|\n)\s*(?:sudo\s+)?(?:(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:python(?:3)?\b[^\n;&|]*\s-[a-zA-Z]*c\b|node\b[^\n;&|]*\s(?:-[a-zA-Z]*[ep]|--eval|--print)\b))[\s\S]*(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|open\s*\([^)]*,\s*["'][wax])/i.test(command);
     return mutatesFile ? command : "";
 }
 const STRUCTURED_EDIT_TEXT_KEYS = [
@@ -203,6 +241,8 @@ const STRUCTURED_EDIT_TEXT_KEYS = [
     "new_string",
     "newString",
     "new_str",
+    "appendContent",
+    "prependContent",
 ];
 /**
  * Normalizes replacement text embedded in structured edit arrays and reports

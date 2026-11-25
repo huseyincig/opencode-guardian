@@ -155,8 +155,13 @@ export const noUnverifiedClaimsRule: GuardRule = {
     const findings: RuleFinding[] = [];
     const contradictions: RuleFinding[] = [];
     const strict = context.ruleConfig.blockUnverified === true;
-    const prohibited =
-      extractTaskContract(context.currentTurn, context.sessionID)?.prohibitedVerifications ?? [];
+    const taskContract = extractTaskContract(context.currentTurn, context.sessionID);
+    const prohibited = taskContract?.prohibitedVerifications ?? [];
+    const requiredVerifications = taskContract?.requiredVerifications ?? [];
+    const codeVerifProhibited =
+      prohibited.some((k) => k === "test" || k === "build" || k === "typecheck" || k === "lint") &&
+      requiredVerifications.length === 0;
+    const latestCodeVerification = lastRelevantVerification(context.evidence, context.directory);
 
     for (const message of context.currentTurn) {
       if (message.info.role !== "assistant") continue;
@@ -199,10 +204,16 @@ export const noUnverifiedClaimsRule: GuardRule = {
                 matchedFinding = true;
                 break;
               }
-              // When the user explicitly prohibited verification (e.g. "Do NOT run `npm run check`"),
-              // do not warn on generic fix statements ("bug is fixed") for lacking verification evidence.
-              // Explicit pass claims ("all tests passed") and contradictions against failed runs are still flagged.
-              if (claim.mode === "verification" && !evidence && prohibited.length > 0) {
+              // When the user explicitly prohibited code verification (e.g. "Do NOT run `npm run check`")
+              // and no code verification was requested or failed, do not warn on generic fix statements
+              // ("bug is fixed") for lacking verification evidence. Explicit pass claims ("all tests passed")
+              // and failed verification runs are still flagged.
+              if (
+                claim.mode === "verification" &&
+                !evidence &&
+                codeVerifProhibited &&
+                latestCodeVerification?.status !== "failure"
+              ) {
                 matchedFinding = true;
                 break;
               }

@@ -57,10 +57,36 @@ export const DEFAULT_PATTERNS = [
     "separate bug from",
     "separate concern from",
 ];
+const NON_PATH_TOKENS = new Set([
+    "e.g", "i.e", "node.js", "next.js", "nuxt.js", "vue.js", "react.js", "express.js",
+    "nest.js", "three.js", "chart.js", "d3.js", "bun.sh", "deno.land",
+    "process.env", "console.log", "console.error", "console.warn", "object.keys",
+    "object.entries", "array.from", "promise.all", "json.parse", "json.stringify",
+    "math.max", "math.min", "window.location", "document.body",
+]);
+const KNOWN_FILE_EXTENSIONS = new Set([
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "rs",
+    "java", "kt", "kts", "cs", "cpp", "cc", "cxx", "c", "h", "hpp", "rb", "php",
+    "swift", "dart", "scala", "sh", "bash", "zsh", "ps1", "bat", "cmd",
+    "json", "jsonc", "yaml", "yml", "toml", "xml", "html", "htm", "css", "scss",
+    "sass", "less", "md", "mdx", "txt", "sql", "graphql", "gql", "proto", "tf",
+    "hcl", "dockerfile", "lock", "cfg", "ini", "conf", "env", "gradle", "csproj",
+    "vue", "svelte", "astro",
+]);
 function claimPaths(text) {
     const tokens = text.slice(0, 64_000).match(/[a-zA-Z0-9_@./-]+/g) ?? [];
-    return [...new Set(tokens.map((token) => token.replace(/\.+$/, "")).filter((token) => /\.[a-zA-Z][a-zA-Z0-9]{0,12}$/.test(token))
-            .map((file) => file.replace(/^\.\//, "")))].slice(0, 20);
+    return [...new Set(tokens
+            .map((token) => token.replace(/\.+$/, "").replace(/^\.\//, ""))
+            .filter((token) => {
+            if (!token || NON_PATH_TOKENS.has(token.toLowerCase()))
+                return false;
+            const extMatch = /\.([a-zA-Z][a-zA-Z0-9]{0,12})$/.exec(token);
+            if (!extMatch?.[1])
+                return false;
+            if (token.includes("/"))
+                return true;
+            return KNOWN_FILE_EXTENSIONS.has(extMatch[1].toLowerCase());
+        }))].slice(0, 20);
 }
 function baselineCovers(record, path) {
     if (record.kind !== "baseline" || record.status !== "success")
@@ -94,10 +120,20 @@ function canBeSupportedByBaseline(pattern) {
         lower.includes("not something"));
 }
 function isNegatedUnrelatedPhrase(text, matchIndex, pattern) {
-    if (!pattern.toLowerCase().startsWith("unrelated"))
+    const lower = pattern.toLowerCase();
+    const negatable = lower.startsWith("unrelated") ||
+        lower.startsWith("pre-existing") ||
+        lower.startsWith("preexisting") ||
+        lower.startsWith("already ") ||
+        lower.startsWith("broken on main") ||
+        lower.startsWith("outside the scope") ||
+        lower.startsWith("beyond the scope") ||
+        lower.startsWith("out of scope") ||
+        lower.startsWith("separate ");
+    if (!negatable)
         return false;
-    const prefix = text.slice(Math.max(0, matchIndex - 12), matchIndex);
-    return /(?:\bnot|n't)\s+$/i.test(prefix);
+    const prefix = text.slice(Math.max(0, matchIndex - 24), matchIndex);
+    return /(?:\bnot|n't|never|hardly)\s+(?:a\s+|an\s+|the\s+|just\s+|merely\s+)?$/i.test(prefix);
 }
 function extractSnippet(text, matchIndex, matchLen) {
     const maxPerSide = 100;

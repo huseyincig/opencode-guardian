@@ -7,6 +7,15 @@
  * inside command substitutions must not become independently executed stages.
  */
 export declare function splitShellStages(command: string): string[][];
+/**
+ * Strip common transparent process launchers, subshell parens, env assignments,
+ * and leading absolute binary paths on the command token (never stripping
+ * `command -v`/`-V` or bare `env`).
+ */
+export declare function stripShellWrappersAndPath(stage: string, options?: {
+    stripFlock?: boolean;
+    stripNegation?: boolean;
+}): string;
 export declare function shellCommandVariants(command: string): string[];
 /** Only active $(...) expressions; text inside single quotes is inert. */
 export declare function activeCommandSubstitutions(command: string): string[];
@@ -24,7 +33,7 @@ export declare function hasFindDeletion(command: string): boolean;
  * Decoding into a shell conceals the executed script. This is a warning
  * signal only: it does not prove that the decoded payload is destructive.
  */
-export declare function isOpaqueShellExecution(command: string): boolean;
+export declare function isOpaqueShellExecution(command: string, depth?: number): boolean;
 /** An unresolved command substitution in executable position is opaque.
  * The strict preflight can reject it without treating ordinary echo output
  * or quoted documentation as a destructive action. */

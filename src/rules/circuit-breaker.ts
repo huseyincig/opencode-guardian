@@ -7,6 +7,7 @@ import type {
 } from "../types.js";
 import { collectTurnEvidence } from "../evidence.js";
 import { detectDegenerativeLoop } from "../degeneration.js";
+import { splitShellStages } from "../shell-risk.js";
 
 function isUserCancellation(record: EvidenceRecord): boolean {
   const reason = "outcomeReason" in record ? record.outcomeReason : undefined;
@@ -77,6 +78,19 @@ function isTrivialProbeCommand(record: EvidenceRecord): boolean {
   // Single-command or subcommand --version / --help probes (e.g. `node --version`, `npm test --help`, `pytest --version 2>&1`)
   return /^(?:[a-z0-9_./-]+)(?:\s+(?:run|-m)?\s*[a-z0-9_.:-]+){0,2}\s+(?:--version|-V|--help|-h)\s*$/i.test(cleaned) ||
     /^(?:[a-z0-9_./-]+)\s+-v\s*$/i.test(cleaned);
+}
+
+function isZeroMatchReadOnlySearch(record: EvidenceRecord): boolean {
+  if (record.kind !== "generic" || record.exitCode !== 1) return false;
+  const cmd = (record.command ?? "").trim();
+  if (!cmd) return false;
+  const pipelines = splitShellStages(cmd);
+  if (pipelines.length !== 1 || (pipelines[0]?.length ?? 0) !== 1) return false;
+  if (!/^(?:(?:sudo\s+)?(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:rg|grep|egrep|fgrep|git\s+grep))(?:\s|$)/i.test(cmd)) {
+    return false;
+  }
+  const errOut = `${record.error ?? ""}\n${record.output ?? ""}`;
+  return !/(?:no such file or directory|permission denied|invalid option|unrecognized option|command not found|fatal:|error:)/i.test(errOut);
 }
 
 export const circuitBreakerRule: GuardRule = {
@@ -154,6 +168,7 @@ export const circuitBreakerRule: GuardRule = {
       }
 
       if (record.status !== "failure" || !record.errorFingerprint) continue;
+      if (isZeroMatchReadOnlySearch(record)) continue;
 
       const key = `${family}::${record.errorFingerprint}`;
       const current = streaks.get(key);

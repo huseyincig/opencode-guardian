@@ -581,7 +581,7 @@ function disposeRemediationLeaseEntry(entry: {
 function setRemediationLeaseForSession(
   sessionID: string,
   release: () => void,
-  options?: { instanceId?: number; ttlMs?: number; leaseToken?: string }
+  options?: { instanceId?: number; ttlMs?: number; leaseToken?: string; maxDurationMs?: number }
 ): void {
   const existing = activeRemediationLeases.get(sessionID);
   if (existing && existing.release !== release) {
@@ -589,10 +589,11 @@ function setRemediationLeaseForSession(
     disposeRemediationLeaseEntry(existing);
   }
   const ttlMs = options?.ttlMs ?? 45_000;
+  const maxDurationMs = options?.maxDurationMs ?? MAX_IDLE_LEASE_DURATION_MS;
   const leaseToken = options?.leaseToken;
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
-    if (Date.now() - startedAt >= MAX_IDLE_LEASE_DURATION_MS) {
+    if (Date.now() - startedAt >= maxDurationMs) {
       releaseRemediationLeaseForSession(sessionID, options?.instanceId, leaseToken);
       return;
     }
@@ -1290,20 +1291,20 @@ async function handleSessionIdle(
   resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined,
   toastNotifier?: GuardianToastNotifier | undefined,
   ownerInstanceId?: number | undefined
-): Promise<void> {
+): Promise<boolean> {
   let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   let acquiredLeaseToken: string | undefined;
   try {
-    if (signal?.aborted) return;
+    if (signal?.aborted) return false;
     if (getBlockingSessionLease(sessionID, "active_remediation", "opencode-guardian")) {
-      return;
+      return false;
     }
     const messages = await fetchMessages();
-    if (signal?.aborted) return;
-    if (hasUnfinishedBackgroundTool(messages)) return;
+    if (signal?.aborted) return false;
+    if (hasUnfinishedBackgroundTool(messages)) return false;
     const lastAssistantID = messages.findLast((m) => m.info.role === "assistant")?.info.id;
     if (lastAssistantID && wasMessageInspectedInProcess(sessionID, lastAssistantID)) {
-      return;
+      return false;
     }
     stage = "engine-inspect";
     // Unknown topology is not permission to treat a session as root. Fail safe
@@ -1320,7 +1321,7 @@ async function handleSessionIdle(
         };
       }
     }
-    if (signal?.aborted) return;
+    if (signal?.aborted) return false;
     const agentCapability = resolvedCapability?.capability ?? (effectiveIsSubagent ? "unknown" : undefined);
     const result = await engine.inspect(
       sessionID,
@@ -1329,7 +1330,7 @@ async function handleSessionIdle(
       snapshots,
       { isSubagent: effectiveIsSubagent, ...(agentCapability ? { agentCapability } : {}) }
     );
-    if (signal?.aborted) { result.rollback?.(); return; }
+    if (signal?.aborted) { result.rollback?.(); return false; }
     const rollbackProcessInspect =
       lastAssistantID && result.results.length > 0
         ? recordMessageInspectedInProcess(sessionID, lastAssistantID, directory)
@@ -1356,7 +1357,7 @@ async function handleSessionIdle(
           });
         }
         releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
-        return;
+        return result.results.length > 0;
       }
       stage = "prompt-send";
       recordMeshIntervention({
@@ -1389,12 +1390,12 @@ async function handleSessionIdle(
           result.rollback?.();
           rollbackProcessInspect?.();
           clearMeshIntervention(sessionID, "opencode-guardian");
-          return;
+          return false;
         }
         await sendPrompt(result.combinedRemediationPrompt);
         if (signal?.aborted) {
           releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
-          return;
+          return false;
         }
         recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
         toastNotifier?.notify({
@@ -1413,14 +1414,12 @@ async function handleSessionIdle(
     } else if (result.results.length > 0) {
       releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
     }
+    return result.results.length > 0;
   } catch {
     if (acquiredLeaseToken !== undefined) {
       releaseRemediationLeaseForSession(sessionID, ownerInstanceId, acquiredLeaseToken);
     }
-    if (signal?.aborted) return;
-    if (acquiredLeaseToken === undefined) {
-      releaseRemediationLeaseForSession(sessionID, ownerInstanceId);
-    }
+    if (signal?.aborted) return false;
     const errorCode =
       stage === "message-fetch"
         ? "message-fetch-failed"
@@ -1433,6 +1432,7 @@ async function handleSessionIdle(
       rules: [errorCode],
       reasons: [{ rule: errorCode, code: errorCode }],
     }, directory);
+    return false;
     // Error objects may contain private paths and disrupt the interactive TUI.
     // The redacted inspection-error event above is the only diagnostic.
   }
@@ -1609,7 +1609,7 @@ interface GuardianProcessRegistry {
   nextInstanceId: number;
   nextIdleSlotToken?: number;
   activeInstances: Map<number, GuardianInstanceEntry>;
-  inflightIdle: Map<string, { instanceId: number; startedAt: number; token: number }>;
+  inflightIdle: Map<string, { instanceId: number; startedAt: number; token: number; signal?: AbortSignal }>;
   inspectedMessages: Map<string, { messageID: string; canonicalDir: string }>;
 }
 
@@ -1718,16 +1718,20 @@ function isGuardianOwnerForDirectory(
   return scopeWinner === -1 || instanceId === scopeWinner;
 }
 
-function acquireProcessIdleSlot(sessionID: string, instanceId: number): (() => void) | undefined {
+function acquireProcessIdleSlot(
+  sessionID: string,
+  instanceId: number,
+  signal?: AbortSignal
+): (() => void) | undefined {
   const reg = getGuardianProcessRegistry();
   const now = Date.now();
   const existing = reg.inflightIdle.get(sessionID);
-  if (existing && existing.instanceId !== instanceId && now - existing.startedAt < INFLIGHT_IDLE_TTL_MS) {
+  if (existing && !existing.signal?.aborted && now - existing.startedAt < INFLIGHT_IDLE_TTL_MS) {
     return undefined;
   }
   const token = (reg.nextIdleSlotToken = (reg.nextIdleSlotToken ?? 0) + 1);
   reg.inflightIdle.delete(sessionID);
-  reg.inflightIdle.set(sessionID, { instanceId, startedAt: now, token });
+  reg.inflightIdle.set(sessionID, { instanceId, startedAt: now, token, ...(signal ? { signal } : {}) });
   while (reg.inflightIdle.size > MAX_TRACKED_PROCESS_SESSIONS) {
     const oldest = reg.inflightIdle.keys().next().value;
     if (oldest === undefined) break;
@@ -2043,17 +2047,31 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     interventionSnapshots.delete(sessionID);
   };
   const toastNotifiersByDirectory = new Map<string, GuardianToastNotifier>();
-  const preInspectionLeaseTokens = new Map<string, string>();
-  const releasePreInspectionLease = (sid: string): void => {
-    const token = preInspectionLeaseTokens.get(sid);
-    if (!token) return;
-    preInspectionLeaseTokens.delete(sid);
-    releaseRemediationLeaseForSession(sid, instanceId, token);
+  const preInspectionLeases = new Map<string, { leaseToken: string; holders: Set<symbol> }>();
+  const releasePreInspectionLease = (sid: string, holder?: symbol): void => {
+    const entry = preInspectionLeases.get(sid);
+    if (!entry) return;
+    if (holder !== undefined) {
+      entry.holders.delete(holder);
+      if (entry.holders.size > 0) return;
+    }
+    preInspectionLeases.delete(sid);
+    releaseRemediationLeaseForSession(sid, instanceId, entry.leaseToken);
   };
-  const acquirePreInspectionLease = (sid: string): void => {
-    if (controller.signal.aborted) return;
-    if (activeRemediationLeases.has(sid)) return;
-    if (getBlockingSessionLease(sid, "active_remediation", "opencode-guardian")) return;
+  const acquirePreInspectionLease = (sid: string): symbol | undefined => {
+    if (controller.signal.aborted) return undefined;
+    const existingPre = preInspectionLeases.get(sid);
+    if (existingPre) {
+      if (activeRemediationLeases.get(sid)?.leaseToken === existingPre.leaseToken) {
+        const holder = Symbol("guardian-pre-lease");
+        existingPre.holders.add(holder);
+        return holder;
+      }
+      // Underlying mesh lease was already released or replaced; drop zombie entry.
+      preInspectionLeases.delete(sid);
+    }
+    if (activeRemediationLeases.has(sid)) return undefined;
+    if (getBlockingSessionLease(sid, "active_remediation", "opencode-guardian")) return undefined;
     const rel = acquireSessionLease({
       sessionID: sid,
       owner: "opencode-guardian",
@@ -2064,20 +2082,25 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     setRemediationLeaseForSession(sid, rel, {
       instanceId,
       ttlMs: 10_000,
+      maxDurationMs: 30_000,
       leaseToken: rel.leaseToken,
     });
-    preInspectionLeaseTokens.delete(sid);
-    preInspectionLeaseTokens.set(sid, rel.leaseToken);
-    while (preInspectionLeaseTokens.size > 512) {
-      const oldest = preInspectionLeaseTokens.keys().next().value;
+    const holder = Symbol("guardian-pre-lease");
+    preInspectionLeases.delete(sid);
+    preInspectionLeases.set(sid, { leaseToken: rel.leaseToken, holders: new Set([holder]) });
+    while (preInspectionLeases.size > 512) {
+      const oldest = preInspectionLeases.keys().next().value;
       if (oldest === undefined) break;
       releasePreInspectionLease(oldest);
     }
+    return holder;
   };
   const idleQueue = createIdleQueue(controller.signal, () => {
     recordGuardianEvent({ kind: "inspection-error", rules: ["engine-inspection-failed"] }, directory);
   });
   const preIdleControllers = new Map<string, AbortController>();
+  const recentPreIdleCompletedAt = new Map<string, number>();
+  const pendingPromptMessageIDs = new Map<string, string>();
   const forgetQueuedIdle = (sid: string): void => {
     idleQueue.forget(sid);
     const activePreIdle = preIdleControllers.get(sid);
@@ -2085,31 +2108,39 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       preIdleControllers.delete(sid);
       activePreIdle.abort();
     }
+    recentPreIdleCompletedAt.delete(sid);
+    pendingPromptMessageIDs.delete(sid);
     releasePreInspectionLease(sid);
   };
-  const tryAcquirePreInspectionLease = (sid: string, eventLocationDir?: string): void => {
-    const candidateDir = eventLocationDir ?? sessionDirectories.get(sid);
-    const canPreLease =
-      candidateDir !== undefined
-        ? isDirectoryInGuardianScope(directory, candidateDir) &&
-          runtimeForDirectory(candidateDir).config.enabled !== false
-        : !projectLocalInstall && runtimeForDirectory(directory).config.enabled !== false;
-    if (canPreLease) {
-      acquirePreInspectionLease(sid);
+  const tryAcquirePreInspectionLease = (sid: string, eventLocationDir?: string): symbol | undefined => {
+    try {
+      const candidateDir = eventLocationDir ?? sessionDirectories.get(sid);
+      const canPreLease =
+        candidateDir !== undefined
+          ? isGuardianOwnerForDirectory(instanceId, directory, candidateDir) &&
+            runtimeForDirectory(candidateDir).config.enabled !== false
+          : !projectLocalInstall && runtimeForDirectory(directory).config.enabled !== false;
+      if (canPreLease) {
+        return acquirePreInspectionLease(sid);
+      }
+    } catch {
+      // Invalid config in one project must never crash eventLoop or experimental.idle.
     }
+    return undefined;
   };
   const runV2SessionIdleInspection = async (
     sessionID: string,
     eventLocationDir: string | undefined,
-    idleSignal: AbortSignal
-  ): Promise<void> => {
+    idleSignal: AbortSignal,
+    ownedPreLeaseHolder?: symbol
+  ): Promise<boolean> => {
     try {
       if (
         idleSignal.aborted ||
         typeof context.session.context !== "function" ||
         typeof context.session.synthetic !== "function"
       ) {
-        return;
+        return false;
       }
       let activeDirectory: string;
       let directoryVerified = true;
@@ -2121,7 +2152,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         directoryVerified = resolvedDir.verified;
       }
       if (!directoryVerified || idleSignal.aborted) {
-        return;
+        return false;
       }
       let sessionIsSubagent: boolean | undefined;
       let sessionParentID: string | undefined;
@@ -2152,37 +2183,44 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       }
 
       if (!isGuardianOwnerForDirectory(instanceId, directory, activeDirectory)) {
-        return;
+        return false;
       }
 
       if (sessionParentID && sessionIsSubagent !== false && hasForegroundHandoff(foregroundHandoffs, sessionParentID)) {
-        return;
+        return false;
       }
 
       const runtime = runtimeForDirectory(activeDirectory);
-      if (runtime.config.enabled === false || idleSignal.aborted) return;
+      if (runtime.config.enabled === false || idleSignal.aborted) return false;
 
       pruneStaleBackgroundJobs(sessionID);
       if (backgroundSessions.has(sessionID)) {
-        return;
+        return false;
       }
 
-      const releaseProcessIdleSlot = acquireProcessIdleSlot(sessionID, instanceId);
+      const releaseProcessIdleSlot = acquireProcessIdleSlot(sessionID, instanceId, idleSignal);
       if (!releaseProcessIdleSlot) {
-        return;
+        return false;
       }
 
       let fetchedNormalizedMessages: SessionMessage[] | undefined;
       try {
-        await handleSessionIdle(
+        return await handleSessionIdle(
           sessionID,
           activeDirectory,
           async () => {
             const messages = await context.session.context({ sessionID });
             const normalized = normalizeV2Messages(messages, sessionID);
+            const expectedPromptMessageID = pendingPromptMessageIDs.get(sessionID);
+            if (expectedPromptMessageID !== undefined) {
+              pendingPromptMessageIDs.delete(sessionID);
+              if (!normalized.some((msg) => msg.info.id === expectedPromptMessageID)) {
+                return [];
+              }
+            }
             fetchedNormalizedMessages = normalized;
             const contract = extractTaskContract(normalized, sessionID);
-            if (contract) setSessionContract(sessionID, contract);
+            if (contract && !idleSignal.aborted) setSessionContract(sessionID, contract);
             return normalized;
           },
           async (text) => {
@@ -2273,11 +2311,13 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         releaseProcessIdleSlot();
       }
     } finally {
-      // Releases the short-TTL pre-inspection lease if inspection finished
-      // clean/skipped/aborted/read-only. If handleSessionIdle upgraded to a
-      // real remediation lease, the token no longer matches and the active
-      // remediation lease remains intact.
-      releasePreInspectionLease(sessionID);
+      // Releases only the pre-inspection lease holder acquired for this call
+      // if inspection finished clean/skipped/aborted/read-only. If another holder
+      // is active or handleSessionIdle upgraded to a real remediation lease, the
+      // underlying lease remains intact.
+      if (ownedPreLeaseHolder !== undefined) {
+        releasePreInspectionLease(sessionID, ownedPreLeaseHolder);
+      }
     }
   };
 
@@ -3014,7 +3054,11 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           return;
         }
         const hadQueuedIdle = idleQueue.has(event.sessionID);
+        const activePreIdle = preIdleControllers.get(event.sessionID);
         const resolvedDir = await resolveSessionDirectoryDetailed(event.sessionID);
+        if (controller.signal.aborted) {
+          return;
+        }
         if (isProjectLocalPluginInstall(directory) && !resolvedDir.verified) {
           return;
         }
@@ -3022,12 +3066,49 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
         if (!isGuardianOwnerForDirectory(instanceId, directory, runtimeDirectory)) {
           return;
         }
-        const runtime = runtimeForDirectory(runtimeDirectory);
+        let runtime: ReturnType<typeof runtimeForDirectory>;
+        try {
+          runtime = runtimeForDirectory(runtimeDirectory);
+        } catch {
+          recordGuardianEvent({
+            kind: "inspection-error",
+            rules: ["config-reload-failed"],
+            reasons: [{ rule: "config-reload-failed", code: "config-reload-failed" }],
+          }, runtimeDirectory);
+          return;
+        }
         if (runtime.config.enabled === false) {
           return;
         }
-        if (hadQueuedIdle) forgetQueuedIdle(event.sessionID);
-        else releasePreInspectionLease(event.sessionID);
+        if (hadQueuedIdle) idleQueue.forget(event.sessionID);
+        if (activePreIdle) {
+          if (preIdleControllers.get(event.sessionID) === activePreIdle) {
+            preIdleControllers.delete(event.sessionID);
+          }
+          activePreIdle.abort();
+        }
+        const concurrentPreIdle = preIdleControllers.get(event.sessionID);
+        if (concurrentPreIdle) {
+          preIdleControllers.delete(event.sessionID);
+          concurrentPreIdle.abort();
+        }
+        recentPreIdleCompletedAt.delete(event.sessionID);
+        if (
+          (idleQueue.has(event.sessionID) || preIdleControllers.has(event.sessionID)) &&
+          typeof event.messageID === "string" &&
+          event.messageID.length > 0
+        ) {
+          pendingPromptMessageIDs.delete(event.sessionID);
+          pendingPromptMessageIDs.set(event.sessionID, event.messageID);
+          while (pendingPromptMessageIDs.size > 512) {
+            const oldest = pendingPromptMessageIDs.keys().next().value;
+            if (oldest === undefined) break;
+            pendingPromptMessageIDs.delete(oldest);
+          }
+        } else {
+          pendingPromptMessageIDs.delete(event.sessionID);
+        }
+        releasePreInspectionLease(event.sessionID);
         releaseRemediationLeaseForSession(event.sessionID, instanceId);
         invalidateActiveMeshHandoff(event.sessionID);
         clearMeshIntervention(event.sessionID, "opencode-guardian");
@@ -3131,12 +3212,20 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
       try {
         const expIdleReg = await context.session.hook("experimental.idle", async (event) => {
+          if (
+            controller.signal.aborted ||
+            typeof event.sessionID !== "string" ||
+            event.sessionID.length === 0
+          ) {
+            return;
+          }
+          const sid = event.sessionID;
           const bg = (event as { background?: unknown }).background;
           const ownBg = Array.isArray(bg)
             ? bg.filter((job) => {
                 if (!job || typeof job !== "object") return true;
                 const jobSid = (job as { sessionID?: unknown }).sessionID;
-                return typeof jobSid !== "string" || jobSid.length === 0 || jobSid === event.sessionID;
+                return typeof jobSid !== "string" || jobSid.length === 0 || jobSid === sid;
               })
             : [];
           if (ownBg.length > 0) {
@@ -3146,37 +3235,33 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               const key = backgroundJobKey(job) ?? "__anonymous__";
               keys.set(key, now);
             }
-            sessionBackgroundJobs.delete(event.sessionID);
-            sessionBackgroundJobs.set(event.sessionID, keys);
+            sessionBackgroundJobs.delete(sid);
+            sessionBackgroundJobs.set(sid, keys);
             while (sessionBackgroundJobs.size > 512) {
               const oldest = sessionBackgroundJobs.keys().next().value;
               if (oldest === undefined) break;
               sessionBackgroundJobs.delete(oldest);
             }
-            backgroundSessions.delete(event.sessionID);
-            backgroundSessions.add(event.sessionID);
+            backgroundSessions.delete(sid);
+            backgroundSessions.add(sid);
             if (backgroundSessions.size > 512) {
               const oldest = backgroundSessions.values().next().value;
               if (oldest !== undefined) backgroundSessions.delete(oldest);
             }
             return;
           }
-          sessionBackgroundJobs.delete(event.sessionID);
-          backgroundSessions.delete(event.sessionID);
+          sessionBackgroundJobs.delete(sid);
+          backgroundSessions.delete(sid);
           // OpenCode v2.3.0+ awaits `experimental.idle` JUST BEFORE transitioning
           // a session to idle (and before delivering `<background-result>` to a parent).
           // Inspecting and admitting remediation synthetics here keeps the child in
           // the same execution so managers never receive premature un-remediated results.
           if (
-            controller.signal.aborted ||
-            typeof event.sessionID !== "string" ||
-            event.sessionID.length === 0 ||
             typeof context.session.context !== "function" ||
             typeof context.session.synthetic !== "function"
           ) {
             return;
           }
-          const sid = event.sessionID;
           const prevPreIdle = preIdleControllers.get(sid);
           if (prevPreIdle) {
             preIdleControllers.delete(sid);
@@ -3198,8 +3283,17 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             oldestCtrl?.abort();
           }
           try {
-            tryAcquirePreInspectionLease(sid);
-            await runV2SessionIdleInspection(sid, undefined, preIdleAbort.signal);
+            const preLeaseHolder = tryAcquirePreInspectionLease(sid);
+            const inspected = await runV2SessionIdleInspection(sid, undefined, preIdleAbort.signal, preLeaseHolder);
+            if (inspected && !preIdleAbort.signal.aborted) {
+              recentPreIdleCompletedAt.delete(sid);
+              recentPreIdleCompletedAt.set(sid, Date.now());
+              while (recentPreIdleCompletedAt.size > 512) {
+                const oldest = recentPreIdleCompletedAt.keys().next().value;
+                if (oldest === undefined) break;
+                recentPreIdleCompletedAt.delete(oldest);
+              }
+            }
           } catch {
             // Never propagate an unhandled error from experimental.idle into the host loop.
           } finally {
@@ -3486,6 +3580,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               } else {
                 backgroundSessions.delete(jobSessionID);
               }
+              recentPreIdleCompletedAt.delete(jobSessionID);
             }
           }
           continue;
@@ -3519,6 +3614,18 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           continue;
         }
 
+        const isNewTurnActivity =
+          eventData.type === "session.execution.started" ||
+          eventData.type === "session.text.started" ||
+          eventData.type === "session.reasoning.started" ||
+          (eventData.type === "session.status" &&
+            (eventData.data?.status?.type ?? eventData.properties?.status?.type) !== "idle");
+        if (isNewTurnActivity) {
+          const activeSid = extractEventSessionID();
+          if (activeSid) recentPreIdleCompletedAt.delete(activeSid);
+          continue;
+        }
+
         const idleEvent =
           eventData.type === "session.idle" ||
           eventData.type === "session.execution.succeeded" ||
@@ -3535,12 +3642,29 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
 
         // Acquire a short-TTL pre-inspection lease synchronously on turn completion so
         // sibling orchestrators cannot race ahead and close a child task during the
-        // idleQueue coalescing / async context-fetch window.
-        tryAcquirePreInspectionLease(sessionID, eventLocationDir);
+        // idleQueue coalescing / async context-fetch window. Skip if experimental.idle
+        // is already running or just finished inspecting this turn to avoid flashing
+        // a spurious pre-inspection lease on a clean idle transition.
+        const recentPreIdleTs = recentPreIdleCompletedAt.get(sessionID);
+        if (recentPreIdleTs !== undefined && Date.now() - recentPreIdleTs >= 2_000) {
+          recentPreIdleCompletedAt.delete(sessionID);
+        }
+        const recentlyHandledByPreIdle =
+          preIdleControllers.has(sessionID) ||
+          (recentPreIdleTs !== undefined && Date.now() - recentPreIdleTs < 2_000);
+        const preLeaseHolder = recentlyHandledByPreIdle
+          ? undefined
+          : tryAcquirePreInspectionLease(sessionID, eventLocationDir);
 
-        idleQueue.enqueue(sessionID, async (idleSignal) => {
-          await runV2SessionIdleInspection(sessionID, eventLocationDir, idleSignal);
-        });
+        idleQueue.enqueue(
+          sessionID,
+          async (idleSignal) => {
+            await runV2SessionIdleInspection(sessionID, eventLocationDir, idleSignal, preLeaseHolder);
+          },
+          preLeaseHolder !== undefined
+            ? () => releasePreInspectionLease(sessionID, preLeaseHolder)
+            : undefined
+        );
         }
         if (controller.signal.aborted) return;
         throw new Error("V2 event stream ended before plugin teardown.");
@@ -3601,12 +3725,14 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       preIdleCtrl.abort();
     }
     preIdleControllers.clear();
+    recentPreIdleCompletedAt.clear();
+    pendingPromptMessageIDs.clear();
     streamWatcher.clear();
     await streamWatcher.drain();
     for (const sessionID of Array.from(activeRemediationLeases.keys())) {
       releaseRemediationLeaseForSession(sessionID, instanceId);
     }
-    preInspectionLeaseTokens.clear();
+    preInspectionLeases.clear();
     contracts.clear();
     verificationStore.clear();
     foregroundHandoffs.clear();

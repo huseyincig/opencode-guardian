@@ -9,7 +9,8 @@ export const instructionFidelityRule = {
     inspect(context) {
         const instruction = latestHumanInstruction(context);
         const evidence = context.evidence ?? collectTurnEvidence(context.currentTurn);
-        if (hasResearchOnlyConstraint(instruction)) {
+        const researchOnly = hasResearchOnlyConstraint(instruction);
+        if (researchOnly) {
             const mutations = evidence.records.filter((record) => record.status !== "failure" &&
                 ["file-mutation", "install", "git-push"].includes(record.kind));
             if (mutations.length > 0) {
@@ -48,7 +49,7 @@ export const instructionFidelityRule = {
                 "git-push",
             ].includes(record.kind)) ?? false;
         const signals = detectInstructionFidelitySignals(instruction, prose, observableWork);
-        if (!signals.hasViolation) {
+        if (!signals.hasViolation || (researchOnly && signals.type === "redundant-handoff")) {
             return { ruleId: this.id, decision: "pass", findings: [] };
         }
         if (signals.type === "redundant-handoff") {

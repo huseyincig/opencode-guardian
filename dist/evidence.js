@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
 import { captureBeforeEdit, finishEditObservation } from "./edit-integrity.js";
 import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolAction, extractToolCommand, isKnownReadOnlyTool, KNOWN_SHELL_TOOLS, splitFilePatches } from "./tool-input.js";
-import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
+import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, stripShellWrappersAndPath, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
     if (typeof value === "string")
@@ -229,59 +229,152 @@ export function normalizeErrorFingerprint(errorText) {
         .slice(0, 240);
 }
 function stripBenignCommandWrappers(stage) {
-    let current = stage.trim();
-    for (let i = 0; i < 6; i++) {
+    let current = stripShellWrappersAndPath(stage, { stripFlock: true });
+    for (let i = 0; i < 4; i++) {
         const next = current
-            .replace(/^\s*sudo(?:\s+-\S+)*\s+/i, "")
-            .replace(/^\s*env(?:\s+(?:-\S+|[a-z_][a-z0-9_]*=\S+))*\s+/i, "")
-            .replace(/^\s*command(?:\s+-[pvV])*\s+/i, "")
-            .replace(/^\s*time(?:\s+-\S+)*\s+/i, "")
-            .replace(/^\s*nohup\s+/i, "")
-            .replace(/^\s*nice(?:\s+(?:-n\s+-?\d+|-\d+))?\s+/i, "")
-            .replace(/^\s*timeout(?:\s+(?:--?[a-z-]+(?:=\S+)?|(?:-[ks]|--kill-after|--signal)\s+\S+))*\s+\d+(?:\.\d+)?[smhd]?\s+/i, "")
-            .replace(/^\s*flock(?:\s+(?:-[sxnoueE]+|--(?:shared|exclusive|nonblock|nb|unlock|no-fork|close|verbose)|(?:-w|--timeout)\s+\S+))*\s+(?:"[^"]*"|'[^']*'|\S+)\s+(?!-c\b)/i, "")
-            .replace(/^(?:[a-z_][a-z0-9_]*=\S+\s+)*/i, "")
             .replace(/^(?:npx(?:\s+--no-install)?|pnpm\s+exec|npm\s+exec\s+--)\s+/i, "")
             .trim();
-        if (next === current)
+        const unwrapped = stripShellWrappersAndPath(next, { stripFlock: true });
+        if (unwrapped === current)
             break;
-        current = next;
+        current = unwrapped;
     }
     return current;
 }
-function unwrapFlockCommandScripts(stage) {
-    const match = /^\s*flock(?:\s+(?:-[sxnoueE]+|--(?:shared|exclusive|nonblock|nb|unlock|no-fork|close|verbose)|(?:-w|--timeout)\s+\S+))*\s+(?:"[^"]*"|'[^']*'|\S+)\s+-c\s+(?:'([^']*)'|"((?:\\.|[^"\\])*)")(?=\s|$)/i.exec(stage);
-    const script = match?.[1] ?? match?.[2];
-    return script !== undefined ? [script] : [];
-}
-function executableShellStages(command, depth = 0) {
+function executableShellStages(command, depth = 0, preserveCase = false) {
     const rawStages = splitShellStages(command).flat();
     const out = [];
     for (const raw of rawStages) {
         const normalized = normalizeCommand(raw);
-        const stripped = stripBenignCommandWrappers(normalized);
-        if (!stripped)
+        if (!normalized)
             continue;
         if (depth < 3) {
             const nestedScripts = [
-                ...literalShellScripts(stripped),
-                ...unwrapFlockCommandScripts(normalized),
+                ...literalShellScripts(normalized),
+                ...literalWindowsShellScripts(normalized),
             ];
             if (nestedScripts.length > 0) {
                 for (const script of nestedScripts) {
-                    out.push(...executableShellStages(script, depth + 1));
+                    out.push(...executableShellStages(script, depth + 1, preserveCase));
                 }
                 continue;
             }
         }
-        out.push(stripped.toLowerCase());
+        const stripped = stripBenignCommandWrappers(normalized);
+        if (!stripped)
+            continue;
+        out.push(preserveCase ? stripped : stripped.toLowerCase());
     }
     return out.filter(Boolean);
+}
+const VERIFICATION_STAGE_PATTERNS = [
+    /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|typecheck|lint|audit)(?::[a-z0-9_-]+)?\b/,
+    /^(?:pytest|py\.test|python(?:3)?\s+-m\s+(?:pytest|unittest)|go\s+(?:test|build)|cargo\s+(?:test|nextest\s+run|build|clippy|audit)|node(?:\s+(?:--?[a-z0-9-]+(?:=\S+)?|(?:--import|--require|-r|--loader|--conditions|--env-file)\s+\S+))*\s+--test|jest|vitest|ava|mocha|tap|dotnet\s+(?:test|build)|phpunit|make\s+(?:test|build))\b/,
+    /^(?:\.\/)?(?:mvn|mvnw)\b[^\n;&|]*(?:\btest\b|\bverify\b|\bpackage\b|\binstall\b)/,
+    /^(?:\.\/)?(?:gradle|gradlew)\b[^\n;&|]*(?:\btest\b|\bbuild\b)/,
+    /^(?:tsc|mypy|pyright|eslint|oxlint|biome\s+(?:lint|check)|prettier\s+--check|stylelint|shellcheck|ruff|flake8|golangci-lint|pip-audit|govulncheck|bundle\s+audit)\b/,
+];
+function isBenignSummaryPassthroughStage(stage) {
+    const lowerStage = stage.toLowerCase();
+    if (VERIFICATION_STAGE_PATTERNS.some((pattern) => pattern.test(lowerStage))) {
+        return true;
+    }
+    if (/^(?:set|cd|export|unset)(?:\s|$)/i.test(lowerStage)) {
+        return true;
+    }
+    // Allow stdin-only tail/head with non-zero counts (never `-n 0` / `-0` which discards all output).
+    if (!/</.test(lowerStage) &&
+        /^(?:tail|head)(?:\s+(?:-(?:n|c)\s+[+-]?\d+|-[a-z]*\d+|-[a-z]+|--(?:lines|bytes|quiet|silent|verbose)(?:=[+-]?\d+)?))*\s*$/i.test(lowerStage) &&
+        !/(?:^|\s)(?:-(?:n|c)\s*[+-]?0\b|-[a-z]*0\b|--(?:lines|bytes)=[+-]?0\b)/i.test(lowerStage)) {
+        return true;
+    }
+    // Allow stdin-only tee (copies stdin through to stdout while logging to file; never `<` redirect).
+    if (!/</.test(lowerStage) && /^tee(?:\s+-[ai]+)*\s+[^<>\s]+(?:\s+[^<>\s]+)*$/i.test(lowerStage)) {
+        return true;
+    }
+    // Allow non-inverted, non-recursive grep/rg filtering stdin only (case-preserved so
+    // `-A/-B/-C/-E` are distinguished from `-e/-f/-r/-R`).
+    if (!/</.test(stage) && /^(?:grep|egrep|fgrep|rg)\b/i.test(stage)) {
+        const rest = stage.replace(/^(?:grep|egrep|fgrep|rg)\s*/i, "");
+        const tokens = rest.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+        let positional = 0;
+        let hasExplicitPattern = false;
+        let skipNext = false;
+        let endOfOpts = false;
+        for (const tok of tokens) {
+            if (skipNext) {
+                skipNext = false;
+                continue;
+            }
+            if (endOfOpts) {
+                positional++;
+                continue;
+            }
+            if (tok === "--") {
+                endOfOpts = true;
+                continue;
+            }
+            if (tok === "-e" || tok === "--regexp") {
+                hasExplicitPattern = true;
+                skipNext = true;
+                continue;
+            }
+            if (tok.startsWith("--regexp=")) {
+                hasExplicitPattern = true;
+                continue;
+            }
+            if (tok.startsWith("--directories=") && /^--directories=r/i.test(tok)) {
+                return false;
+            }
+            if (tok === "-d" || tok === "--directories") {
+                // `-d recurse` reads directories from disk instead of stdin.
+                return false;
+            }
+            // Handle short flag cluster containing lowercase `-e` BEFORE `-v`/`-f`/`-r`/`-R` so
+            // attached patterns like `-eerror` or `-efail` are not misclassified as `-r`/`-f`.
+            if (/^-[a-zA-Z]*e/.test(tok) && !tok.startsWith("--")) {
+                const ePos = tok.indexOf("e");
+                const beforeE = tok.slice(1, ePos);
+                if (/[vfrR]/.test(beforeE))
+                    return false;
+                hasExplicitPattern = true;
+                if (ePos === tok.length - 1)
+                    skipNext = true;
+                continue;
+            }
+            if (tok === "-v" || tok === "--invert-match" || /^-[a-zA-Z]*v[a-zA-Z]*$/.test(tok)) {
+                return false;
+            }
+            if (tok === "-f" || tok === "--file" || tok.startsWith("--file=") || /^-[a-zA-Z]*f/.test(tok)) {
+                return false;
+            }
+            if (tok === "-r" ||
+                tok === "-R" ||
+                tok === "--recursive" ||
+                tok === "--dereference-recursive" ||
+                /^-[a-zA-Z]*[rR]/.test(tok)) {
+                return false;
+            }
+            if (/^-[a-zA-Z]*[mABCgtT]$/.test(tok) ||
+                /^--(?:max-count|after-context|before-context|context|glob|type)$/.test(tok)) {
+                skipNext = true;
+                continue;
+            }
+            if (tok.startsWith("-"))
+                continue;
+            positional++;
+        }
+        return hasExplicitPattern ? positional === 0 : positional <= 1;
+    }
+    return false;
 }
 function hasOutputSpoofingStage(command) {
     if (!command)
         return false;
-    return executableShellStages(command).some((stage) => /^(?:echo|printf|cat|node\s+(?:-[ep]|--eval|--print)|python(?:3)?\s+-c|perl\s+-e|ruby\s+-e)\b/i.test(stage));
+    const stages = executableShellStages(command, 0, true);
+    if (stages.length === 0)
+        return true;
+    return stages.some((stage) => !isBenignSummaryPassthroughStage(stage));
 }
 function classifyCommand(command, toolName) {
     const stages = executableShellStages(command);
@@ -344,10 +437,74 @@ function classifyCommand(command, toolName) {
         kinds.add("generic");
     return [...kinds];
 }
-export function isVerificationFailureMask(command) {
-    return /(?:\|\|\s*(?:true\b|:(?=\s|$)|exit\s+0\b)|;\s*exit\s+0\b)/i.test(command);
+const VERIFICATION_KIND_SET = new Set([
+    "test",
+    "build",
+    "typecheck",
+    "lint",
+    "audit",
+]);
+function isFailureMaskTargetSegment(segment, sep) {
+    const stripped = stripShellWrappersAndPath(segment);
+    if (sep === "||") {
+        return /^(?:true|:(?=\s|$)|exit\s+0(?:\s|$)|pwd(?:\s|$)|echo(?:\s|$)|printf(?:\s|$))/i.test(stripped);
+    }
+    if (sep === ";" || sep === "\n") {
+        return /^(?:true|:(?=\s|$)|exit\s+0(?:\s|$))/i.test(stripped);
+    }
+    return false;
+}
+export function isVerificationFailureMask(command, depth = 0) {
+    if (!command)
+        return false;
+    const segments = splitTopLevelShellSegments(command);
+    let sawVerificationInChain = false;
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const trimmed = seg.text.trim();
+        if (trimmed) {
+            if (depth < 3) {
+                const nested = [
+                    ...literalShellScripts(trimmed),
+                    ...literalWindowsShellScripts(trimmed),
+                ];
+                if (nested.some((script) => isVerificationFailureMask(script, depth + 1))) {
+                    return true;
+                }
+            }
+            if (classifyCommand(trimmed, "bash").some((k) => VERIFICATION_KIND_SET.has(k))) {
+                sawVerificationInChain = true;
+            }
+        }
+        const sep = seg.followedBy;
+        if (sawVerificationInChain && (sep === "||" || sep === ";" || sep === "\n")) {
+            const nextSeg = segments[i + 1]?.text.trim() ?? "";
+            if (nextSeg && isFailureMaskTargetSegment(nextSeg, sep)) {
+                return true;
+            }
+            if ((sep === ";" || sep === "\n") &&
+                segments.slice(i + 1).some((after) => isFailureMaskTargetSegment(after.text.trim(), ";"))) {
+                return true;
+            }
+        }
+        if (sep !== "&&") {
+            sawVerificationInChain = false;
+        }
+    }
+    return false;
+}
+function isXargsRecursiveForceRemove(command) {
+    const match = /^xargs(?:\s+(?:-[a-zA-Z]+(?:\s+\S+)?|--[a-z-]+(?:=\S+)?))*\s+(?:\/(?:[A-Za-z0-9._-]+\/)+)?rm\s+([^\n;&|]+)/i.exec(command.trim());
+    if (!match?.[1])
+        return false;
+    const flags = match[1].match(/(?:^|\s)-[a-z]+\b|--(?:recursive|force)\b/gi) ?? [];
+    const recursive = flags.some((flag) => /--recursive|^-[a-z]*r/i.test(flag.trim()));
+    const forced = flags.some((flag) => /--force|^-[a-z]*f/i.test(flag.trim()));
+    return recursive && forced;
 }
 function isRecursiveForceRemove(command) {
+    if (isXargsRecursiveForceRemove(command))
+        return true;
     const candidates = command.match(/^\s*(?:sudo\s+)?rm\s+[^\n;&|]+/gi) ?? [];
     return candidates.some((candidate) => {
         const flags = candidate.match(/(?:^|\s)-[a-z]+\b|--(?:recursive|force)\b/gi) ?? [];
@@ -356,10 +513,11 @@ function isRecursiveForceRemove(command) {
         return recursive && forced;
     });
 }
-// Git global -C/-c options are legal before every subcommand.
-const GIT_RESET_INVOCATION = /^\s*(?:sudo\s+)?git(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i;
-const GIT_FORCE_PUSH_INVOCATION = /^\s*(?:sudo\s+)?git(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b[^\n;&|]*(?:--force(?:-with-lease)?(?:=[^\s;&|]+)?|\s-f(?:\s|$))/i;
-const GIT_CLEAN_INVOCATION = /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+clean\b/i;
+// Git global options (-C/-c/--git-dir/--work-tree/--no-pager/-P/etc.) are legal before every subcommand.
+const GIT_GLOBAL_OPTS = `(?:\\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--super-prefix)(?:=|\\s+)(?:"[^"]*"|'[^']*'|[^\\s;&|\\n]+)|-C[^\\s;&|\\n]+|-c[^\\s;&|\\n]+|--no-pager|--paginate|-p|-P|--bare|--no-replace-objects|--literal-pathspecs))*`;
+const GIT_RESET_INVOCATION = new RegExp(`^\\s*(?:sudo\\s+)?git${GIT_GLOBAL_OPTS}\\s+reset\\b[^\\n;&|]*--hard\\b`, "i");
+const GIT_FORCE_PUSH_INVOCATION = new RegExp(`^\\s*(?:sudo\\s+)?git${GIT_GLOBAL_OPTS}\\s+push\\b[^\\n;&|]*(?:--force(?:-with-lease)?(?:=[^\\s;&|]+)?|\\s-f(?:\\s|$))`, "i");
+const GIT_CLEAN_INVOCATION = new RegExp(`\\bgit${GIT_GLOBAL_OPTS}\\s+clean\\b`, "i");
 export function gitCleanInvocation(command) {
     return GIT_CLEAN_INVOCATION.exec(command)?.[0];
 }
@@ -428,6 +586,9 @@ export function isDestructiveCommand(command, depth = 0) {
  * Separate from recursive-force classification to preserve existing evidence kinds. */
 export function isSimpleFileRemoval(command, depth = 0) {
     if (shellCommandVariants(command).some((candidate) => {
+        if (/^xargs(?:\s+(?:-[a-zA-Z]+(?:\s+\S+)?|--[a-z-]+(?:=\S+)?))*\s+(?:\/(?:[A-Za-z0-9._-]+\/)+)?rm(?:\s|$)/i.test(candidate.trim())) {
+            return true;
+        }
         const match = /^\s*(?:sudo\s+)?rm\s+(.+)$/i.exec(candidate);
         if (!match)
             return false;
@@ -482,8 +643,14 @@ function splitTopLevelShellSegments(command) {
         }
         if (quote) {
             current += ch;
-            if (ch === quote)
+            if ((quote === "$'" && ch === "'") || ch === quote)
                 quote = null;
+            continue;
+        }
+        if (ch === "$" && command[i + 1] === "'") {
+            current += "$'";
+            quote = "$'";
+            i++;
             continue;
         }
         if (ch === "'" || ch === '"') {
@@ -508,11 +675,11 @@ function splitTopLevelShellSegments(command) {
             i++;
             continue;
         }
-        // Single background '&' (exclude redirections like 2>&1, >&2, <&0, &>, &>>).
+        // Single background '&' (exclude redirections like 2>&1, >&2, <&0, &>, &>>, and |& pipe).
         if (ch === "&") {
             const prev = command[i - 1];
             const next = command[i + 1];
-            const isRedirection = prev === ">" || prev === "<" || next === ">";
+            const isRedirection = prev === ">" || prev === "<" || prev === "|" || next === ">";
             if (!isRedirection) {
                 segments.push({ text: current.trim(), followedBy: "&" });
                 current = "";
@@ -539,8 +706,13 @@ function hasUnquotedSinglePipe(text) {
             continue;
         }
         if (quote) {
-            if (ch === quote)
+            if ((quote === "$'" && ch === "'") || ch === quote)
                 quote = null;
+            continue;
+        }
+        if (ch === "$" && text[i + 1] === "'") {
+            quote = "$'";
+            i++;
             continue;
         }
         if (ch === "'" || ch === '"') {
@@ -557,14 +729,37 @@ function hasUnquotedSinglePipe(text) {
     }
     return false;
 }
-function hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds) {
-    if (!command || !/[;\n&]|\|\|/.test(command))
+function hasNonAndSeparatorRecursive(command, depth = 0) {
+    if (!command)
+        return false;
+    const segments = splitTopLevelShellSegments(command);
+    if (segments.some((seg) => seg.followedBy === ";" ||
+        seg.followedBy === "\n" ||
+        seg.followedBy === "&" ||
+        seg.followedBy === "||")) {
+        return true;
+    }
+    if (depth >= 3)
+        return false;
+    return segments.some((seg) => [...literalShellScripts(seg.text), ...literalWindowsShellScripts(seg.text)].some((script) => hasNonAndSeparatorRecursive(script, depth + 1)));
+}
+function hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds, depth = 0) {
+    if (!command)
         return false;
     const segments = splitTopLevelShellSegments(command);
     let sawVerificationInAndChain = false;
     for (let idx = 0; idx < segments.length; idx++) {
         const seg = segments[idx];
         const sep = seg.followedBy;
+        if (depth < 3 && seg.text.length > 0) {
+            const nested = [
+                ...literalShellScripts(seg.text),
+                ...literalWindowsShellScripts(seg.text),
+            ];
+            if (nested.some((script) => hasTrailingSeparatorAfterVerification(script, toolName, verificationKinds, depth + 1))) {
+                return true;
+            }
+        }
         const isVerificationSeg = seg.text.length > 0 &&
             classifyCommand(seg.text, toolName).some((k) => verificationKinds.has(k));
         if (isVerificationSeg) {
@@ -583,51 +778,234 @@ function hasTrailingSeparatorAfterVerification(command, toolName, verificationKi
     }
     return false;
 }
-function hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds) {
-    if (!command || !hasUnquotedSinglePipe(command))
+function countLeadingOpenSubshells(text) {
+    let count = 0;
+    let i = 0;
+    while (i < text.length) {
+        const ch = text[i];
+        if (/\s/.test(ch) || ch === "{") {
+            i++;
+            continue;
+        }
+        if (ch === "(") {
+            count++;
+            i++;
+            continue;
+        }
+        break;
+    }
+    return count;
+}
+function countUnmatchedClosingSubshells(text) {
+    let q = null;
+    let escaped = false;
+    let balance = 0;
+    let unmatchedClose = 0;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch === "\\" && q !== "'") {
+            escaped = true;
+            continue;
+        }
+        if (q) {
+            if ((q === "$'" && ch === "'") || ch === q)
+                q = null;
+            continue;
+        }
+        if (ch === "$" && text[i + 1] === "'") {
+            q = "$'";
+            i++;
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            q = ch;
+            continue;
+        }
+        if (ch === "(")
+            balance++;
+        else if (ch === ")") {
+            if (balance > 0)
+                balance--;
+            else
+                unmatchedClose++;
+        }
+    }
+    return unmatchedClose;
+}
+function hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds, depth = 0) {
+    if (!command)
         return false;
     const segments = splitTopLevelShellSegments(command);
-    let pipefailScope = "none";
+    const pipefailScopes = [];
+    let subshellDepth = 0;
     let prevSep;
+    let conditionalDepth = 0;
     for (const seg of segments) {
         const trimmed = seg.text.trim();
         if (!trimmed) {
-            if (seg.followedBy && seg.followedBy !== "&&" && pipefailScope === "and-chain") {
-                pipefailScope = "none";
+            if (seg.followedBy && seg.followedBy !== "&&") {
+                while (pipefailScopes.length > 0 && pipefailScopes[pipefailScopes.length - 1].mode === "and-chain") {
+                    pipefailScopes.pop();
+                }
             }
             prevSep = seg.followedBy;
             continue;
         }
+        const openedNow = countLeadingOpenSubshells(trimmed);
+        subshellDepth += openedNow;
+        const withoutLeadingGroup = trimmed.replace(/^[({\s]+/, "");
+        if (/^(?:if|while|until|for|case)\b/.test(withoutLeadingGroup)) {
+            conditionalDepth++;
+        }
+        if (depth < 3) {
+            const nested = [
+                ...literalShellScripts(trimmed),
+                ...literalWindowsShellScripts(trimmed),
+            ];
+            if (nested.some((script) => hasPipedVerificationWithoutPipefail(script, toolName, verificationKinds, depth + 1))) {
+                return true;
+            }
+        }
         const isPiped = hasUnquotedSinglePipe(trimmed);
-        if (!isPiped && /^set\b/i.test(trimmed)) {
-            if (/(?:^|\s)-[a-z]*o\s+pipefail\b/i.test(trimmed) &&
+        const setCandidate = withoutLeadingGroup.replace(/^then\s+|^else\s+|^do\s+/i, "");
+        if (!isPiped && /^set\b/i.test(setCandidate)) {
+            if (conditionalDepth === 0 &&
+                /(?:^|\s)-[a-z]*o\s+pipefail\b/i.test(setCandidate) &&
                 seg.followedBy !== "&" &&
                 seg.followedBy !== "||") {
                 if (prevSep === undefined || prevSep === ";" || prevSep === "\n") {
-                    pipefailScope = "unconditional";
+                    pipefailScopes.push({ depth: subshellDepth, mode: "unconditional" });
                 }
                 else if (prevSep === "&&" && seg.followedBy === "&&") {
-                    pipefailScope = "and-chain";
+                    pipefailScopes.push({ depth: subshellDepth, mode: "and-chain" });
                 }
             }
-            if (/(?:^|\s)\+[a-z]*o\s+pipefail\b/i.test(trimmed)) {
-                pipefailScope = "none";
+            if (/(?:^|\s)\+[a-z]*o\s+pipefail\b/i.test(setCandidate)) {
+                pipefailScopes.length = 0;
             }
         }
         if (isPiped) {
             const segKinds = classifyCommand(trimmed, toolName);
-            if (segKinds.some((k) => verificationKinds.has(k)) && pipefailScope === "none") {
+            if (segKinds.some((k) => verificationKinds.has(k)) && pipefailScopes.length === 0) {
                 return true;
             }
         }
-        if (seg.followedBy && seg.followedBy !== "&&" && pipefailScope === "and-chain") {
-            pipefailScope = "none";
+        const closedNow = countUnmatchedClosingSubshells(withoutLeadingGroup);
+        if (closedNow > 0) {
+            subshellDepth = Math.max(0, subshellDepth - closedNow);
+            while (pipefailScopes.length > 0 && pipefailScopes[pipefailScopes.length - 1].depth > subshellDepth) {
+                pipefailScopes.pop();
+            }
+        }
+        if (/^(?:fi|done|esac)\b/.test(withoutLeadingGroup) || /\b(?:fi|done|esac)\s*$/.test(trimmed)) {
+            if (conditionalDepth > 0)
+                conditionalDepth--;
+        }
+        if (seg.followedBy && seg.followedBy !== "&&") {
+            while (pipefailScopes.length > 0 &&
+                pipefailScopes[pipefailScopes.length - 1].depth === subshellDepth &&
+                pipefailScopes[pipefailScopes.length - 1].mode === "and-chain") {
+                pipefailScopes.pop();
+            }
         }
         prevSep = seg.followedBy;
     }
     return false;
 }
-function analyzeCommandWorkingDirectory(input, command, toolName, verificationKinds, projectDirectory) {
+function extractEnvChdirTarget(segment) {
+    // Strip outer wrappers BEFORE `env`, while also capturing `sudo -D / --chdir <dir>`.
+    let cur = segment.trim().replace(/^[({\s]+/, "");
+    let detectedChdir;
+    const unquote = (v) => (v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))
+        ? v.slice(1, -1)
+        : v;
+    for (let i = 0; i < 6; i++) {
+        if (/^(?:\/(?:[A-Za-z0-9._-]+\/)+)?env(?:\s|$)/.test(cur))
+            break;
+        const sudoHead = /^(?:\/(?:[A-Za-z0-9._-]+\/)+)?sudo\s+([\s\S]+)$/.exec(cur);
+        if (sudoHead?.[1]) {
+            const sudoTokens = sudoHead[1].match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
+            for (let t = 0; t < sudoTokens.length; t++) {
+                const tok = sudoTokens[t];
+                if (tok === "--")
+                    break;
+                if (tok === "-D" || tok === "--chdir" || /^-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*D$/.test(tok)) {
+                    const val = sudoTokens[++t];
+                    if (val)
+                        detectedChdir = unquote(val);
+                    continue;
+                }
+                if (/^-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*D(.+)$/.test(tok) && !tok.startsWith("--")) {
+                    const dPos = tok.indexOf("D");
+                    detectedChdir = unquote(tok.slice(dPos + 1));
+                    continue;
+                }
+                if (tok.startsWith("--chdir=")) {
+                    detectedChdir = unquote(tok.slice("--chdir=".length));
+                    continue;
+                }
+                if (/^(?:-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*[ugCprthUcRT]|--user|--group|--host|--prompt|--role|--type|--other-user|--close-from|--login-class|--selinux-role|--selinux-type)$/.test(tok)) {
+                    t++;
+                    continue;
+                }
+                if (tok.startsWith("-"))
+                    continue;
+                break;
+            }
+        }
+        const next = cur
+            .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)+/, "")
+            .replace(/^(?:\/(?:[A-Za-z0-9._-]+\/)+)?[sS][uU][dD][oO](?:\s+(?:(?:-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*[ugCprthDUcRT]|--user|--group|--chdir|--host|--prompt|--role|--type|--other-user|--close-from|--login-class|--selinux-role|--selinux-type)\s+\S+|-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*[ugCprthDUcRT]\S+|-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]+|--[a-z-]+(?:=\S+)?))*(?:\s+--)?\s+/, "")
+            .replace(/^(?:\/(?:[A-Za-z0-9._-]+\/)+)?timeout(?:\s+(?:(?:-[ks]|--kill-after|--signal)\s+\S+|-[ks]\S+|--?[a-z-]+(?:=\S+)?))*\s+\d+(?:\.\d+)?[smhd]?\s+/i, "")
+            .replace(/^(?:\/(?:[A-Za-z0-9._-]+\/)+)?[fF][lL][oO][cC][kK](?:\s+(?:(?:-w|--timeout|-E|--conflict-exit-code)\s+\S+|--(?:timeout|conflict-exit-code)=\S+|-[sxnoueF]+|--(?:shared|exclusive|nonblock|nb|unlock|no-fork|close|verbose)))*\s+(?:"[^"]*"|'[^']*'|\S+)(?:\s+--)?\s+(?!-c\b)/, "")
+            .replace(/^(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:nice(?:\s+(?:-n\s*-?\d+|-\d+))?|nohup|time(?:\s+-\S+)*|setsid(?:\s+--?[a-z-]+)*|stdbuf(?:\s+(?:-[ioe]\s+\S+|-[ioe]\S+))*|ionice(?:\s+(?:-[cn]\s*\S+|-t))*)\s+/i, "")
+            .trim();
+        if (next === cur)
+            break;
+        cur = next;
+    }
+    const match = /^(?:\/(?:[A-Za-z0-9._-]+\/)+)?env\s+([\s\S]+)$/.exec(cur);
+    if (!match?.[1])
+        return detectedChdir;
+    // Parse ONLY `env`'s own options (case-sensitive `-C` / `--chdir`, including combined `-iC`) before the downstream command.
+    const tokens = match[1].match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
+    let chdir = detectedChdir;
+    for (let i = 0; i < tokens.length; i++) {
+        const tok = tokens[i];
+        if (tok === "--" || tok === "-")
+            break;
+        if (tok === "-C" || tok === "--chdir" || /^-[i0v]+C$/.test(tok)) {
+            const nextTok = tokens[++i];
+            if (nextTok)
+                chdir = unquote(nextTok);
+            continue;
+        }
+        if (tok.startsWith("--chdir=")) {
+            chdir = unquote(tok.slice("--chdir=".length));
+            continue;
+        }
+        const attachedC = /^-[i0v]*C(.+)$/.exec(tok);
+        if (attachedC?.[1]) {
+            chdir = unquote(attachedC[1]);
+            continue;
+        }
+        if (tok === "-u" || tok === "--unset" || tok === "-S" || tok === "--split-string" || /^-[i0v]+u$/.test(tok)) {
+            i++;
+            continue;
+        }
+        if (tok.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
+            continue;
+        }
+        // First downstream command token reached — stop scanning env options!
+        break;
+    }
+    return chdir;
+}
+function analyzeCommandWorkingDirectory(input, command, toolName, verificationKinds, projectDirectory, inheritedCwd, depth = 0) {
     const rawCwd = (typeof input?.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined) ??
         (typeof input?.workdir === "string" && input.workdir.trim() ? input.workdir.trim() : undefined) ??
         (typeof input?.workingDirectory === "string" && input.workingDirectory.trim() ? input.workingDirectory.trim() : undefined);
@@ -641,7 +1019,7 @@ function analyzeCommandWorkingDirectory(input, command, toolName, verificationKi
     };
     let resolved = rawCwd
         ? (projectDirectory ? path.resolve(projectDirectory, expandTilde(rawCwd)) : path.resolve(expandTilde(rawCwd)))
-        : undefined;
+        : inheritedCwd;
     let hasForeignVerificationCwd = false;
     let sawVerificationSegment = false;
     const cwdStack = [];
@@ -708,26 +1086,64 @@ function analyzeCommandWorkingDirectory(input, command, toolName, verificationKi
                 inner = inner.slice(0, -1).trimEnd();
             }
             if (inner) {
-                if (/^cd(?:\s|$)/i.test(inner)) {
-                    if (/^cd\s*$/i.test(inner)) {
+                const innerNoBuiltin = inner.replace(/^builtin\s+/i, "").trim();
+                if (/^(?:cd|pushd)(?:\s|$)/i.test(innerNoBuiltin)) {
+                    const cdWithoutRedirs = innerNoBuiltin
+                        .replace(/(?:\s+(?:\d*>>?|\d*<&|\d*>&|&>>?)\s*\S+|\s+\d*>&\d+)+\s*$/g, "")
+                        .trim();
+                    if (/^cd\s*$/i.test(cdWithoutRedirs)) {
                         resolved = os.homedir();
                     }
                     else {
-                        const cdMatch = /^cd(?:\s+(?:-[LP]+|--))*\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*$/i.exec(inner);
+                        const cdMatch = /^(?:cd|pushd)(?:\s+(?:-[LPn]+|--))*\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*$/i.exec(cdWithoutRedirs);
                         const target = cdMatch ? (cdMatch[1] ?? cdMatch[2] ?? cdMatch[3]) : undefined;
                         if (target && target !== "-") {
+                            if (/^pushd\b/i.test(cdWithoutRedirs)) {
+                                cwdStack.push(resolved);
+                            }
                             const expanded = expandTilde(target);
                             const base = resolved ?? projectDirectory;
                             resolved = base ? path.resolve(base, expanded) : path.resolve(expanded);
                         }
                     }
                 }
+                else if (/^popd(?:\s|$)/i.test(innerNoBuiltin)) {
+                    if (cwdStack.length > 0) {
+                        resolved = cwdStack.pop();
+                    }
+                }
                 else {
-                    const segKinds = classifyCommand(inner, toolName);
-                    if (segKinds.some((k) => verificationKinds.has(k))) {
-                        sawVerificationSegment = true;
-                        if (projectDirectory && resolved && !isPathInsideDirectory(resolved, projectDirectory)) {
-                            hasForeignVerificationCwd = true;
+                    const envChdir = extractEnvChdirTarget(inner);
+                    const effectiveSegCwd = envChdir
+                        ? (() => {
+                            const expanded = expandTilde(envChdir);
+                            const base = resolved ?? projectDirectory;
+                            return base ? path.resolve(base, expanded) : path.resolve(expanded);
+                        })()
+                        : resolved;
+                    const nestedScripts = depth < 3
+                        ? [...literalShellScripts(inner), ...literalWindowsShellScripts(inner)]
+                        : [];
+                    if (nestedScripts.length > 0) {
+                        for (const script of nestedScripts) {
+                            const nestedCwd = analyzeCommandWorkingDirectory(undefined, script, toolName, verificationKinds, projectDirectory, effectiveSegCwd, depth + 1);
+                            if (nestedCwd.hasForeignVerificationCwd) {
+                                hasForeignVerificationCwd = true;
+                            }
+                            if (classifyCommand(script, toolName).some((k) => verificationKinds.has(k))) {
+                                sawVerificationSegment = true;
+                            }
+                        }
+                    }
+                    else {
+                        const segKinds = classifyCommand(inner, toolName);
+                        if (segKinds.some((k) => verificationKinds.has(k))) {
+                            sawVerificationSegment = true;
+                            if (projectDirectory &&
+                                effectiveSegCwd &&
+                                !isPathInsideDirectory(effectiveSegCwd, projectDirectory)) {
+                                hasForeignVerificationCwd = true;
+                            }
                         }
                     }
                 }
@@ -778,14 +1194,47 @@ function hasFileMutation(part) {
         "new_string",
         "newString",
         "new_str",
+        "appendContent",
+        "prependContent",
         "ReplacementContent",
         "patch",
         "patchText",
     ].some((key) => typeof input[key] === "string" &&
-        (["content", "CodeContent", "text", "file_text", "new_string", "newString", "new_str", "ReplacementContent"].includes(key) || input[key].length > 0))) {
+        (["content", "CodeContent", "text", "file_text", "new_string", "newString", "new_str", "appendContent", "prependContent", "ReplacementContent"].includes(key) || input[key].length > 0))) {
         return true;
     }
     return Boolean(extractLikelyShellMutation(input));
+}
+function hasMultipleNonAndSegmentsOfKind(command, toolName, kind, depth = 0) {
+    if (!command)
+        return false;
+    const segments = splitTopLevelShellSegments(command);
+    let nonAndCount = 0;
+    let sawOrOrBg = false;
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (seg.followedBy === "||" || seg.followedBy === "&") {
+            sawOrOrBg = true;
+        }
+        if (classifyCommand(seg.text, toolName).includes(kind)) {
+            nonAndCount++;
+        }
+        if (depth < 3) {
+            const nested = [
+                ...literalShellScripts(seg.text),
+                ...literalWindowsShellScripts(seg.text),
+            ];
+            if (nested.some((script) => hasMultipleNonAndSegmentsOfKind(script, toolName, kind, depth + 1))) {
+                return true;
+            }
+        }
+    }
+    if (sawOrOrBg)
+        return true;
+    if (nonAndCount > 1 && segments.some((s) => s.followedBy === ";" || s.followedBy === "\n")) {
+        return true;
+    }
+    return false;
 }
 function recordFromPart(part, sequence, directory) {
     if (part.type !== "tool" || !part.state)
@@ -808,11 +1257,7 @@ function recordFromPart(part, sequence, directory) {
     const foreignCwd = cwdAnalysis.hasForeignVerificationCwd;
     const kinds = classifyCommand(command, toolName);
     const verificationKindCount = kinds.filter((kind) => verificationKinds.has(kind)).length;
-    const hasNonAndSeparator = Boolean(command) &&
-        splitTopLevelShellSegments(command).some((seg) => seg.followedBy === ";" ||
-            seg.followedBy === "\n" ||
-            seg.followedBy === "&" ||
-            seg.followedBy === "||");
+    const hasNonAndSeparator = Boolean(command) && hasNonAndSeparatorRecursive(command);
     const nonSequentialCompound = (verificationKindCount > 1 && hasNonAndSeparator) ||
         hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds);
     const pipedWithoutPipefail = hasPipedVerificationWithoutPipefail(command, toolName, verificationKinds);
@@ -843,10 +1288,11 @@ function recordFromPart(part, sequence, directory) {
                 !testReason) ||
                 (kind === "lint" &&
                     executableShellStages(command).some((stage) => /^oxlint\b/.test(stage)) &&
-                    /^Found 0 warnings and 0 errors\.$/m.test(outputText)));
+                    /^Found 0 warnings and 0 errors\.$/m.test(outputText) &&
+                    !/^Found (?!0 warnings and 0 errors\.)\d+ warnings? and \d+ errors?\.$/m.test(outputText)));
         const ambiguousVerification = isVerification &&
             (nonSequentialCompound || pipedWithoutPipefail) &&
-            !confirmedByStructuredSummary;
+            !(confirmedByStructuredSummary && !hasMultipleNonAndSegmentsOfKind(command, toolName, kind));
         const cancelled = outcome.aborted === true ||
             ((outcome.exitCode === 130 || part.state.status === "error") &&
                 /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText)) ||
@@ -1002,10 +1448,14 @@ export function calculateProductFingerprint(directory, files) {
     catch {
         return "unverified-state";
     }
-    for (const rel of fileList) {
+    for (const rawRel of fileList) {
+        const rel = rawRel.replace(/\\/g, "/");
         const full = path.resolve(root, rel);
-        const scoped = path.relative(root, full);
-        if (scoped === ".." || scoped.startsWith(".." + path.sep) || path.isAbsolute(scoped)) {
+        const scopedRoot = path.relative(root, full);
+        const scopedReal = path.relative(realRoot, full);
+        const insideLexicalRoot = scopedRoot !== ".." && !scopedRoot.startsWith(".." + path.sep) && !path.isAbsolute(scopedRoot);
+        const insideRealRoot = scopedReal !== ".." && !scopedReal.startsWith(".." + path.sep) && !path.isAbsolute(scopedReal);
+        if (!insideLexicalRoot && !insideRealRoot) {
             return "unverified-state";
         }
         let stat;

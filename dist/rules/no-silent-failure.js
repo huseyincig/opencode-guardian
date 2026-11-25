@@ -1,5 +1,6 @@
 import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches, } from "../tool-input.js";
 import { isVerificationFailureMask } from "../evidence.js";
+import { literalShellScripts, literalWindowsShellScripts } from "../shell-risk.js";
 import { maskCodeLiterals } from "../code-context.js";
 const EMPTY_HANDLER_PATTERNS = [
     {
@@ -42,10 +43,16 @@ function shellVerificationViews(command) {
             i++;
             continue;
         }
-        if (quote === "'") {
+        if (quote === "'" || quote === "$'") {
             if (ch === "'")
                 quote = "";
             blank(i, i + 1);
+            continue;
+        }
+        if (!quote && ch === "$" && command[i + 1] === "'") {
+            quote = "$'";
+            blank(i, i + 2);
+            i++;
             continue;
         }
         if (ch === "'" && !quote) {
@@ -119,8 +126,11 @@ function verificationMask(command, depth = 0) {
     if (depth > 8)
         return false;
     const views = shellVerificationViews(command);
-    if (MASKED_VERIFICATION.test(views.code) && !EXPLORATORY_VERIFICATION.test(views.code) && isVerificationFailureMask(views.code))
+    if (isVerificationFailureMask(views.code))
         return true;
+    if ([...literalShellScripts(command), ...literalWindowsShellScripts(command)].some((script) => verificationMask(script, depth + 1))) {
+        return true;
+    }
     return views.hidden.some((inner) => {
         const view = shellVerificationViews(inner).code;
         return MASKED_VERIFICATION.test(view) && !EXPLORATORY_VERIFICATION.test(view);
@@ -195,6 +205,8 @@ export const noSilentFailureRule = {
                     "new_string",
                     "newString",
                     "new_str",
+                    "appendContent",
+                    "prependContent",
                     "file_text",
                     "CodeContent",
                     "ReplacementContent",

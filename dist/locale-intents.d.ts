@@ -42,8 +42,9 @@ export declare function classifyAgentReport(input: string): {
     isInProgress: boolean;
 };
 export declare function isExploratoryPrompt(text: string): boolean;
-/** Strips fenced code blocks and blockquotes while unwrapping inline backticks
- * so explicit command prohibitions like "Do NOT run `npm run check`" remain visible. */
+/** Strips fenced code blocks, blockquotes, and quoted examples while unwrapping
+ * inline backticks so explicit command prohibitions like "Do NOT run `npm run check`"
+ * remain visible. */
 export declare function sanitizeForProhibitions(text: string): string;
 export declare function deniedVerification(text: string, kind: VerificationKind): boolean;
 export interface AdvisoryTaskSignals {

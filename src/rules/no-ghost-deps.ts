@@ -704,6 +704,14 @@ function loadCSharpDependencies(
     for (const match of text.matchAll(/<PackageReference\s+[^>]*Include=["']([^"']+)["']/gi)) {
       if (match[1]) deps.add(match[1].toLowerCase());
     }
+    for (const match of text.matchAll(/<(?:RootNamespace|AssemblyName)>([^<]+)<\/(?:RootNamespace|AssemblyName)>/gi)) {
+      const ownNs = match[1]?.trim().toLowerCase();
+      if (ownNs) deps.add(ownNs);
+    }
+    if (/\.csproj$/i.test(manifest.path)) {
+      const projectStem = path.basename(manifest.path).replace(/\.csproj$/i, "").toLowerCase();
+      if (projectStem) deps.add(projectStem);
+    }
     if (manifest.path.endsWith("Directory.Packages.props")) {
       for (const match of text.matchAll(/<PackageVersion\s+[^>]*Include=["']([^"']+)["']/gi)) {
         if (match[1]) deps.add(match[1].toLowerCase());
@@ -746,14 +754,16 @@ function loadJvmDependencies(
     const text = read.text;
     const deps = new Set<string>();
     if (manifest.path.endsWith("pom.xml")) {
-      for (const match of text.matchAll(/<groupId>([^<]+)<\/groupId>\s*<artifactId>([^<]+)<\/artifactId>/g)) {
-        if (match[1]) deps.add(match[1].toLowerCase());
-        if (match[2]) deps.add(match[2].toLowerCase());
+      for (const match of text.matchAll(/<groupId>([^<]+)<\/groupId>/g)) {
+        if (match[1]) deps.add(match[1].trim().toLowerCase());
       }
       for (const match of text.matchAll(/<artifactId>([^<]+)<\/artifactId>/g)) {
-        if (match[1]) deps.add(match[1].toLowerCase());
+        if (match[1]) deps.add(match[1].trim().toLowerCase());
       }
     } else {
+      for (const match of text.matchAll(/^\s*group\s*(?:=\s*|\s+)["']([A-Za-z0-9_.-]+)["']/gm)) {
+        if (match[1]) deps.add(match[1].toLowerCase());
+      }
       for (const match of text.matchAll(/["']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::[^"']*)?["']/g)) {
         if (match[1]) deps.add(match[1].toLowerCase());
         if (match[2]) deps.add(match[2].toLowerCase());
@@ -902,7 +912,9 @@ function getNodePackageName(importPath: string): string {
   if (
     importPath.startsWith(".") ||
     importPath.startsWith("/") ||
-    importPath.startsWith("~")
+    importPath.startsWith("~") ||
+    importPath.startsWith("@/") ||
+    importPath.startsWith("$")
   ) {
     return "";
   }
@@ -997,6 +1009,34 @@ function buildJsCodeMask(
       continue;
     }
 
+    if (
+      !rustRawStrings &&
+      ch === "/" &&
+      next !== "/" &&
+      next !== "*" &&
+      /(?:^|[=(:,!&|?;{[\n]|\breturn|\bcase|\bthrow)\s*$/.test(
+        code.slice(Math.max(0, i - 30), i)
+      )
+    ) {
+      const start = i++;
+      let inClass = false;
+      while (i < code.length && code[i] !== "\n") {
+        if (code[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (code[i] === "[") inClass = true;
+        else if (code[i] === "]") inClass = false;
+        else if (code[i] === "/" && !inClass) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      mask.fill(2, start, Math.min(i, code.length));
+      continue;
+    }
+
     if (ch === "'" || ch === '"' || ch === "`") {
       // Rust lifetimes ('a, 'static, '_) are NOT character/string literals.
       if (rustRawStrings && ch === "'") {
@@ -1008,53 +1048,97 @@ function buildJsCodeMask(
         }
       }
       const quote = ch;
+      if (!rustRawStrings && quote === "`") {
+        const scanTemplateLiteral = (nesting = 0): void => {
+          let chunkStart = i;
+          i++;
+          while (i < code.length) {
+            if (code[i] === "\\") {
+              i += 2;
+              continue;
+            }
+            if (code[i] === "`") {
+              i++;
+              mask.fill(2, chunkStart, Math.min(i, code.length));
+              return;
+            }
+            if (code[i] === "$" && code[i + 1] === "{") {
+              mask.fill(2, chunkStart, i + 2);
+              i += 2;
+              let depth = 1;
+              while (i < code.length && depth > 0) {
+                const inner = code[i];
+                if (inner === "{") {
+                  depth++;
+                  i++;
+                } else if (inner === "}") {
+                  depth--;
+                  if (depth === 0) {
+                    mask[i] = 2;
+                    i++;
+                    break;
+                  }
+                  i++;
+                } else if (inner === "'" || inner === '"') {
+                  const innerQuote = inner;
+                  const strStart = i++;
+                  while (i < code.length) {
+                    if (code[i] === "\\") { i += 2; continue; }
+                    if (code[i] === innerQuote) { i++; break; }
+                    i++;
+                  }
+                  mask.fill(2, strStart, Math.min(i, code.length));
+                } else if (inner === "/" && code[i + 1] === "/") {
+                  const cStart = i;
+                  i += 2;
+                  while (i < code.length && code[i] !== "\n") i++;
+                  mask.fill(0, cStart, i);
+                } else if (inner === "/" && code[i + 1] === "*") {
+                  const cStart = i;
+                  i += 2;
+                  while (i < code.length && !(code[i] === "*" && code[i + 1] === "/")) i++;
+                  if (i < code.length) i += 2;
+                  mask.fill(0, cStart, Math.min(i, code.length));
+                } else if (
+                  inner === "/" &&
+                  code[i + 1] !== "/" &&
+                  code[i + 1] !== "*" &&
+                  /(?:^|[=(:,!&|?;{[\n]|\breturn|\bcase|\bthrow)\s*$/.test(
+                    code.slice(Math.max(0, i - 30), i)
+                  )
+                ) {
+                  const reStart = i++;
+                  let inClass = false;
+                  while (i < code.length && code[i] !== "\n") {
+                    if (code[i] === "\\") { i += 2; continue; }
+                    if (code[i] === "[") inClass = true;
+                    else if (code[i] === "]") inClass = false;
+                    else if (code[i] === "/" && !inClass) { i++; break; }
+                    i++;
+                  }
+                  mask.fill(2, reStart, Math.min(i, code.length));
+                } else if (inner === "`" && nesting < 16) {
+                  scanTemplateLiteral(nesting + 1);
+                } else {
+                  i++;
+                }
+              }
+              chunkStart = i;
+              continue;
+            }
+            i++;
+          }
+          mask.fill(2, chunkStart, code.length);
+        };
+        scanTemplateLiteral();
+        continue;
+      }
       const start = i;
       i++;
       while (i < code.length) {
         if (code[i] === "\\") {
           i += 2;
           continue;
-        }
-        if (!rustRawStrings && quote === "`" && code[i] === "$" && code[i + 1] === "{") {
-          // Leave JS template interpolation `${...}` executable (mask = 1) while masking template chunks.
-          mask.fill(2, start, i + 2);
-          i += 2;
-          let depth = 1;
-          while (i < code.length && depth > 0) {
-            const inner = code[i];
-            if (inner === "{") depth++;
-            else if (inner === "}") {
-              depth--;
-              if (depth === 0) {
-                mask[i] = 2;
-                i++;
-                break;
-              }
-            } else if (inner === "'" || inner === '"') {
-              const innerQuote = inner;
-              i++;
-              while (i < code.length) {
-                if (code[i] === "\\") { i += 2; continue; }
-                if (code[i] === innerQuote) { i++; break; }
-                i++;
-              }
-              continue;
-            }
-            i++;
-          }
-          // Continue masking remainder of template literal after closing `}`
-          const resumeStart = i;
-          while (i < code.length) {
-            if (code[i] === "\\") { i += 2; continue; }
-            if (code[i] === "`") { i++; break; }
-            if (code[i] === "$" && code[i + 1] === "{") break;
-            i++;
-          }
-          mask.fill(2, resumeStart, Math.min(i, code.length));
-          if (i < code.length && code[i] === "$" && code[i + 1] === "{") {
-            continue;
-          }
-          break;
         }
         if (code[i] === quote) {
           i++;
@@ -1424,10 +1508,6 @@ export const noGhostDepsRule: GuardRule = {
           for (const imported of extractJsImports(code)) {
             const importPath = imported.path;
             const pkg = getNodePackageName(importPath);
-            if (pkg && isHallucinatedOrSuspiciousPackage(pkg)) {
-              addFinding("Node", pkg, importPath, source, "package.json (suspicious typosquatting)");
-              continue;
-            }
             if (
               !pkg ||
               NODE_BUILTINS.has(pkg)
@@ -1440,6 +1520,10 @@ export const noGhostDepsRule: GuardRule = {
                   context.ruleConfig.productionOnly === true,
                   `Runtime import "${importPath}" in ${targetFile} uses "${pkg}" declared only in devDependencies; verify bundling or declare it as a production dependency.`);
               }
+              continue;
+            }
+            if (isHallucinatedOrSuspiciousPackage(pkg)) {
+              addFinding("Node", pkg, importPath, source, "package.json (suspicious typosquatting)");
               continue;
             }
             addFinding("Node", pkg, importPath, source, "package.json");
@@ -1641,6 +1725,8 @@ export const noGhostDepsRule: GuardRule = {
           ["new_string", "file edit"],
           ["newString", "file edit"],
           ["new_str", "file edit"],
+          ["appendContent", "file edit"],
+          ["prependContent", "file edit"],
           ["ReplacementContent", "file edit"],
         ] as const) {
           if (typeof input[key] === "string") {

@@ -15,6 +15,7 @@ export function maskCodeLiterals(rawSource, keepComments = false, filePath) {
     };
     const javascript = /\.[cm]?[jt]sx?$/i.test(filePath ?? "");
     const rust = /\.rs$/i.test(filePath ?? "");
+    const hashCommentLang = /\.(?:py[wi]?|rb|sh|bash|zsh|ya?ml|toml|pl|r|conf|ini|env)$/i.test(filePath ?? "");
     let i = 0;
     const quoted = (quote) => {
         const triple = quote !== "`" && source.slice(i, i + 3) === quote.repeat(3);
@@ -74,7 +75,7 @@ export function maskCodeLiterals(rawSource, keepComments = false, filePath) {
                 }
                 continue;
             }
-            if (source.startsWith("//", i) || !javascript && ch === "#" && source[i + 1] !== "[") {
+            if ((!hashCommentLang && source.startsWith("//", i)) || (!javascript && ch === "#" && source[i + 1] !== "[")) {
                 const end = source.indexOf("\n", i);
                 const until = end < 0 ? source.length : end;
                 if (!keepComments)
@@ -82,7 +83,7 @@ export function maskCodeLiterals(rawSource, keepComments = false, filePath) {
                 i = until;
                 continue;
             }
-            if (source.startsWith("/*", i)) {
+            if (!hashCommentLang && source.startsWith("/*", i)) {
                 const end = source.indexOf("*/", i + 2);
                 const until = end < 0 ? source.length : end + 2;
                 if (!keepComments)
@@ -91,7 +92,7 @@ export function maskCodeLiterals(rawSource, keepComments = false, filePath) {
                 continue;
             }
             // Recognize common JS regex literals in expression-start positions.
-            if (ch === "/" && /(?:^|[=(:,!&|?;{}[]|\breturn)\s*$/.test(source.slice(Math.max(0, i - 30), i))) {
+            if (!hashCommentLang && ch === "/" && /(?:^|[=(:,!&|?;{}[]|\breturn)\s*$/.test(source.slice(Math.max(0, i - 30), i))) {
                 const start = i++;
                 let inClass = false;
                 while (i < source.length && source[i] !== "\n") {

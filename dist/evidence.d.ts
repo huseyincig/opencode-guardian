@@ -2,7 +2,7 @@ import type { EvidenceKind, EvidenceRecord, MessagePart, SessionMessage, TurnEvi
 import { type EditIntegrityEvidence } from "./edit-integrity.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 export declare function normalizeErrorFingerprint(errorText: string): string;
-export declare function isVerificationFailureMask(command: string): boolean;
+export declare function isVerificationFailureMask(command: string, depth?: number): boolean;
 export declare function gitCleanInvocation(command: string): string | undefined;
 /**
  * Detect literal destructive shell actions, including common shell rewrites.

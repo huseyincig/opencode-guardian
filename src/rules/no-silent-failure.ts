@@ -11,6 +11,7 @@ import {
   splitFilePatches,
 } from "../tool-input.js";
 import { isVerificationFailureMask } from "../evidence.js";
+import { literalShellScripts, literalWindowsShellScripts } from "../shell-risk.js";
 import { maskCodeLiterals } from "../code-context.js";
 
 const EMPTY_HANDLER_PATTERNS: Array<{ name: string; regex: RegExp }> = [
@@ -46,7 +47,7 @@ function shellVerificationViews(command: string): { code: string; hidden: string
   const output = command.split("");
   const hidden: string[] = [];
   const executed: string[] = [];
-  let quote = "";
+  let quote: "" | "'" | "$'" | '"' = "";
   let segmentStart = 0;
   const blank = (start: number, end: number) => {
     for (let at = start; at < end; at++) if (command[at] !== "\n") output[at] = " ";
@@ -54,9 +55,15 @@ function shellVerificationViews(command: string): { code: string; hidden: string
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
     if (ch === "\\" && quote !== "'") { blank(i, i + 2); i++; continue; }
-    if (quote === "'") {
+    if (quote === "'" || quote === "$'") {
       if (ch === "'") quote = "";
       blank(i, i + 1); continue;
+    }
+    if (!quote && ch === "$" && command[i + 1] === "'") {
+      quote = "$'";
+      blank(i, i + 2);
+      i++;
+      continue;
     }
     if (ch === "'" && !quote) { quote = "'"; blank(i, i + 1); continue; }
     if (ch === '"') { quote = quote ? "" : '"'; blank(i, i + 1); continue; }
@@ -105,7 +112,14 @@ function shellVerificationViews(command: string): { code: string; hidden: string
 function verificationMask(command: string, depth = 0): boolean {
   if (depth > 8) return false;
   const views = shellVerificationViews(command);
-  if (MASKED_VERIFICATION.test(views.code) && !EXPLORATORY_VERIFICATION.test(views.code) && isVerificationFailureMask(views.code)) return true;
+  if (isVerificationFailureMask(views.code)) return true;
+  if (
+    [...literalShellScripts(command), ...literalWindowsShellScripts(command)].some((script) =>
+      verificationMask(script, depth + 1)
+    )
+  ) {
+    return true;
+  }
   return views.hidden.some((inner) => {
     const view = shellVerificationViews(inner).code;
     return MASKED_VERIFICATION.test(view) && !EXPLORATORY_VERIFICATION.test(view);
@@ -180,6 +194,8 @@ export const noSilentFailureRule: GuardRule = {
           "new_string",
           "newString",
           "new_str",
+          "appendContent",
+          "prependContent",
           "file_text",
           "CodeContent",
           "ReplacementContent",

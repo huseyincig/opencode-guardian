@@ -43,6 +43,82 @@ const INLINE_STOPWORDS = new Set<string>([
 const DEFAULT_REPLACEMENT = '[REDACTED]';
 const FAIL_SAFE_OUTPUT = '[OUTPUT REDACTED: sanitization failure]';
 
+const TS_TYPE_OR_KEYWORD =
+  /^(?:string|number|boolean|unknown|any|void|never|object|undefined|null|symbol|bigint|true|false|readonly|partial|required|record|promise|buffer|uint8array|array|set|map|date|regexp|error|function)(?:[?[\]]*)?(?:\s*\|\s*(?:string|number|boolean|unknown|any|void|never|object|undefined|null|symbol|bigint)(?:[?[\]]*)?)*$/i;
+
+const CODE_EXPR_ROOT_IDENTIFIERS = new Set([
+  'this', 'self', 'super', 'process', 'env', 'global', 'window', 'document', 'module',
+  'user', 'req', 'request', 'res', 'response', 'ctx', 'context', 'cfg', 'config',
+  'opts', 'options', 'props', 'state', 'data', 'body', 'headers', 'auth', 'vault',
+  'client', 'app', 'params', 'query', 'result', 'payload', 'input', 'output', 'meta',
+  'args', 'event', 'store', 'cache', 'db', 'service', 'provider', 'runtime', 'account',
+]);
+
+function isPlausibleCodeIdentifierSegment(seg: string): boolean {
+  if (!seg || seg.length > 24) return false;
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg)) return false;
+  // Reject high-entropy / digit-containing token segments (e.g. `abc123def456`, `v4`, `MTIzNDU2Nzg5`).
+  if (/\d/.test(seg)) return false;
+  return true;
+}
+
+function isPlausibleCodeCallArgs(argsText: string): boolean {
+  const trimmed = argsText.trim();
+  if (!trimmed) return true;
+  // Allow simple clean identifier/member args like `getToken(user, req.id)`,
+  // NEVER digit-bearing/overlong/password literals like `MyPass(2024)` or `ab?.cd(mySecret2024)`.
+  return trimmed.split(',').every((part) => {
+    const p = part.trim();
+    if (!/^[a-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(p)) return false;
+    return p.split(/\?\.|\./).every(isPlausibleCodeIdentifierSegment);
+  });
+}
+
+function isCodeExpressionValue(rawVal: string, requireCodeSyntaxHint = false): boolean {
+  const trimmedRaw = rawVal.trim();
+  if (!trimmedRaw) return false;
+  const hasCodeTerminator = /[;,]$/.test(trimmedRaw);
+  const trimmed = trimmedRaw.replace(/[;,]+$/, '').trim();
+  if (!trimmed) return false;
+  if (TS_TYPE_OR_KEYWORD.test(trimmed)) return true;
+  // Optional chaining `opts?.vaultKey` or `cfg?.getToken(req.id)` is unambiguously JS/TS code
+  // only when call arguments (if present) are also clean identifiers, never raw secret literals.
+  if (trimmed.includes('?.')) {
+    const optMatch = /^([A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)+)(?:\(([^)\r\n]*)\))?$/.exec(trimmed);
+    if (
+      optMatch?.[1] &&
+      optMatch[1].split(/\?\.|\./).every(isPlausibleCodeIdentifierSegment) &&
+      (optMatch[2] === undefined || isPlausibleCodeCallArgs(optMatch[2]))
+    ) {
+      return true;
+    }
+  }
+  // Function call: camelCase/lowercase identifier (or `obj.method`) with empty/identifier args.
+  const callMatch = /^([a-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)*)\(([^)\r\n]*)\)$/.exec(trimmed);
+  if (callMatch?.[1] && isPlausibleCodeCallArgs(callMatch[2] ?? '')) {
+    const segs = callMatch[1].split(/\?\.|\./);
+    if (segs.length <= 3 && segs.every(isPlausibleCodeIdentifierSegment)) {
+      if (!requireCodeSyntaxHint || hasCodeTerminator || segs.length >= 2) return true;
+    }
+  }
+  // Plain dotted member access (e.g. `user.token`, `env.SECRET`, `process.env.API_KEY`):
+  // require a known lowercase code root and clean identifier segments so dotted secrets
+  // like `SG.xxx.yyy`, `v4.local.xxx`, `session.abc123`, or `my.secret.passphrase` NEVER pass.
+  if (/^[a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(trimmed)) {
+    const segs = trimmed.split('.');
+    const root = segs[0] ?? '';
+    if (
+      segs.length <= 3 &&
+      CODE_EXPR_ROOT_IDENTIFIERS.has(root) &&
+      segs.every(isPlausibleCodeIdentifierSegment) &&
+      (!requireCodeSyntaxHint || hasCodeTerminator)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Escapes characters for safe RegExp construction.
  */
@@ -102,10 +178,13 @@ function sanitizeKeyValueLine(
     const colon = yamlMatch[3] ?? '';
     const rawVal = yamlMatch[4] ?? '';
     const unquotedYamlVal = stripQuotes(rawVal);
+    const isQuotedYamlVal = unquotedYamlVal !== rawVal;
+    const isAuthOrCookieKey = /^(?:proxy[_-]?)?authorization$|^(?:set[_-]?)?cookie$/i.test(key);
 
     if (
       unquotedYamlVal.trim().length > 0 &&
       unquotedYamlVal !== replacement &&
+      (isQuotedYamlVal || isAuthOrCookieKey || !isCodeExpressionValue(rawVal, true)) &&
       isSensitiveKey(key, customKeys, safeKeyNames) &&
       !safeValues?.has(unquotedYamlVal)
     ) {
@@ -271,23 +350,26 @@ export function sanitizeString(
       .map((k) => k.trim())
       .filter((k) => k.length > 0 && /^[a-zA-Z0-9_.-]+$/.test(k))
       .map(escapeRegExp);
-    const keyStemAlternation = customInlineStems.length > 0
-      ? `(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token|${customInlineStems.join('|')})`
-      : `(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)`;
-    const inlineKeyPrefixRegex = new RegExp(
-      `(^|[\\s,;([{"'=])([a-zA-Z0-9_.-]{0,64}${keyStemAlternation}[a-zA-Z0-9_.-]{0,64})(["']?\\s*[:=]\\s*|\\s+)`,
-      'gi'
+    const hasRegexCustomKeys = (options.customSensitiveKeys ?? []).some(
+      (k) => k instanceof RegExp
     );
-    {
+    const defaultInlineStems =
+      'token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token|authorization|proxy[_-]authorization|cookie|set[_-]cookie|private[_-]?key|pin[_-]?code|credentials?|database_url|conn(?:ection)?[_-]?str(?:ing)?';
+    const keyStemAlternation = customInlineStems.length > 0
+      ? `(?:${defaultInlineStems}|${customInlineStems.join('|')})`
+      : `(?:${defaultInlineStems})`;
+    const isAuthHeaderKey = (k: string): boolean =>
+      /^(?:proxy[_-]?)?authorization$|^(?:set[_-]?)?cookie$/i.test(k);
+    const applyInlinePass = (prefixRegex: RegExp): void => {
       let out = '';
       let cursor = 0;
-      inlineKeyPrefixRegex.lastIndex = 0;
-      let match = inlineKeyPrefixRegex.exec(result);
+      prefixRegex.lastIndex = 0;
+      let match = prefixRegex.exec(result);
       while (match !== null) {
         const matchStart = match.index;
         if (matchStart < cursor) {
-          inlineKeyPrefixRegex.lastIndex = cursor;
-          match = inlineKeyPrefixRegex.exec(result);
+          prefixRegex.lastIndex = cursor;
+          match = prefixRegex.exec(result);
           continue;
         }
         const lead = match[1] ?? '';
@@ -300,6 +382,7 @@ export function sanitizeString(
         let val = '';
         let quoted = false;
         const firstCh = result[valStart];
+        const isBareWhitespaceSep = /^\s+$/.test(sep);
         if (firstCh === '"' || firstCh === "'") {
           quoted = true;
           let i = valStart + 1;
@@ -320,40 +403,130 @@ export function sanitizeString(
             val = result.slice(valStart + 1, i);
             valEnd = i;
           }
+        } else if (
+          (lead === '"' || lead === "'") &&
+          /^\s*[:=]\s*$/.test(sep) &&
+          isAuthHeaderKey(key)
+        ) {
+          // Quoted HTTP header like `-H "Authorization: Basic dXNlcjpwYXNz"` or `-H 'Cookie: a=1; b=2'`
+          let i = valStart;
+          while (i < result.length && result[i] !== lead && result[i] !== '\n' && result[i] !== '\r') {
+            if (result[i] === '\\' && lead === '"' && i + 1 < result.length) {
+              i += 2;
+              continue;
+            }
+            i++;
+          }
+          val = result.slice(valStart, i).trim();
+          valEnd = i;
         } else {
           let i = valStart;
-          while (i < result.length && !/[\s,;)"'>\n\r]/.test(result[i]!)) {
+          let parenDepth = 0;
+          while (i < result.length && result[i] !== '\n' && result[i] !== '\r') {
+            const c = result[i]!;
+            if (!isBareWhitespaceSep && c === '(') {
+              parenDepth++;
+              i++;
+              continue;
+            }
+            if (!isBareWhitespaceSep && c === ')') {
+              if (parenDepth > 0) {
+                parenDepth--;
+                i++;
+                continue;
+              }
+              break;
+            }
+            if (parenDepth === 0 && (isBareWhitespaceSep ? /[\s,;)"'>]/.test(c) : /[\s,;"'>]/.test(c))) {
+              break;
+            }
             i++;
           }
           val = result.slice(valStart, i);
           valEnd = i;
+          // Consume `Scheme <credential>` pair for Authorization headers (e.g. Authorization: Basic dXNlcjpwYXNz)
+          if (
+            /^(?:basic|bearer|token|digest|apikey|bot|oauth)$/i.test(val) &&
+            result[i] === ' '
+          ) {
+            let j = i;
+            while (j < result.length && result[j] === ' ') j++;
+            const credStart = j;
+            while (j < result.length && !/[\s,;)"'>\n\r]/.test(result[j]!)) j++;
+            if (j > credStart) {
+              val = result.slice(valStart, j);
+              valEnd = j;
+            }
+          }
         }
+
+        const isPlainProseWord =
+          /^[A-Za-z][a-z]{2,}[.,;:!?]?$/.test(val) ||
+          /^\([A-Za-z][a-z]{2,}\)?[.,;:!?]?$/.test(val);
+        const skipBareSpaceProse =
+          isBareWhitespaceSep &&
+          !quoted &&
+          (val.length < 6 ||
+            val.startsWith('(') ||
+            INLINE_STOPWORDS.has(val.toLowerCase()) ||
+            (!key.startsWith('-') && isPlainProseWord));
+        const isColonSep = sep.includes(':');
+        const skipCodeAnnotation =
+          !quoted &&
+          isColonSep &&
+          !isAuthHeaderKey(key) &&
+          !sep.startsWith('"') &&
+          !sep.startsWith("'") &&
+          isCodeExpressionValue(val, false);
+
+        const isRuntimeMetaProperty =
+          /\.(?:lastIndex|source|flags|length|prototype|name|message|stack)$/i.test(key);
+        const isMarkdownProseCodeToken =
+          !quoted &&
+          isColonSep &&
+          /^`[a-z][a-z_-]{1,20}`[.,;:!?]?$/.test(val);
 
         const shouldRedact =
           val.length > 0 &&
+          !isRuntimeMetaProperty &&
+          !isMarkdownProseCodeToken &&
           isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames) &&
           val !== replacement &&
           val !== '[REDACTED:PRIVATE_KEY]' &&
           !safeValueSet?.has(val) &&
-          !(
-            /^\s+$/.test(sep) &&
-            !quoted &&
-            (val.length < 6 || INLINE_STOPWORDS.has(val.toLowerCase()))
-          );
+          !skipBareSpaceProse &&
+          !skipCodeAnnotation;
 
         if (shouldRedact) {
-          out += result.slice(cursor, matchStart) + `${lead}${key}${sep}${replacement}`;
+          const outVal = quoted ? `${firstCh}${replacement}${firstCh}` : replacement;
+          out += result.slice(cursor, matchStart) + `${lead}${key}${sep}${outVal}`;
           cursor = valEnd;
           redactedCount++;
           findings.push({ kind: 'key-value', category: 'inline-assignment', keyName: key });
-          inlineKeyPrefixRegex.lastIndex = cursor;
+          prefixRegex.lastIndex = cursor;
+        } else if (valStart > matchStart + 1) {
+          // Rewind to the delimiter right before `valStart` so a non-sensitive prefix
+          // like `log: ` never swallows the leading delimiter of an immediately following
+          // custom key like `x_vault_key=...`.
+          prefixRegex.lastIndex = valStart - 1;
         }
-        match = inlineKeyPrefixRegex.exec(result);
+        match = prefixRegex.exec(result);
       }
       if (cursor > 0) {
         out += result.slice(cursor);
         result = out;
       }
+    };
+    applyInlinePass(
+      new RegExp(
+        `(^|[\\s,;([{"'=])([a-zA-Z0-9_.-]{0,64}${keyStemAlternation}[a-zA-Z0-9_.-]{0,64})(["']?[ \\t]*[:=][ \\t]*|[ \\t]+)`,
+        'gi'
+      )
+    );
+    if (hasRegexCustomKeys) {
+      applyInlinePass(
+        /(^|[\s,;([{"'=])([a-zA-Z0-9_.-]{2,80})(["']?[ \t]*[:=][ \t]*)/gi
+      );
     }
 
     // 4. Known Credential Value Formats (OpenAI, Stripe, GitHub, Slack, AWS, Google, etc.)
@@ -649,78 +822,212 @@ export function sanitizeObject<T>(
         return controlBytes / sampleLen <= 0.05;
       };
 
-      if (Buffer.isBuffer(val)) {
-        if (val.byteLength > 0 && val.byteLength <= 16 * 1024 * 1024 && isLikelyTextBytes(val, true)) {
-          if (val.includes(0)) {
-            // NUL-delimited text buffers (e.g. /proc/self/environ): sanitize each NUL-separated record.
-            const decoded = val.toString('utf8');
-            const parts = decoded.split('\0');
-            let anyRedacted = false;
-            const outParts = parts.map((segment) => {
-              if (!segment) return segment;
-              const res = sanitizeString(segment, options);
-              if (res.redactedCount > 0) {
-                anyRedacted = true;
-                redactedCount += res.redactedCount;
-                findings.push(...res.findings);
-                return res.sanitized;
-              }
-              return segment;
-            });
-            if (anyRedacted) {
-              return Buffer.from(outParts.join('\0'), 'utf8');
-            }
-          } else if (val.byteLength <= 2 * 1024 * 1024) {
-            const decoded = val.toString('utf8');
-            const res = sanitizeString(decoded, options);
+      const sanitizeTextBytes = (bytes: Uint8Array): Buffer | undefined => {
+        if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024 || !isLikelyTextBytes(bytes, true)) {
+          return undefined;
+        }
+        const bufView = Buffer.isBuffer(bytes)
+          ? bytes
+          : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (bufView.includes(0)) {
+          // NUL-delimited text buffers (e.g. /proc/self/environ): sanitize each NUL-separated record.
+          const decoded = bufView.toString('utf8');
+          const parts = decoded.split('\0');
+          let anyRedacted = false;
+          const outParts = parts.map((segment) => {
+            if (!segment) return segment;
+            const res = sanitizeString(segment, options);
             if (res.redactedCount > 0) {
+              anyRedacted = true;
               redactedCount += res.redactedCount;
               findings.push(...res.findings);
-              return Buffer.from(res.sanitized, 'utf8');
+              return res.sanitized;
             }
-          } else {
-            // Chunk large UTF-8 text buffers (>2 MiB) into 1 MiB line-aligned slices.
-            const decoded = val.toString('utf8');
-            const CHUNK = 1024 * 1024;
-            let out = '';
-            let anyRedacted = false;
-            for (let pos = 0; pos < decoded.length; ) {
-              let end = Math.min(pos + CHUNK, decoded.length);
-              if (end < decoded.length) {
-                const nl = decoded.lastIndexOf('\n', end);
-                if (nl > pos) end = nl + 1;
-              }
-              const slice = decoded.slice(pos, end);
-              const res = sanitizeString(slice, options);
-              if (res.redactedCount > 0) {
-                anyRedacted = true;
-                redactedCount += res.redactedCount;
-                findings.push(...res.findings);
-                out += res.sanitized;
-              } else {
-                out += slice;
-              }
-              pos = end;
-            }
-            if (anyRedacted) {
-              return Buffer.from(out, 'utf8');
-            }
+            return segment;
+          });
+          if (anyRedacted) {
+            return Buffer.from(outParts.join('\0'), 'utf8');
           }
+          return undefined;
         }
-        return val;
-      }
-
-      if (val instanceof Uint8Array && !(val instanceof Buffer)) {
-        if (val.byteLength > 0 && val.byteLength <= 2 * 1024 * 1024 && isLikelyTextBytes(val, false)) {
-          const decoded = Buffer.from(val.buffer, val.byteOffset, val.byteLength).toString('utf8');
+        if (bufView.byteLength <= 2 * 1024 * 1024) {
+          const decoded = bufView.toString('utf8');
           const res = sanitizeString(decoded, options);
           if (res.redactedCount > 0) {
             redactedCount += res.redactedCount;
             findings.push(...res.findings);
-            return new Uint8Array(Buffer.from(res.sanitized, 'utf8'));
+            return Buffer.from(res.sanitized, 'utf8');
           }
+          return undefined;
         }
-        return val;
+        // Chunk large UTF-8 text buffers (>2 MiB) into 1 MiB line-aligned slices,
+        // extending across PEM PRIVATE KEY blocks, arbitrarily long indented YAML block scalars,
+        // and any single-line key=value or secret straddling a boundary without newlines.
+        const decoded = bufView.toString('utf8');
+        const CHUNK = 1024 * 1024;
+        const MAX_BLOCK_EXTEND = 256 * 1024;
+        let out = '';
+        let anyRedacted = false;
+        for (let pos = 0; pos < decoded.length; ) {
+          let end = Math.min(pos + CHUNK, decoded.length);
+          if (end < decoded.length) {
+            const nl = decoded.lastIndexOf('\n', end);
+            if (nl > pos) {
+              end = nl + 1;
+            } else {
+              // No newline in chunk: scan forward from `pos` with exact quote/escape tracking
+              // (ignoring intra-word apostrophes like `don't`) so we never cut inside an open
+              // quoted string (even >2048 chars) and never cut around key/flag/auth-scheme
+              // delimiters (`password: `, `"password" : `, `database_url = `, `Bearer `, `--token `).
+              let inDq = false;
+              let inSq = false;
+              let escaped = false;
+              let lastSafeCut = -1;
+              let lastStructCut = -1;
+              const minCut = pos + 1024;
+              for (let k = pos; k < end; k++) {
+                const ch = decoded[k]!;
+                if (escaped) { escaped = false; continue; }
+                if (ch === '\\' && (inDq || inSq)) { escaped = true; continue; }
+                if (ch === '"' && !inSq) { inDq = !inDq; continue; }
+                if (ch === "'" && !inDq) {
+                  // Do not treat English intra-word apostrophes (`don't`, `it's`) as opening single-quoted strings.
+                  if (!inSq && k > pos && /[A-Za-z]/.test(decoded[k - 1]!) && k + 1 < end && /[A-Za-z]/.test(decoded[k + 1]!)) {
+                    continue;
+                  }
+                  inSq = !inSq;
+                  continue;
+                }
+                if (!inDq && !inSq && k >= minCut) {
+                  if (ch === ',' || ch === ';' || ch === '}' || ch === ']') {
+                    lastStructCut = k + 1;
+                    lastSafeCut = k + 1;
+                  } else if (ch === ' ' || ch === '\t') {
+                    const beforeWs = decoded.slice(Math.max(pos, k - 64), k).trimEnd();
+                    const afterWs = decoded.slice(k + 1, Math.min(decoded.length, k + 17));
+                    const unsafeNext = /^[ \t]*[:=]/.test(afterWs);
+                    const unsafePrefix =
+                      unsafeNext ||
+                      /[:=]$/.test(beforeWs) ||
+                      /(?:^|[\s,;{[("'])(?:bearer|basic|token|digest|apikey|oauth|jwt|hoba|mutual|negotiate|scram-sha-256)$/i.test(beforeWs) ||
+                      /(?:^|\s)--?[A-Za-z0-9_-]+$/.test(beforeWs) ||
+                      /(?:^|[\s,;{[("'])[A-Za-z0-9_.-]*(?:pass(?:word|wd|phrase)?|secret|token|key|auth|cred(?:ential)?|cookie|session|jwt|pwd|pin|database[_-]?url|conn(?:ection)?[_-]?str(?:ing)?|dsn)[A-Za-z0-9_.-]*["']?$/i.test(beforeWs);
+                    if (!unsafePrefix) {
+                      lastSafeCut = k + 1;
+                    }
+                  }
+                }
+              }
+              const preferredCut = lastSafeCut > pos ? lastSafeCut : lastStructCut;
+              if (preferredCut > pos) {
+                end = preferredCut;
+              } else {
+                // Still inside an unsplit token or >1 MiB quoted string: extend past closing quote
+                // and always run a boundary probe if closing quote was not reached within MAX_BLOCK_EXTEND.
+                let closedQuote = false;
+                if (inDq || inSq) {
+                  const targetQuote = inDq ? '"' : "'";
+                  let ext = end;
+                  let extEsc = escaped;
+                  const maxExt = Math.min(decoded.length, end + MAX_BLOCK_EXTEND);
+                  while (ext < maxExt) {
+                    const c = decoded[ext++]!;
+                    if (extEsc) { extEsc = false; continue; }
+                    if (c === '\\') { extEsc = true; continue; }
+                    if (c === targetQuote) { closedQuote = true; break; }
+                  }
+                  end = ext;
+                }
+                if (!closedQuote && end < decoded.length) {
+                  const boundaryProbe = decoded.slice(
+                    Math.max(pos, end - 512),
+                    Math.min(decoded.length, end + 512)
+                  );
+                  if (sanitizeString(boundaryProbe, options).redactedCount > 0) {
+                    end = Math.min(decoded.length, end + 512);
+                  }
+                }
+              }
+            }
+            const candidate = decoded.slice(pos, end);
+            const lastBegin = candidate.lastIndexOf('-----BEGIN');
+            const lastEnd = candidate.lastIndexOf('-----END');
+            if (lastBegin >= 0 && lastBegin > lastEnd) {
+              const closingSearch = decoded.slice(end, Math.min(decoded.length, end + MAX_BLOCK_EXTEND));
+              const endMarker = /-----END(?:\s+[A-Z0-9_-]+)?\s+PRIVATE\s+KEY-----\r?\n?/.exec(closingSearch);
+              if (endMarker) {
+                end = end + endMarker.index + endMarker[0].length;
+              }
+            }
+            // Scan the entire chunk linearly for an active YAML block scalar straddling `end`
+            // (so YAML blocks >4 KiB are never cut mid-block).
+            let activeIndent: number | null = null;
+            let linePos = pos;
+            while (linePos < end) {
+              const nextNl = decoded.indexOf('\n', linePos);
+              const lineStop = nextNl === -1 || nextNl >= end ? end : nextNl;
+              const l = decoded.slice(linePos, lineStop).replace(/\r$/, '');
+              linePos = lineStop < end ? lineStop + 1 : end;
+              if (activeIndent !== null) {
+                if (l.trim().length === 0) continue;
+                const ind = /^(\s*)/.exec(l)?.[1]?.length ?? 0;
+                if (ind > activeIndent) continue;
+                activeIndent = null;
+              }
+              if (l.includes(':') && (l.includes('|') || l.includes('>'))) {
+                const hdr = /^(\s*(?:-\s+)?)(["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)([|>](?:[+-]?\d*|\d*[+-]?)\s*(?:#.*)?)$/.exec(l);
+                if (hdr && isSensitiveKey(hdr[3] ?? '', options.customSensitiveKeys, options.safeKeyNames)) {
+                  activeIndent = (hdr[1] ?? '').length;
+                }
+              }
+            }
+            if (activeIndent !== null) {
+              let cursorPos = end;
+              const limit = Math.min(decoded.length, end + MAX_BLOCK_EXTEND);
+              while (cursorPos < limit) {
+                const nextNl = decoded.indexOf('\n', cursorPos);
+                const lineEnd = nextNl === -1 ? decoded.length : nextNl + 1;
+                const lineText = decoded.slice(cursorPos, nextNl === -1 ? decoded.length : nextNl).replace(/\r$/, '');
+                if (lineText.trim().length === 0) {
+                  cursorPos = lineEnd;
+                  continue;
+                }
+                const ind = /^(\s*)/.exec(lineText)?.[1]?.length ?? 0;
+                if (ind > activeIndent) {
+                  cursorPos = lineEnd;
+                  continue;
+                }
+                break;
+              }
+              end = cursorPos;
+            }
+          }
+          const slice = decoded.slice(pos, end);
+          const res = sanitizeString(slice, options);
+          if (res.redactedCount > 0) {
+            anyRedacted = true;
+            redactedCount += res.redactedCount;
+            findings.push(...res.findings);
+            out += res.sanitized;
+          } else {
+            out += slice;
+          }
+          pos = end;
+        }
+        if (anyRedacted) {
+          return Buffer.from(out, 'utf8');
+        }
+        return undefined;
+      };
+
+      if (Buffer.isBuffer(val)) {
+        const sanitizedBuf = sanitizeTextBytes(val);
+        return sanitizedBuf ?? val;
+      }
+
+      if (val instanceof Uint8Array && !(val instanceof Buffer)) {
+        const sanitizedBuf = sanitizeTextBytes(val);
+        return sanitizedBuf ? new Uint8Array(sanitizedBuf) : val;
       }
 
       if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {
@@ -852,11 +1159,18 @@ export function sanitizeMessages<T = unknown>(messages: T[], options: SanitizerO
             typeof (v as Record<string, unknown>).owner === 'string' &&
             typeof (v as Record<string, unknown>).kind === 'string';
           const sanitizedVal =
-            typeof v === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(v)
+            v === null || v === undefined || typeof v === 'boolean' || v === ''
               ? v
-              : isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
-                ? (options.replacement ?? DEFAULT_REPLACEMENT)
-                : sanitizeObject(v, options, isValidMeshEnv).sanitized;
+              : typeof v === 'number'
+                ? (!NUMERIC_COUNTER_KEY_REGEX.test(k) &&
+                    isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
+                    ? (options.replacement ?? DEFAULT_REPLACEMENT)
+                    : v)
+                : typeof v === 'string' && Array.isArray(options.safeValues) && options.safeValues.includes(v)
+                  ? v
+                  : isSensitiveKey(k, options.customSensitiveKeys, options.safeKeyNames)
+                    ? (options.replacement ?? DEFAULT_REPLACEMENT)
+                    : sanitizeObject(v, options, isValidMeshEnv).sanitized;
           Object.defineProperty(clonedMsg, k, {
             value: sanitizedVal,
             enumerable: true,

@@ -425,7 +425,7 @@ const CLEAR_BLOCKER_REGEX =
   /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|(?<!\p{L})(?:engellendi|ilerleyemiyorum|doğrulayam[ıi]yorum|çal[ıi]şt[ıi]ram[ıi]yorum|tamamlanmad[ıi]|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum|bitmedi|bitmiş\s+say[ıi]lm[ıi]yor|bitmiş\s+say[ıi]lmaz|tamamlanm[ıi]ş\s+say[ıi]lm[ıi]yor)(?!\p{L})/iu;
 
 const IN_PROGRESS_REGEX =
-  /\b(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report|running\s+in\s+the\s+background|moved\s+to\s+the\s+background|waiting\s+for\s+(?:the\s+)?background)\b|(?<!\p{L})(?:işlem\p{L}*\s+devam\s+ediyor|çal[ıi]şma\p{L}*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\p{L}*\s+sürüyor|çal[ıi]ş[ıi]yorum|inceliyorum|haz[ıi]rl[ıi]yorum|uyguluyorum|başl[ıi]yorum|deniyorum|devredildi|aktar[ıi]ld[ıi]|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu|arka\s+planda\s+(?:çal[ıi]ş[ıi]yor|devam\s+ediyor))(?!\p{L})/iu;
+  /\b(?:in\s+progress|work\s+in\s+progress|(?:currently|still|is|am)\s+processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report|running\s+in\s+the\s+background|moved\s+to\s+the\s+background|waiting\s+for\s+(?:the\s+)?background)\b|(?<!\p{L})(?:işlem\p{L}*\s+devam\s+ediyor|çal[ıi]şma\p{L}*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\p{L}*\s+sürüyor|çal[ıi]ş[ıi]yorum|inceliyorum|haz[ıi]rl[ıi]yorum|uyguluyorum|başl[ıi]yorum|deniyorum|devredildi|aktar[ıi]ld[ıi]|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu|arka\s+planda\s+(?:çal[ıi]ş[ıi]yor|devam\s+ediyor))(?!\p{L})/iu;
 
 const CLEAR_BLOCKER_GLOBAL_REGEX = new RegExp(CLEAR_BLOCKER_REGEX.source, "giu");
 
@@ -512,14 +512,16 @@ function isPureDiagnosticQuestion(text: string): boolean {
   );
 }
 
-/** Strips fenced code blocks and blockquotes while unwrapping inline backticks
- * so explicit command prohibitions like "Do NOT run `npm run check`" remain visible. */
+/** Strips fenced code blocks, blockquotes, and quoted examples while unwrapping
+ * inline backticks so explicit command prohibitions like "Do NOT run `npm run check`"
+ * remain visible. */
 export function sanitizeForProhibitions(text: string): string {
   return text
     .replace(/<lazy_bound_skill\b[\s\S]*?<\/lazy_bound_skill>/gi, " ")
     .replace(/<lazy_skill_suggestions\b[\s\S]*?<\/lazy_skill_suggestions>/gi, " ")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/^\s*>[^\n]*$/gm, " ")
+    .replace(/(?:"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’)/g, " ")
     .replace(/\x60([^\x60\n]+)\x60/g, "$1");
 }
 
@@ -544,13 +546,28 @@ export function deniedVerification(text: string, kind: VerificationKind): boolea
   const directTarget = DIRECT_TOOL_PROHIBITIONS[kind];
   const pmScript = PM_VERIFICATION_SCRIPTS[kind];
   const pmCommand = `(?:npm|pnpm|yarn|bun)\\s+(?:run\\s+)?${pmScript}`;
-  const denied = new RegExp(
-    `\\b(?:do\\s+not|don't|dont|not|without|never|skip)\\s+(?:(?:run(?:ning)?|execute|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
+  const strongDenied = new RegExp(
+    `\\b(?:do\\s+not|don't|dont|must\\s+not|mustn't|should\\s+not|shouldn't|never)\\s+(?:(?:run(?:ning)?|execute|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
+      `|(?<!\\b(?:do\\s+not|don't|dont|never|must\\s+not|should\\s+not|cannot|can't)\\s+)\\bskip\\s+(?:(?:running|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
+      `|(?<!\\b(?:do\\s+not|don't|dont|never|must\\s+not|should\\s+not|cannot|can't)\\s+(?:[a-z']+\\s+){0,3})\\bwithout\\s+(?:(?:running|executing)\\s+)?(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b` +
       `|(?<!\\p{L})(?:${pmCommand}|${kind === "test" ? "testleri?" : kind})\\s+(?:çalıştırma|çalıştırmayın|yapma|yapmayın|koşturma|koşturmayın)(?!\\p{L})`,
     "iu"
   );
+  if (strongDenied.test(clean)) return true;
+  const bareNotDenied = new RegExp(
+    `(?<!\\b(?:did|does|has|have|had|was|were|is|are|could|can|cannot|may|might)\\s+(?:(?:it|this|that|they|we|you|he|she|ci|the\\s+[a-z0-9_-]+)\\s+)?(?:(?:currently|still|yet|actually|really|presently|just|even|previously)\\s+)?)\\bnot\\s+(?:to\\s+)?(?:run(?:ning)?|execute|executing)\\s+(?:the\\s+)?(?:${pmCommand}|${directTarget})\\b`,
+    "iu"
+  );
+  // Check bare `not run ...` only on non-question sentences so diagnostic questions
+  // like "Why did it not run npm test?" never trigger a prohibition.
+  const sentences = clean.split(/(?<=[.!?\n])\s+/);
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed || trimmed.endsWith("?")) continue;
+    if (bareNotDenied.test(trimmed)) return true;
+  }
   const negations = extractInternationalNegations(clean);
-  return denied.test(clean) || (kind === "test" && negations.test);
+  return kind === "test" && negations.test;
 }
 
 export interface AdvisoryTaskSignals {
@@ -622,9 +639,14 @@ export function detectInstructionFidelitySignals(
   observableWork: boolean
 ): InstructionFidelitySignals {
   const international = detectInternationalHistoricalRefusal(instruction, prose);
+  const trimmedInstruction = instruction.trim();
+  const isDiagnosticQuestion =
+    trimmedInstruction.endsWith("?") &&
+    /^(?:(?:why|what|how|when|where)\b|(?:neden|niye|niçin|nasıl)(?!\p{L}))/iu.test(trimmedInstruction);
   const explicitCurrentAction =
     ACTION_FIDELITY.test(instruction) &&
     !isExploratoryPrompt(instruction) &&
+    !isDiagnosticQuestion &&
     !NEGATED_ACTION_FIDELITY.test(instruction);
   const originalPattern =
     explicitCurrentAction &&

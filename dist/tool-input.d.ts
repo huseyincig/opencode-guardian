@@ -24,8 +24,8 @@ export interface FilePatch {
     deleted: boolean;
 }
 export declare const FILE_WRITE_WHOLE_KEYS: readonly ["content", "file_text", "CodeContent", "text"];
-export declare const FILE_WRITE_EDIT_KEYS: readonly ["new_string", "newString", "new_str", "ReplacementContent"];
-export declare const FILE_WRITE_ALL_KEYS: readonly ["content", "file_text", "CodeContent", "text", "new_string", "newString", "new_str", "ReplacementContent"];
+export declare const FILE_WRITE_EDIT_KEYS: readonly ["new_string", "newString", "new_str", "appendContent", "prependContent", "ReplacementContent"];
+export declare const FILE_WRITE_ALL_KEYS: readonly ["content", "file_text", "CodeContent", "text", "new_string", "newString", "new_str", "appendContent", "prependContent", "ReplacementContent"];
 export declare function extractToolTargetFile(input: Record<string, unknown>): string | undefined;
 /** Preserve per-file boundaries in unified and native apply_patch input. */
 export declare function splitFilePatches(value: unknown): FilePatch[];

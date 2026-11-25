@@ -83,6 +83,8 @@ export function captureBeforeEdit(tool: string, input: Record<string, unknown>, 
     typeof input.oldString === "string" ||
     typeof input.old_str === "string" ||
     typeof input.ReplacementContent === "string" ||
+    typeof input.appendContent === "string" ||
+    typeof input.prependContent === "string" ||
     typeof input.StartLine === "number" ||
     typeof input.EndLine === "number" ||
     typeof input.patch === "string" ||

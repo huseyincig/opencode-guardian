@@ -441,6 +441,29 @@ export function resolveEffectiveConfig(
       }
       merged.secrets = lockedSecrets;
     }
+    if (base.telemetry?.enabled !== false) {
+      const telemetryRank = (level: string | undefined): number =>
+        level === "all" ? 2 : level === "violations" ? 1 : level === "off" ? 0 : 1;
+      const baseLevel = base.telemetry?.level ?? "violations";
+      const mergedLevel = merged.telemetry?.level ?? baseLevel;
+      const lockedLevel =
+        telemetryRank(mergedLevel) >= telemetryRank(baseLevel) ? mergedLevel : baseLevel;
+      merged.telemetry = {
+        ...merged.telemetry,
+        enabled: true,
+        level: lockedLevel,
+        ...(typeof base.telemetry?.maxBytes === "number"
+          ? {
+              maxBytes: Math.max(
+                base.telemetry.maxBytes,
+                typeof merged.telemetry?.maxBytes === "number"
+                  ? merged.telemetry.maxBytes
+                  : base.telemetry.maxBytes
+              ),
+            }
+          : {}),
+      };
+    }
     const baseRemBudget = base.remediationBudget ?? DEFAULT_CONFIG.remediationBudget ?? 1;
     merged.remediationBudget = Math.max(baseRemBudget, merged.remediationBudget ?? baseRemBudget);
     const baseIterBudget = base.iterationBudget ?? DEFAULT_CONFIG.iterationBudget ?? 3;
@@ -867,8 +890,13 @@ export class GuardEngine {
     const lastPeerWakeIndex = currentTurn.findLastIndex((msg) =>
       isPeerWakeMessage(msg, sessionID)
     );
+    const hasPendingRemediation = Boolean(
+      this.sessionState.getPendingRemediation(sessionID, turnKey)?.length
+    );
     const isPeerWakeTurn =
-      lastPeerWakeIndex > 0 && lastPeerWakeIndex > lastGuardianIndex;
+      lastPeerWakeIndex > 0 &&
+      lastPeerWakeIndex > lastGuardianIndex &&
+      !hasPendingRemediation;
     const effectiveRemediationResponse = isRemediationResponse && !isPeerWakeTurn;
     const completionTurn = isPeerWakeTurn
       ? currentTurn.slice(lastPeerWakeIndex)
@@ -1011,25 +1039,57 @@ export class GuardEngine {
           effectiveRemediationResponse ||
           persistedRemediationCount > 0 ||
           this.sessionState.getTurnContinuationCount(sessionID, turnKey) > 0;
-        if (
-          this.sessionState.getTurnContinuationCount(sessionID, turnKey) === 0 &&
-          persistedRemediationCount >= budget
-        ) {
-          return {
-            decision: "pass",
-            results,
-            ...(iterativeAttempted ? { remediationStatus: "failed" as const } : {}),
-          };
-        }
         const progressKey = `${latestMutationSequence(evidence)}:${evidence.records.length}`;
-        if (!this.sessionState.canContinue(sessionID, turnKey, progressKey, budget)) {
-          return {
-            decision: "pass",
-            results,
-            ...(iterativeAttempted ? { remediationStatus: "failed" as const } : {}),
-          };
-        }
+        const iterativeExhausted =
+          (this.sessionState.getTurnContinuationCount(sessionID, turnKey) === 0 &&
+            persistedRemediationCount >= budget) ||
+          !this.sessionState.canContinue(sessionID, turnKey, progressKey, budget);
+        if (iterativeExhausted) {
+          const remainingBlocking = blockingResults.filter(
+            (result) => result.ruleId !== "task/completion-gate"
+          );
+          if (remainingBlocking.length === 0) {
+            this.sessionState.clearPendingRemediation(sessionID);
+            return {
+              decision: "pass",
+              results,
+              ...(iterativeAttempted ? { remediationStatus: "failed" as const } : {}),
+            };
+          }
+          // Preserve unrelated blocking findings (e.g., security/no-secrets, integrity/no-stubs)
+          // by dropping only the exhausted iterative completion-gate prompt.
+          blockingResults.splice(0, blockingResults.length, ...remainingBlocking);
+          blockingPrompts.splice(
+            0,
+            blockingPrompts.length,
+            ...remainingBlocking
+              .map((result) => result.remediationPrompt)
+              .filter((prompt): prompt is string => Boolean(prompt))
+          );
+        } else {
         this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
+        const nonCompletionBlocking = blockingResults.filter(
+          (result) => result.ruleId !== "task/completion-gate"
+        );
+        const nonCompletionFingerprints = nonCompletionBlocking.length > 0
+          ? Array.from(new Set(
+              nonCompletionBlocking.flatMap((result) => {
+                const keys = result.findings.map((finding) =>
+                  findingIdentity(result.ruleId, finding)
+                );
+                return keys.length > 0 ? keys : [`${result.ruleId}:block`];
+              })
+            )).sort()
+          : [];
+        const nonCompletionRuleIds = nonCompletionBlocking.map((r) => r.ruleId);
+        if (nonCompletionBlocking.length > 0) {
+          this.sessionState.recordRemediation(
+            sessionID,
+            turnKey,
+            nonCompletionFingerprints,
+            nonCompletionRuleIds
+          );
+        }
         const contRuleIds = blockingResults.map((r) => r.ruleId);
         const contFiles = Array.from(new Set(
           blockingResults.flatMap((result) =>
@@ -1076,6 +1136,14 @@ export class GuardEngine {
             rollbackDone = true;
             this.inspectedMessages.delete(sessionID);
             this.sessionState.rollbackContinuation(sessionID, turnKey, progressKey);
+            if (nonCompletionBlocking.length > 0) {
+              this.sessionState.rollbackRemediation(
+                sessionID,
+                turnKey,
+                nonCompletionFingerprints,
+                nonCompletionRuleIds
+              );
+            }
             this.sessionState.clearPendingRemediation(sessionID);
             if (handoff) {
               this.sessionState.clearActiveHandoff(sessionID);
@@ -1083,6 +1151,7 @@ export class GuardEngine {
             }
           },
         };
+        }
       }
 
       const configuredBudget =
@@ -1235,9 +1304,26 @@ export class GuardEngine {
       const successfulFresh = freshEvidence.records.filter(
         (record) => record.status === "success"
       );
+      const resolvedRoot = path.resolve(directory);
+      let canonicalRoot = resolvedRoot;
+      try { canonicalRoot = fs.realpathSync(resolvedRoot); } catch {}
+      const normalizeProjectPath = (rawPath: string): string => {
+        const cleaned = rawPath.replace(/\\/g, "/");
+        const resolved = path.resolve(resolvedRoot, cleaned);
+        try { return fs.realpathSync(resolved); } catch { return resolved; }
+      };
+      const isInsideProject = (targetPath: string): boolean => {
+        const relLex = path.relative(resolvedRoot, targetPath);
+        const relReal = path.relative(canonicalRoot, targetPath);
+        const inLex = relLex !== ".." && !relLex.startsWith(".." + path.sep) && !path.isAbsolute(relLex);
+        const inReal = relReal !== ".." && !relReal.startsWith(".." + path.sep) && !path.isAbsolute(relReal);
+        return inLex || inReal;
+      };
       const fixedPaths = new Set(
         successfulFresh.filter((record) => record.kind === "file-mutation")
-          .map((record) => record.filePath).filter((file): file is string => !!file)
+          .map((record) => record.filePath)
+          .filter((file): file is string => !!file)
+          .map(normalizeProjectPath)
       );
       const hasFreshSourceReview = successfulFresh.some((record) =>
         isSourceReviewEvidence(record)
@@ -1264,13 +1350,12 @@ export class GuardEngine {
             ? undefined
             : (resolveSanitizerOptions(this.config) ?? undefined);
         verified = pendingFiles.length > 0 && pendingFiles.every((rel) => {
-          if (!fixedPaths.has(rel)) return false;
-          const full = path.resolve(directory, rel);
-          const relative = path.relative(path.resolve(directory), full);
-          if (relative === ".." || relative.startsWith(".." + path.sep) ||
-              path.isAbsolute(relative)) return false;
+          if (!fixedPaths.has(normalizeProjectPath(rel))) return false;
+          const cleanedRel = rel.replace(/\\/g, "/");
+          const full = path.resolve(resolvedRoot, cleanedRel);
+          if (!isInsideProject(full)) return false;
           try {
-            const realRoot = fs.realpathSync(path.resolve(directory));
+            const realRoot = fs.realpathSync(resolvedRoot);
             const realFile = fs.realpathSync(full);
             const realRelative = path.relative(realRoot, realFile);
             if (realRelative === ".." || realRelative.startsWith(".." + path.sep) ||
@@ -1295,17 +1380,16 @@ export class GuardEngine {
       if (verified && sourceRules.length) {
         verified = pendingFiles.length > 0;
         for (const rel of pendingFiles) {
-          if (!verified || !fixedPaths.has(rel)) { verified = false; break; }
-          const root = path.resolve(directory);
-          const full = path.resolve(root, rel);
-          const scoped = path.relative(root, full);
-          if (scoped === ".." || scoped.startsWith(".." + path.sep) || path.isAbsolute(scoped)) {
+          if (!verified || !fixedPaths.has(normalizeProjectPath(rel))) { verified = false; break; }
+          const cleanedRel = rel.replace(/\\/g, "/");
+          const full = path.resolve(resolvedRoot, cleanedRel);
+          if (!isInsideProject(full)) {
             verified = false; break;
           }
           let content: string;
           try {
             const realFile = fs.realpathSync(full);
-            const actual = path.relative(fs.realpathSync(root), realFile);
+            const actual = path.relative(fs.realpathSync(resolvedRoot), realFile);
             if (actual === ".." || actual.startsWith(".." + path.sep) || path.isAbsolute(actual)) {
               verified = false; break;
             }
@@ -1351,6 +1435,13 @@ export class GuardEngine {
           record.sequence > lastFreshMutationSequence &&
           isVerificationSnapshotCurrent(record, freshEvidence, directory)
       );
+      const lastOverallMutationSequence = latestMutationSequence(evidence);
+      const allCurrentValidVerifications = evidence.records.filter(
+        (record) =>
+          record.status === "success" &&
+          record.sequence > lastOverallMutationSequence &&
+          isVerificationSnapshotCurrent(record, evidence, directory)
+      );
       if (verified && pendingRules.some((rule) =>
         ["integrity/no-unverified-claims", "integrity/no-silent-failure"].includes(rule)) &&
         !freshValidVerifications.some((record) =>
@@ -1367,7 +1458,15 @@ export class GuardEngine {
           hasFreshSourceReview &&
           hasPostMutationReview(evidence, Boolean(contract?.requiresSourceReview));
         const hasRequired = required.length > 0
-          ? required.every((kind) => freshValidVerifications.some((record) => record.kind === kind))
+          ? (freshValidVerifications.some((record) =>
+              required.includes(record.kind as (typeof required)[number])
+            ) ||
+              (Boolean(contract?.requiresSourceReview) &&
+                hasFreshSourceReview &&
+                hasPostMutationReview(evidence, true))) &&
+            required.every((kind) =>
+              allCurrentValidVerifications.some((record) => record.kind === kind)
+            )
           : sourceReviewSatisfied ||
             freshValidVerifications.some((record) =>
               ["test", "build", "typecheck", "lint", "audit"].includes(record.kind)

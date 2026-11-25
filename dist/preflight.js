@@ -1,6 +1,6 @@
 import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "./evidence.js";
 import { assessCommandPreflight } from "./secrets/preflight.js";
-import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
+import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages, stripShellWrappersAndPath } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
 import { extractStructuredEditInspection, extractToolAction, KNOWN_SHELL_TOOLS, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
 export { extractToolAction } from "./tool-input.js";
@@ -37,7 +37,253 @@ export function isFileMutationTool(tool) {
 export function isProcessStartTool(tool) {
     return extractToolAction(tool) === "process_start";
 }
-function evaluateProcessStartPreflight(input, mode = "strict") {
+function unwrapProcessStartLauncher(executable, args) {
+    let curExec = executable;
+    let curArgs = args;
+    for (let depth = 0; depth < 6; depth++) {
+        let idx = 0;
+        if (curExec === "sudo") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                // Only consume next token when a value-taking flag is standalone or ends a pure-boolean cluster
+                // (never for attached values like `-uroot` or `-Dtmp`, and never for boolean `-H`/`-P`).
+                if (/^(?:-[ABEFGHIJKLMNOPQSTUVWXYZabdefijklmnoqsvwxyz]*[ugCprthDUcRT]|--user|--group|--chdir|--host|--prompt|--role|--type|--other-user|--close-from|--login-class|--selinux-role|--selinux-type)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "env") {
+            const joinEnvSplit = (head, tailStart) => {
+                const tail = curArgs.slice(tailStart).map(quoteProcessArgument).join(" ");
+                return tail ? `${head} ${tail}`.trim() : head;
+            };
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--" || a === "-") {
+                    idx++;
+                    while (idx < curArgs.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(curArgs[idx]))
+                        idx++;
+                    break;
+                }
+                if (a === "-S" || a === "--split-string") {
+                    const splitScript = joinEnvSplit(curArgs[idx + 1] ?? "", idx + 2);
+                    return { executable: curExec, args: curArgs, envSplitScript: splitScript };
+                }
+                if (a.startsWith("--split-string=")) {
+                    const splitScript = joinEnvSplit(a.slice("--split-string=".length), idx + 1);
+                    return { executable: curExec, args: curArgs, envSplitScript: splitScript };
+                }
+                if (a.startsWith("-S") || /^-[i0v]+S/.test(a)) {
+                    const sPos = a.indexOf("S");
+                    const attached = a.slice(sPos + 1);
+                    const splitScript = attached
+                        ? joinEnvSplit(attached, idx + 1)
+                        : joinEnvSplit(curArgs[idx + 1] ?? "", idx + 2);
+                    return { executable: curExec, args: curArgs, envSplitScript: splitScript };
+                }
+                if (/^(?:-[uC]|-[i0v]+[uC]|--unset|--chdir)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "timeout") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                if (/^(?:-[ks]|--kill-after|--signal)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+            // Consume duration token (even after `--`).
+            if (idx < curArgs.length)
+                idx++;
+        }
+        else if (curExec === "flock") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                if (/^(?:-w|--timeout|-E|--conflict-exit-code)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+            // Consume lockfile token (even after `--`).
+            if (idx < curArgs.length)
+                idx++;
+            if (curArgs[idx] === "--")
+                idx++;
+            if (curArgs[idx] === "-c" || curArgs[idx] === "--command")
+                return { executable: curExec, args: curArgs };
+        }
+        else if (curExec === "nice") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "-n" || a === "--adjustment") {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "stdbuf") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                if (/^(?:-[ioe]|--input|--output|--error)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "ionice") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                if (/^(?:-[cn]|--class|--classdata)$/.test(a)) {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "exec") {
+            while (idx < curArgs.length) {
+                const a = curArgs[idx];
+                if (a === "--") {
+                    idx++;
+                    break;
+                }
+                if (a === "-a") {
+                    idx += 2;
+                    continue;
+                }
+                if (a.startsWith("-")) {
+                    idx++;
+                    continue;
+                }
+                break;
+            }
+        }
+        else if (curExec === "nohup" || curExec === "time" || curExec === "setsid" || curExec === "builtin") {
+            while (idx < curArgs.length && curArgs[idx].startsWith("-"))
+                idx++;
+        }
+        else if (curExec === "command") {
+            if (curArgs.some((a) => /^-[a-z]*[vV]/.test(a)))
+                break;
+            while (idx < curArgs.length && (curArgs[idx] === "-p" || curArgs[idx] === "--")) {
+                const isEnd = curArgs[idx] === "--";
+                idx++;
+                if (isEnd)
+                    break;
+            }
+        }
+        else {
+            break;
+        }
+        const nextExecRaw = curArgs[idx];
+        if (!nextExecRaw)
+            break;
+        const nextExecName = nextExecRaw.trim().split(/[\\/]/).at(-1);
+        if (!nextExecName)
+            break;
+        curExec = nextExecName.toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+        curArgs = curArgs.slice(idx + 1);
+    }
+    return { executable: curExec, args: curArgs };
+}
+function splitEnvSplitTokens(script) {
+    const tokens = [];
+    let cur = "";
+    let has = false;
+    let q = null;
+    for (let i = 0; i < script.length; i++) {
+        const ch = script[i];
+        if (ch === "\\" && q !== "'") {
+            has = true;
+            cur += script[++i] ?? "";
+            continue;
+        }
+        if (q) {
+            if (ch === q)
+                q = null;
+            else
+                cur += ch;
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            has = true;
+            q = ch;
+            continue;
+        }
+        if (/\s/.test(ch)) {
+            if (has) {
+                tokens.push(cur);
+                cur = "";
+                has = false;
+            }
+            continue;
+        }
+        has = true;
+        cur += ch;
+    }
+    if (has)
+        tokens.push(cur);
+    return tokens;
+}
+function evaluateProcessStartPreflight(input, mode = "strict", depth = 0) {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
         return "uninspectable-shell-input";
     }
@@ -50,33 +296,174 @@ function evaluateProcessStartPreflight(input, mode = "strict") {
     const executableName = value.executable.trim().split(/[\\/]/).at(-1);
     if (!executableName)
         return "uninspectable-shell-input";
-    const executable = executableName.toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
-    const args = value.args ?? [];
-    const shells = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish",
-        "powershell", "pwsh", "cmd"]);
-    if (shells.has(executable)) {
+    const rawExecutable = executableName.toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+    const rawArgs = value.args ?? [];
+    const unwrapped = unwrapProcessStartLauncher(rawExecutable, rawArgs);
+    if (unwrapped.envSplitScript !== undefined) {
+        const trimmedSplit = unwrapped.envSplitScript.trim();
+        if (!trimmedSplit)
+            return "uninspectable-shell-input";
+        const bashCmd = /^(?:-(?![i0v]*S\b)(?!--split-string\b)|[A-Za-z_][A-Za-z0-9_]*=)/.test(trimmedSplit)
+            ? `env ${trimmedSplit}`
+            : trimmedSplit;
+        const bashResult = evaluatePreflight("bash", { command: bashCmd }, [], mode);
+        if (bashResult)
+            return bashResult;
+        if (depth < 4) {
+            const splitTokens = splitEnvSplitTokens(trimmedSplit);
+            const nextUnwrapped = unwrapProcessStartLauncher("env", splitTokens);
+            if (nextUnwrapped.envSplitScript !== undefined) {
+                return evaluateProcessStartPreflight({ executable: "env", args: splitTokens }, mode, depth + 1);
+            }
+            if (nextUnwrapped.executable !== "env") {
+                return evaluateProcessStartPreflight({ executable: nextUnwrapped.executable, args: nextUnwrapped.args }, mode, depth + 1);
+            }
+            if (mode === "strict") {
+                const envCmd = ["env", ...splitTokens].map(quoteProcessArgument).join(" ");
+                if (assessCommandPreflight(envCmd).isHighRiskEnvDump) {
+                    return "high-risk-environment-dump";
+                }
+            }
+        }
+        return undefined;
+    }
+    const executable = unwrapped.executable;
+    const args = unwrapped.args;
+    const posixShells = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+    const windowsShells = new Set(["powershell", "pwsh", "cmd"]);
+    if (posixShells.has(executable) || windowsShells.has(executable)) {
+        const isPosix = posixShells.has(executable);
         const isPowerShell = executable === "powershell" || executable === "pwsh";
-        const option = args.findIndex((arg) => /^-[a-z]*c[a-z]*$/i.test(arg) ||
-            /^(?:\/c|-command|-encodedcommand|-enc)$/i.test(arg) ||
-            (isPowerShell && /^(?:-ec|-e)$/i.test(arg)));
-        const shellOption = args[option];
+        let option = -1;
+        if (isPosix) {
+            for (let i = 0; i < args.length; i++) {
+                const a = args[i];
+                if (a === "--" || a === "-" || (!a.startsWith("-") && !a.startsWith("+")))
+                    break;
+                if (a === "--rcfile" || a === "--init-file" || a === "-o" || a === "+o" || a === "-O" || a === "+O") {
+                    i++;
+                    continue;
+                }
+                if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(a)) {
+                    option = i;
+                    break;
+                }
+                if (/^[+-][a-zA-Z]*[oO][a-zA-Z]*$/.test(a)) {
+                    i++;
+                    continue;
+                }
+            }
+        }
+        else if (isPowerShell) {
+            for (let i = 0; i < args.length; i++) {
+                const a = args[i];
+                // `-File` / `-f` or a positional script file executes an uninspectable script and consumes all remaining args.
+                if (/^(?:-file|-f)$/i.test(a) || !a.startsWith("-"))
+                    break;
+                if (/^(?:-executionpolicy|-ep|-workingdirectory|-wd|-configurationname|-settingsfile|-outputformat|-inputformat)$/i.test(a)) {
+                    i++;
+                    continue;
+                }
+                if (/^(?:-command|-c|-encodedcommand|-enc|-ec|-e)$/i.test(a)) {
+                    option = i;
+                    break;
+                }
+            }
+        }
+        else {
+            option = args.findIndex((a) => /^\/[ck]$/i.test(a));
+        }
+        const shellOption = option >= 0 ? args[option] : undefined;
         if (option < 0 ||
             shellOption === undefined ||
-            args.length <= option + 1 ||
             /^(?:-encodedcommand|-enc)$/i.test(shellOption) ||
             (isPowerShell && /^(?:-ec|-e)$/i.test(shellOption))) {
             return "uninspectable-shell-input";
         }
-        const script = ["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(executable)
-            ? args[option + 1]
-            : args.slice(option + 1).join(" ");
+        let scriptIndex = option + 1;
+        if (isPosix) {
+            if (/[oO]/.test(shellOption)) {
+                // Combined option like `-co errexit <script>` or `-cO extglob <script>` consumes `<opt>` before `<script>`.
+                scriptIndex++;
+            }
+            // POSIX shells continue parsing options placed after `-c` (e.g. `bash -c -e <script>`, `bash -c -o errexit <script>`, `bash -c - <script>`).
+            while (scriptIndex < args.length) {
+                const nextArg = args[scriptIndex];
+                if (nextArg === "--" || nextArg === "-") {
+                    scriptIndex++;
+                    break;
+                }
+                if (nextArg === "-o" ||
+                    nextArg === "+o" ||
+                    nextArg === "-O" ||
+                    nextArg === "+O" ||
+                    nextArg === "--rcfile" ||
+                    nextArg === "--init-file" ||
+                    /^[+-][a-zA-Z]*[oO][a-zA-Z]*$/.test(nextArg)) {
+                    scriptIndex += 2;
+                    continue;
+                }
+                if (/^[+-][a-zA-Z0-9-]+(?:=\S+)?$/.test(nextArg)) {
+                    scriptIndex++;
+                    continue;
+                }
+                break;
+            }
+        }
+        if (scriptIndex >= args.length) {
+            return "uninspectable-shell-input";
+        }
+        const script = isPosix
+            ? args[scriptIndex]
+            : args.slice(scriptIndex).join(" ");
         return evaluatePreflight("bash", { command: script }, [], mode);
     }
-    if (["node", "python", "python3", "ruby", "perl"].includes(executable) &&
-        args.some((arg) => ["-e", "--eval", "-c", "-E"].includes(arg))) {
-        return "uninspectable-shell-input";
+    if (["node", "bun", "deno", "ruby", "perl"].includes(executable)) {
+        const valueFlags = new Set([
+            "-r", "--require", "--import", "--loader", "--experimental-loader",
+            "--env-file", "--env-file-if-exists", "--conditions", "--input-type",
+            "-C", "--eval-file", "-I",
+        ]);
+        const isPerlOrRuby = executable === "perl" || executable === "ruby";
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (arg === "--")
+                break;
+            if (valueFlags.has(arg)) {
+                i++;
+                continue;
+            }
+            if (!arg.startsWith("-"))
+                break;
+            if (arg === "-e" ||
+                arg === "--eval" ||
+                arg.startsWith("--eval=") ||
+                arg === "-p" ||
+                arg === "--print" ||
+                arg.startsWith("--print=") ||
+                arg === "-E" ||
+                /^-(?![ICrMm])[a-z]*[ep][a-z]*$/.test(arg) ||
+                (isPerlOrRuby && /^-(?![ICrMm])[a-zA-Z]*[eE]/.test(arg))) {
+                return "uninspectable-shell-input";
+            }
+        }
     }
-    const command = [executable, ...args].map(quoteProcessArgument).join(" ");
+    if (["python", "python3"].includes(executable)) {
+        const valueFlags = new Set(["-W", "-X", "-Q", "--check-hash-based-pycs"]);
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            if (arg === "--" || arg === "-m" || arg.startsWith("-m") || !arg.startsWith("-"))
+                break;
+            if (valueFlags.has(arg)) {
+                i++;
+                continue;
+            }
+            if (arg === "-c" || /^-(?![WXQ])[a-zA-Z]*c/.test(arg)) {
+                return "uninspectable-shell-input";
+            }
+        }
+    }
+    const command = [rawExecutable, ...rawArgs].map(quoteProcessArgument).join(" ");
     if (mode === "strict" && assessCommandPreflight(command).isHighRiskEnvDump) {
         return "high-risk-environment-dump";
     }
@@ -113,7 +500,7 @@ export function evaluateFileMutationPreflight(tool, input, mode = "strict", secr
         args.file ??
         (typeof patchRaw === "string" ? extractFilePathFromPatch(patchRaw) : undefined);
     const textsToCheck = [];
-    for (const key of ["content", "new_string", "newString", "new_str", "CodeContent", "ReplacementContent", "text", "file_text"]) {
+    for (const key of ["content", "new_string", "newString", "new_str", "appendContent", "prependContent", "CodeContent", "ReplacementContent", "text", "file_text"]) {
         if (typeof args[key] === "string") {
             textsToCheck.push({
                 text: args[key],
@@ -237,13 +624,44 @@ export function evaluateFileMutationPreflight(tool, input, mode = "strict", secr
 }
 function shellWords(text) {
     const words = [];
-    const pattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
-    let match = pattern.exec(text);
-    while (match) {
-        words.push(match[1] ?? match[2] ?? match[3] ?? "");
-        match = pattern.exec(text);
+    let current = "";
+    let hasToken = false;
+    let quote = null;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "\\" && quote !== "'") {
+            hasToken = true;
+            current += text[++i] ?? "";
+            continue;
+        }
+        if (quote) {
+            if (ch === quote) {
+                quote = null;
+            }
+            else {
+                current += ch;
+            }
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            hasToken = true;
+            quote = ch;
+            continue;
+        }
+        if (/\s/.test(ch)) {
+            if (hasToken) {
+                words.push(current);
+                current = "";
+                hasToken = false;
+            }
+            continue;
+        }
+        hasToken = true;
+        current += ch;
     }
-    return words.filter(Boolean);
+    if (hasToken)
+        words.push(current);
+    return words;
 }
 function normalizeCommitMessage(value) {
     let message = value.trim().replace(/^=/, "");
@@ -255,12 +673,15 @@ function normalizeCommitMessage(value) {
     return message.trim();
 }
 function extractGitCommitMessageFromStage(stage) {
-    const match = /\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+commit\b([^\n]*)/i.exec(stage);
+    const stripped = stripShellWrappersAndPath(stage);
+    const match = /^git(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+commit\b([^\n]*)/i.exec(stripped);
     if (!match)
         return undefined;
     const words = shellWords(match[1] ?? "");
     for (let index = 0; index < words.length; index++) {
         const word = words[index] ?? "";
+        if (word === "--")
+            break;
         if (word === "-m" || word === "--message") {
             const next = words[index + 1];
             return next === undefined ? undefined : normalizeCommitMessage(next);
@@ -268,7 +689,7 @@ function extractGitCommitMessageFromStage(stage) {
         if (word.startsWith("--message=")) {
             return normalizeCommitMessage(word.slice("--message=".length));
         }
-        if (/^-[^-]/.test(word)) {
+        if (/^-[^-]/.test(word) && !/^-[ucCFtS]/.test(word)) {
             const messageOption = word.indexOf("m", 1);
             if (messageOption >= 0) {
                 const attached = word.slice(messageOption + 1);
@@ -306,7 +727,8 @@ function npmPackageNameFromSpec(spec) {
     const value = spec.trim();
     if (!value)
         return undefined;
-    if (/^(?:\.{1,2}(?:\/|$)|\/|~\/|file:|link:|workspace:|https?:|git(?:\+|:)|github:|ssh:)/i.test(value)) {
+    if (/^(?:\.{1,2}(?:\/|$)|\/|~\/|file:|link:|workspace:|https?:|git(?:\+|:)|github:|gitlab:|bitbucket:|gist:|ssh:)/i.test(value) ||
+        (!value.startsWith("@") && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[^\s]+)?$/.test(value))) {
         return undefined;
     }
     if (value.startsWith("@")) {
@@ -323,14 +745,41 @@ function suspiciousNpmPackageName(name) {
     return (/[A-Z]/.test(name) ||
         /(?:-official|-security-patch|-security-update|-fixed-version|-patched-release)$/i.test(name));
 }
+const PM_OPTIONS_WITH_VALUE = new Set([
+    "--filter", "-F", "--workspace", "-w", "--cwd", "--dir", "-C", "--prefix",
+    "--registry", "--tag", "--config", "--cache", "--loglevel", "--reporter",
+    "--store-dir", "--lockfile-dir", "--virtual-store-dir", "--modules-dir",
+    "--config-file", "--userconfig", "--cafile",
+]);
 export function isHallucinatedOrMalformedPackageInstall(command) {
     for (const stage of splitShellStages(command).flat()) {
-        const trimmed = stage.trim();
-        const npmMatch = /^(?:sudo\s+)?(?:npm\s+(?:i|install|add)|pnpm\s+(?:i|install|add)|yarn\s+add|bun\s+(?:i|install|add))\s+([^\n]+)/i.exec(trimmed);
+        const trimmed = stripShellWrappersAndPath(stage);
+        const npmMatch = /^(?:npm\s+(?:i|install|add)|pnpm\s+(?:i|install|add)|yarn\s+add|bun\s+(?:i|install|add))\s+([^\n]+)/i.exec(trimmed);
         if (!npmMatch?.[1])
             continue;
-        for (const arg of shellWords(npmMatch[1])) {
-            if (!arg || arg.startsWith("-"))
+        const words = shellWords(npmMatch[1]);
+        let skipNext = false;
+        for (const arg of words) {
+            if (skipNext) {
+                skipNext = false;
+                continue;
+            }
+            if (!arg)
+                continue;
+            if (arg === "--")
+                break;
+            if (/^(?:\d*>>?|\d*<&|\d*>&|&>>?|<)$/.test(arg)) {
+                skipNext = true;
+                continue;
+            }
+            if (/^(?:\d*>>?|\d*<|&>>?)\S/.test(arg)) {
+                continue;
+            }
+            if (PM_OPTIONS_WITH_VALUE.has(arg)) {
+                skipNext = true;
+                continue;
+            }
+            if (arg.startsWith("-"))
                 continue;
             const packageName = npmPackageNameFromSpec(arg);
             if (packageName && suspiciousNpmPackageName(packageName))

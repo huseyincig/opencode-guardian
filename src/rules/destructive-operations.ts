@@ -5,7 +5,15 @@ import type {
   TurnInspectionContext,
 } from "../types.js";
 import { gitCleanInvocation, isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } from "../evidence.js";
-import { hasFindDeletion, literalShellScripts, splitShellStages } from "../shell-risk.js";
+import {
+  activeBacktickSubstitutions,
+  activeCommandSubstitutions,
+  hasFindDeletion,
+  literalShellScripts,
+  literalWindowsShellScripts,
+  splitShellStages,
+  stripShellWrappersAndPath,
+} from "../shell-risk.js";
 import { authorizationText, latestHumanInstruction } from "../task-constraints.js";
 import { extractToolCommand } from "../tool-input.js";
 import {
@@ -26,26 +34,25 @@ function latestHumanRequest(context: TurnInspectionContext): string {
 function guardBypass(command: string, depth = 0): { flag: string; action: string; confidence: "high" | "medium" } | undefined {
   if (depth > 2) return undefined;
   for (const stage of splitShellStages(command.slice(0, 64_000)).flat()) {
-    // Remove comments without erasing # inside a quoted commit message.
-    let quoted: string | undefined;
+    // Remove comments without erasing # inside a quoted commit message (including ANSI-C $'...').
+    let quoted: "'" | '"' | "$'" | undefined;
     let end = stage.length;
     for (let i = 0; i < stage.length; i++) {
       const char = stage[i];
       if (char === "\\" && quoted !== "'") { i++; continue; }
-      if ((char === '"' || char === "'") && (!quoted || quoted === char)) {
+      if (!quoted && char === "$" && stage[i + 1] === "'") {
+        quoted = "$'";
+        i++;
+        continue;
+      }
+      if (quoted === "$'" && char === "'") {
+        quoted = undefined;
+      } else if ((char === '"' || char === "'") && (!quoted || quoted === char)) {
         quoted = quoted ? undefined : char;
       } else if (!quoted && char === "#" && (i === 0 || /\s/.test(stage[i - 1] ?? ""))) { end = i; break; }
     }
-    const tokens = simpleShellTokens(stage.slice(0, end));
-    while (/^[A-Za-z_]\w*=/.test(tokens[0] ?? "")) tokens.shift();
-    if (tokens[0] === "env") {
-      tokens.shift();
-      while (tokens.length) {
-        if (/^[A-Za-z_]\w*=/.test(tokens[0] ?? "") || ["-i", "--ignore-environment", "--"].includes(tokens[0] ?? "")) tokens.shift();
-        else if (["-u", "--unset"].includes(tokens[0] ?? "")) tokens.splice(0, 2);
-        else break;
-      }
-    }
+    const unwrappedStage = stripShellWrappersAndPath(stage.slice(0, end), { stripNegation: true });
+    const tokens = simpleShellTokens(unwrappedStage);
     if (!/^(?:[^\s]*\/)?git(?:\.exe)?$/i.test(tokens[0] ?? "")) continue;
     let i = 1;
     let hooks = false;
@@ -68,15 +75,47 @@ function guardBypass(command: string, depth = 0): { flag: string; action: string
     if (["commit", "push", "merge", "rebase", "am"].includes(action)) {
       for (let n = 0; n < args.length; n++) {
         // Commit messages are data even when they contain an option literal.
-        if (["-m", "--message", "-F", "--file"].includes(args[n] ?? "")) { n++; continue; }
-        if (args[n] === "--") break;
-        if (args[n] === "--no-verify" || action === "commit" && args[n] === "-n") {
-          return { flag: args[n] ?? "--no-verify", action, confidence: "high" };
+        const arg = args[n] ?? "";
+        // `-u` and `-S` only take optional *attached* args (never the next space-separated token).
+        // `-m` is only `--message` on `commit`/`merge` (on `rebase` it is `--merge` boolean; on `am` it is `--message-id` boolean).
+        if (
+          ((action === "commit" || action === "merge") && ["-m", "--message", "-F", "--file"].includes(arg)) ||
+          (action === "commit" && ["-c", "-C", "-t"].includes(arg))
+        ) {
+          n++;
+          continue;
+        }
+        if (arg === "--") break;
+        if (arg === "--no-verify") {
+          return { flag: "--no-verify", action, confidence: "high" };
+        }
+        if (action === "commit" && /^-[A-Za-z]/.test(arg)) {
+          // Consume only the leading boolean short-flag cluster before any value-taking flag
+          // (`m`, `F`, `c`, `C`, `t` take separate or attached values; `u`, `S` take attached values).
+          let cutoff = arg.length;
+          for (let ci = 1; ci < arg.length; ci++) {
+            const ch = arg[ci]!;
+            if ("mFcCtuS".includes(ch)) {
+              cutoff = ci;
+              break;
+            }
+          }
+          const flagChars = arg.slice(1, cutoff);
+          if (/^[A-Za-z]+$/.test(flagChars) && flagChars.includes("n")) {
+            return { flag: "-n", action, confidence: "high" };
+          }
+          // Combined short flag ending in a separate-value option (e.g. `-am "-n"`, `-ac HEAD`) consumes next token.
+          if (cutoff < arg.length && cutoff === arg.length - 1 && "mFcCt".includes(arg[cutoff]!)) {
+            n++;
+          }
         }
       }
     }
   }
-  for (const script of literalShellScripts(command.slice(0, 64_000))) {
+  for (const script of [
+    ...literalShellScripts(command.slice(0, 64_000)),
+    ...literalWindowsShellScripts(command.slice(0, 64_000)),
+  ]) {
     const bypass = guardBypass(script, depth + 1);
     if (bypass) return bypass;
   }
@@ -225,13 +264,44 @@ function commandTarget(
 
 function simpleShellTokens(text: string): string[] {
   const tokens: string[] = [];
-  const tokenPattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
-  let match = tokenPattern.exec(text);
-  while (match) {
-    const token = match[1] ?? match[2] ?? match[3];
-    if (token) tokens.push(token);
-    match = tokenPattern.exec(text);
+  let current = "";
+  let hasToken = false;
+  let quote: "'" | "$'" | '"' | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\" && quote !== "'") {
+      hasToken = true;
+      current += text[++i] ?? "";
+      continue;
+    }
+    if (quote === null && ch === "$" && text[i + 1] === "'") {
+      hasToken = true;
+      quote = "$'";
+      i++;
+      continue;
+    }
+    if (quote) {
+      if ((quote === "$'" && ch === "'") || ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      hasToken = true;
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (hasToken) {
+        tokens.push(current);
+        current = "";
+        hasToken = false;
+      }
+      continue;
+    }
+    hasToken = true;
+    current += ch;
   }
+  if (hasToken) tokens.push(current);
   return tokens;
 }
 
@@ -297,11 +367,22 @@ function explicitlyAuthorized(request: string, command: string): boolean {
     /\b(?:do\s+not|don't|dont|never|avoid|without)\s+(?:delete|remove|destroy|drop|wipe|reset|force\s+push|clean|unpublish)\b|\b(?:silme|silmeyin|silmeden|kaldırma|kaldırmayın|yok\s+etme|sıfırlama|resetleme|zorla\s+push\s+yapma)\b/iu;
   if (negative.test(request)) return false;
 
+  // Reject command substitutions, backticks, or process substitutions piggybacking
+  // on any authorized destructive command.
+  if (
+    activeCommandSubstitutions(command).length > 0 ||
+    activeBacktickSubstitutions(command).length > 0 ||
+    /<\(|>\(/.test(command)
+  ) {
+    return false;
+  }
+
   // Exact, literal find deletion may be authorized; broad "delete" wording
   // cannot authorize a different target or a rewritten shell command.
   if (hasFindDeletion(command)) return request.trim() === command.trim().toLowerCase();
 
   if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+push\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     return (
       gitScopeAuthorized(request, command) &&
       gitActionTargetAuthorized(request, command, "push") &&
@@ -312,6 +393,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bgit(?:\s+(?:-C|-c)\s+(?:"[^"]*"|'[^']*'|[^\s;&|\n]+))*\s+reset\b[^\n;&|]*--hard\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     return (
       gitScopeAuthorized(request, command) &&
       gitActionTargetAuthorized(request, command, "reset") &&
@@ -373,6 +455,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b/i.test(command)) {
+    if (splitShellStages(command).flat().length > 1) return false;
     const targets = sqlDestructiveTargets(command);
     return (
       targets.length > 0 &&
@@ -388,6 +471,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bterraform\s+destroy\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     const actionAuthorized =
       /\b(?:terraform\s+destroy|destroy\s+(?:the\s+)?(?:stack|infra|infrastructure)|altyapıyı\s+(?:sil|yok\s+et))\b/iu.test(
         request
@@ -405,6 +489,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bkubectl\s+delete\s+(?:namespace|ns)\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     const targets = commandTargetsAfter(
       command,
       /\bkubectl\s+delete\s+(?:namespace|ns)\b/i
@@ -425,6 +510,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bnpm\s+unpublish\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     const target = commandTarget(
       command,
       /\bnpm\s+unpublish\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i
@@ -442,6 +528,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bgh\s+repo\s+delete\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     const target = commandTarget(
       command,
       /\bgh\s+repo\s+delete\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/i
@@ -461,6 +548,7 @@ function explicitlyAuthorized(request: string, command: string): boolean {
   }
 
   if (/\bdocker\s+system\s+prune\b/i.test(command)) {
+    if (/[;&|\n\x60$<>]/.test(command)) return false;
     return /\b(?:docker\s+(?:system\s+)?prune|docker\s+temizle)\b/iu.test(
       request
     );

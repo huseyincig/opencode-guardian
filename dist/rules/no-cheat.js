@@ -127,8 +127,20 @@ function extractSnippet(text, matchIndex, matchLen) {
         snippet = `${snippet}…`;
     return snippet;
 }
-const STRONG_ASSERTION = /\b(?:expect\s*\([^\n]+\)\.(?:toBe|toEqual|toStrictEqual|toMatchObject|toHaveLength|toContain|toThrow)|assert\.(?:strictEqual|deepEqual|equal|match|throws)\s*\(|self\.assert(?:Equal|True|False|In|Raises)\s*\(|assert\s+[^\n]+(?:==|!=|<=|>=|\sin\s))/i;
+const STRONG_ASSERTION = /\b(?:expect\s*\([^\n]+\)\.(?:toBe|toEqual|toStrictEqual|toMatchObject|toHaveLength|toContain|toThrow)\b|assert\.(?:strictEqual|deepEqual|equal|match|throws)\s*\(|self\.assert(?:Equal|True|False|In|Raises)\s*\(|assert\s+[^\n]+(?:==|!=|<=|>=|\sin\s))/i;
 const WEAK_ASSERTION = /\b(?:expect\s*\([^\n]+\)\.(?:toBeTruthy|toBeDefined|not\.toBeNull)|assert\.ok\s*\(|assert\s+[A-Za-z_$][\w.$]*\s*$)/im;
+function countMatches(pattern, text) {
+    const global = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+    let count = 0;
+    let match = global.exec(text);
+    while (match) {
+        count++;
+        if (match[0].length === 0)
+            global.lastIndex++;
+        match = global.exec(text);
+    }
+    return count;
+}
 function detectAssertionWeakening(patch, filePath) {
     if (!isTestFilePath(filePath))
         return undefined;
@@ -138,7 +150,11 @@ function detectAssertionWeakening(patch, filePath) {
     for (const hunk of hunks) {
         const removed = extractRemovedLines(hunk);
         const added = extractAddedLines(hunk);
-        if (!STRONG_ASSERTION.test(removed) || !WEAK_ASSERTION.test(added)) {
+        const removedStrongCount = countMatches(STRONG_ASSERTION, removed);
+        const addedStrongCount = countMatches(STRONG_ASSERTION, added);
+        if (removedStrongCount === 0 ||
+            addedStrongCount >= removedStrongCount ||
+            !WEAK_ASSERTION.test(added)) {
             continue;
         }
         return {
@@ -154,6 +170,28 @@ function detectAssertionWeakening(patch, filePath) {
         };
     }
     return undefined;
+}
+function isCoverageConfigFile(filePath) {
+    if (!filePath)
+        return true;
+    if (isCiFilePath(filePath) || isTestFilePath(filePath))
+        return true;
+    const lower = filePath.toLowerCase().replace(/\\/g, "/");
+    const base = lower.split("/").pop() ?? lower;
+    return (base === "package.json" ||
+        base === "pyproject.toml" ||
+        base === "setup.cfg" ||
+        base === "tox.ini" ||
+        base === ".coveragerc" ||
+        base === ".nycrc" ||
+        base === ".c8rc" ||
+        base === "sonar-project.properties" ||
+        base === "codecov.yml" ||
+        base === "codecov.yaml" ||
+        base === ".codecov.yml" ||
+        base === ".codecov.yaml" ||
+        /(?:jest|vitest|nyc|c8|coverage|pytest|karma|istanbul|sonar|codecov)/.test(base) ||
+        /\.config\.[cm]?[jt]s$|\.config\.json$|\.nycrc\.|\.c8rc\./.test(base));
 }
 function coverageValues(lines) {
     const values = new Map();
@@ -176,6 +214,8 @@ function coverageValues(lines) {
     return values;
 }
 function detectCoverageReduction(patch, filePath) {
+    if (!isCoverageConfigFile(filePath))
+        return undefined;
     const before = coverageValues(extractRemovedLines(patch).split("\n"));
     const after = coverageValues(extractAddedLines(patch).split("\n"));
     for (const [key, beforeValues] of before) {
@@ -357,7 +397,7 @@ export const noCheatRule = {
                         checkTestCode(input[key], targetFile, blockStructuralTestChanges);
                     }
                 }
-                for (const key of ["new_string", "newString", "new_str", "ReplacementContent"]) {
+                for (const key of ["new_string", "newString", "new_str", "appendContent", "prependContent", "ReplacementContent"]) {
                     if (typeof input[key] === "string") {
                         checkTestCode(input[key], targetFile);
                     }

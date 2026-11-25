@@ -1,6 +1,6 @@
 {
   "name": "opencode-guardian",
-  "version": "0.18.3",
+  "version": "0.18.4",
   "description": "Autonomous quality, discipline, and runtime security guardian plugin for OpenCode V2 AI agents",
   "type": "module",
   "main": "./dist/index.js",

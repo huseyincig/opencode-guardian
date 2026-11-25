@@ -76,6 +76,10 @@ export function isSensitiveKey(key, customKeys, safeKeyNames) {
     }
     if (SAFE_KEY_NAMES.has(upper))
         return false;
+    // Runtime RegExp/object metadata properties (e.g. `PEM_PRIVATE_KEY_REGEX.lastIndex = 0`) are never secrets.
+    if (/\.(?:lastIndex|source|flags|length|prototype|name|message|stack)$/i.test(key.trim())) {
+        return false;
+    }
     SENSITIVE_KEY_REGEX.lastIndex = 0;
     return SENSITIVE_KEY_REGEX.test(key);
 }

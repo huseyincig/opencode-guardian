@@ -4,6 +4,7 @@ import { classifyAgentReport } from "../locale-intents.js";
 import { extractTaskContract } from "../task-contract.js";
 import { evaluateTaskPolicy } from "../task-policy.js";
 import { isWriteCapableAgent } from "../agent-capability.js";
+import { splitShellStages } from "../shell-risk.js";
 
 function latestAssistantProse(context: TurnInspectionContext): string {
   const last = context.currentTurn.findLast((message) => message.info.role === "assistant");
@@ -143,6 +144,71 @@ export const taskCompletionRule: GuardRule = {
           .replace(/\s+/g, " ")
           .trim();
 
+      const isBenignReadOnlyProbeFailure = (
+        failure: (typeof evidence.failures)[number]
+      ): boolean => {
+        if (failure.kind !== "generic") return false;
+        const cmd = (failure.command ?? "").trim();
+        const errOut = `${failure.error ?? ""}\n${failure.output ?? ""}`;
+        if (cmd) {
+          const pipelines = splitShellStages(cmd);
+          const isSingleUnpipedStage = pipelines.length === 1 && (pipelines[0]?.length ?? 0) === 1;
+          const isZeroMatchSearch =
+            isSingleUnpipedStage &&
+            failure.exitCode === 1 &&
+            /^(?:(?:sudo\s+)?(?:\/(?:[A-Za-z0-9._-]+\/)+)?(?:rg|grep|egrep|fgrep|git\s+grep|diff|cmp|test|\[))(?:\s|$)/i.test(cmd) &&
+            !/(?:no such file or directory|permission denied|invalid option|unrecognized option|command not found|fatal:|error:)/i.test(errOut);
+          if (isZeroMatchSearch) return true;
+        }
+        const toolLower = failure.toolName.toLowerCase();
+        const isReadTool = /^(?:read|read_file|view_file|file_read|read_text_file|glob|find|grep|search|list|ls|stat)$/.test(toolLower);
+        if (
+          isReadTool &&
+          /(?:enoent|no such file|file not found|does not exist|cannot find)/i.test(errOut)
+        ) {
+          return true;
+        }
+        return false;
+      };
+
+      const normalizeVerificationRunner = (raw: string): string =>
+        commandIdentity(raw)
+          .replace(/^(?:npx(?:\s+--no-install)?|pnpm\s+exec|yarn\s+exec|bunx|npm\s+exec\s+--)\s+/i, "")
+          .replace(/^(npm|pnpm|yarn|bun)\s+run\s+(test|lint|typecheck|build)(?=\s|$)/i, "$1 $2")
+          .replace(/^vitest\s+run(?=\s|$)/i, "vitest");
+
+      const isBroaderOrSameVerificationCommand = (
+        failCmd: string,
+        laterCmd: string,
+        kind: string
+      ): boolean => {
+        if (!["test", "lint", "typecheck", "build"].includes(kind)) return false;
+        const failNorm = normalizeVerificationRunner(failCmd);
+        const laterNorm = normalizeVerificationRunner(laterCmd);
+        if (failNorm === laterNorm) return true;
+        const runnerPrefixes = [
+          /^(?:npm|pnpm|yarn|bun)\s+(?:test|lint|typecheck|build)(?=\s|$)/,
+          /^(?:pytest|py\.test|vitest|jest|cargo\s+(?:test|clippy|build)|go\s+(?:test|build)|node\s+--test|tsc|eslint|oxlint|biome\s+(?:lint|check)|ruff|mypy|pyright)(?=\s|$)/,
+        ];
+        for (const prefixRe of runnerPrefixes) {
+          const failPrefix = prefixRe.exec(failNorm)?.[0];
+          const laterPrefix = prefixRe.exec(laterNorm)?.[0];
+          if (!failPrefix || !laterPrefix || failPrefix !== laterPrefix) continue;
+          const laterRest = laterNorm.slice(laterPrefix.length).trim();
+          // Full suite / broad invocation (no focused file filter, or broad `.` / `./...` / `--noEmit`)
+          if (
+            laterRest === "" ||
+            laterRest === "." ||
+            laterRest === "./..." ||
+            laterRest === "--noemit" ||
+            laterRest === "--all"
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
       const resolvesFailure = (
         failure: (typeof evidence.failures)[number],
         later: (typeof evidence.records)[number]
@@ -183,7 +249,8 @@ export const taskCompletionRule: GuardRule = {
           return Boolean(
             failure.command &&
             later.command &&
-            commandIdentity(failure.command) === commandIdentity(later.command)
+            (commandIdentity(failure.command) === commandIdentity(later.command) ||
+              isBroaderOrSameVerificationCommand(failure.command, later.command, failure.kind))
           );
         }
 
@@ -191,6 +258,7 @@ export const taskCompletionRule: GuardRule = {
       };
 
       const unresolvedFailures = evidence.failures.filter((failure) => {
+        if (isBenignReadOnlyProbeFailure(failure)) return false;
         const hasLaterSuccess = evidence.records.some((later) =>
           resolvesFailure(failure, later)
         );

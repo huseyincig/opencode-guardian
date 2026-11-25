@@ -1314,6 +1314,7 @@ export async function registerMeshStateRpc(input) {
     const state = getMeshState();
     const dir = canonicalMeshDirectory(input.directory);
     const standbysByDir = (state.rpcStandbysByDir ??= new Map());
+    const standbyPromotions = (state.rpcStandbyPromotions ??= new WeakMap());
     const activeHostDir = state.rpcHostsByDir.has(dir)
         ? dir
         : dir === "*" && state.rpcHostsByDir.size === 1
@@ -1343,6 +1344,13 @@ export async function registerMeshStateRpc(input) {
                 if (list.length === 0)
                     standbysByDir.delete(activeHostDir);
             }
+            const inFlightPromotion = standbyPromotions.get(candidate);
+            if (inFlightPromotion) {
+                try {
+                    await inFlightPromotion;
+                }
+                catch { }
+            }
             if (candidate.activeDispose) {
                 const fn = candidate.activeDispose;
                 candidate.activeDispose = undefined;
@@ -1352,27 +1360,31 @@ export async function registerMeshStateRpc(input) {
     }
     const promoteStandbyForDir = async (queueDir) => {
         const queue = standbysByDir.get(queueDir);
-        while (queue && queue.length > 0 && !state.rpcHostsByDir.has(queueDir)) {
-            const next = queue.shift();
+        if (!queue || queue.length === 0)
+            return;
+        standbysByDir.delete(queueDir);
+        const pending = queue.splice(0, queue.length);
+        for (const next of pending) {
             if (!next || next.disposed)
                 continue;
-            if (queue.length === 0)
-                standbysByDir.delete(queueDir);
-            next.activeDispose = await registerMeshStateRpc({
-                rpcRegister: next.rpcRegister,
-                owner: next.owner,
-                directory: next.directory,
-            });
-            if (next.disposed && next.activeDispose) {
-                const fn = next.activeDispose;
-                next.activeDispose = undefined;
-                await fn();
-            }
-            else {
-                const nextDir = canonicalMeshDirectory(next.directory);
-                if (state.rpcHostsByDir.has(queueDir) || state.rpcHostsByDir.has(nextDir)) {
-                    break;
+            const promo = (async () => {
+                next.activeDispose = await registerMeshStateRpc({
+                    rpcRegister: next.rpcRegister,
+                    owner: next.owner,
+                    directory: next.directory,
+                });
+                if (next.disposed && next.activeDispose) {
+                    const fn = next.activeDispose;
+                    next.activeDispose = undefined;
+                    await fn();
                 }
+            })();
+            standbyPromotions.set(next, promo);
+            try {
+                await promo;
+            }
+            finally {
+                standbyPromotions.delete(next);
             }
         }
     };
@@ -1474,16 +1486,18 @@ export async function registerMeshStateRpc(input) {
         if (disposed)
             return;
         disposed = true;
-        if (state.rpcHostsByDir.get(dir) === hostEntry) {
-            state.rpcHostsByDir.delete(dir);
-        }
         try {
             await reg?.dispose?.();
         }
         catch { }
-        await promoteStandbyForDir(dir);
-        if (!state.rpcHostsByDir.has(dir)) {
-            hostEntry.releaseAll();
+        finally {
+            if (state.rpcHostsByDir.get(dir) === hostEntry) {
+                state.rpcHostsByDir.delete(dir);
+            }
+            await promoteStandbyForDir(dir);
+            if (!state.rpcHostsByDir.has(dir)) {
+                hostEntry.releaseAll();
+            }
         }
     };
 }

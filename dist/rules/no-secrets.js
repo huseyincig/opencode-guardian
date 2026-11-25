@@ -4,7 +4,7 @@ import { defaultRuntimeSecrets } from "../secrets/runtime-secrets.js";
 export const SECRET_PATTERNS = [
     // Clone regex instances so write scans cannot alter output redaction state.
     ...KNOWN_CREDENTIAL_PATTERNS.map(({ name, regex }) => ({ name, regex: new RegExp(regex.source, regex.flags) })),
-    { regex: /-----BEGIN\s+(?:RSA\s+|OPENSSH\s+|EC\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----/, name: "Private Key Header (PEM/SSH)" },
+    { regex: /-----BEGIN(?:\s+[A-Z0-9_-]+)?\s+PRIVATE\s+KEY-----/, name: "Private Key Header (PEM/SSH)" },
     { regex: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?|mssql):\/\/[^:\s'"]*:(?!\/\/)([^@\s'"]+)@[a-zA-Z0-9.-]+(?::[0-9]+)?(?:\/[a-zA-Z0-9_.-]*)?/, name: "Database Connection String with Password" },
     { regex: /\b(?:_authToken|npmAuthToken)\s*=\s*["']?([A-Za-z0-9._~-]{20,})["']?/i, name: "npm Registry Auth Token" },
     { regex: /\bAuthorization\s*[:=]\s*["']?Bearer\s+([A-Za-z0-9._~-]{24,})["']?/i, name: "Bearer Authorization Token" },
@@ -66,7 +66,9 @@ export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions)
                 ? isExplicitTemplateValue(password) ||
                     isDocumentedLocalPasswordSample(filePath, value, password)
                 : isExplicitTemplateValue(value);
-            if (!isSample && !safeValueSet?.has(value)) {
+            const isSafeValue = Boolean(safeValueSet?.has(value)) ||
+                (password !== undefined && Boolean(safeValueSet?.has(password)));
+            if (!isSample && !isSafeValue) {
                 match = next;
                 break;
             }
@@ -122,10 +124,53 @@ export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions)
                     return re.test(candidateKey);
                 });
             };
-            const TS_OR_CODE_UNQUOTED_VALUE = /^(?:string|number|boolean|unknown|any|void|never|object|undefined|null|symbol|bigint|true|false|readonly|partial|required|record|promise|buffer|uint8array|array|set|map|date|regexp|error|function)$/i;
-            const isCodeReference = (unquotedVal) => TS_OR_CODE_UNQUOTED_VALUE.test(unquotedVal) ||
-                /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\([^)]*\))?$/.test(unquotedVal) ||
-                /^[A-Za-z_$][\w$]*\([^)]*\)$/.test(unquotedVal);
+            const TS_OR_CODE_UNQUOTED_VALUE = /^(?:string|number|boolean|unknown|any|void|never|object|undefined|null|symbol|bigint|true|false|readonly|partial|required|record|promise|buffer|uint8array|array|set|map|date|regexp|error|function)(?:[?[\]]*)?$/i;
+            const CODE_REF_ROOTS = new Set([
+                "this", "self", "super", "process", "env", "global", "window", "document", "module",
+                "user", "req", "request", "res", "response", "ctx", "context", "cfg", "config",
+                "opts", "options", "props", "state", "data", "body", "headers", "auth", "vault",
+                "client", "app", "params", "query", "result", "payload", "input", "output", "meta",
+                "args", "event", "store", "cache", "db", "service", "provider", "runtime", "account",
+            ]);
+            const isCleanCodeSeg = (seg) => seg.length > 0 && seg.length <= 24 && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg) && !/\d/.test(seg);
+            const isCodeReference = (unquotedVal, sep) => {
+                // Never treat `key=value` (.env / shell / INI) dotted or parenthesized tokens as code expressions.
+                if (sep !== ":")
+                    return false;
+                if (TS_OR_CODE_UNQUOTED_VALUE.test(unquotedVal))
+                    return true;
+                const cleanCallArgs = (argsRaw) => {
+                    const argsText = argsRaw.trim();
+                    if (!argsText)
+                        return true;
+                    return argsText.split(",").every((p) => {
+                        const pt = p.trim();
+                        return (/^[a-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)*$/.test(pt) &&
+                            pt.split(/\?\.|\./).every(isCleanCodeSeg));
+                    });
+                };
+                if (unquotedVal.includes("?.")) {
+                    const optMatch = /^([A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)+)(?:\(([^)\r\n]*)\))?$/.exec(unquotedVal);
+                    if (optMatch?.[1] && optMatch[1].split(/\?\.|\./).every(isCleanCodeSeg)) {
+                        if (optMatch[2] === undefined || cleanCallArgs(optMatch[2])) {
+                            return true;
+                        }
+                    }
+                }
+                const callMatch = /^([a-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)*)\(([^)\r\n]*)\)$/.exec(unquotedVal);
+                if (callMatch?.[1]) {
+                    const segs = callMatch[1].split(/\?\.|\./);
+                    if (segs.length <= 3 && segs.every(isCleanCodeSeg) && cleanCallArgs(callMatch[2] ?? ""))
+                        return true;
+                }
+                if (/^[a-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(unquotedVal)) {
+                    const segs = unquotedVal.split(".");
+                    if (segs.length <= 3 && CODE_REF_ROOTS.has(segs[0] ?? "") && segs.every(isCleanCodeSeg)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             // Scan quoted/unquoted key assignments across JS/TS, JSON, YAML, and .env formats.
             // For oversized payloads (>512 KiB), scan both the leading 512 KiB and trailing 128 KiB
             // so secrets appended at the end of large files are not silently missed.
@@ -134,7 +179,7 @@ export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions)
             const scanSlices = code.length > MAX_HEAD + MAX_TAIL
                 ? [code.slice(0, MAX_HEAD), code.slice(code.length - MAX_TAIL)]
                 : [code];
-            const assignmentRe = /(?:["'])?([A-Za-z0-9_.-]{2,80})(?:["'])?\s*[:=]\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([^\s"'`,;)}\]\r\n]{6,}))/g;
+            const assignmentRe = /(?:["'])?([A-Za-z0-9_.-]{2,80})(?:["'])?\s*([:=])\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)*\([^)\r\n]*\)|[A-Za-z_$][\w$]*(?:\[\])+|[^\s"'`,;)}\]\r\n]{6,}))/g;
             for (const scanSource of scanSlices) {
                 if (seen.has("Custom Sensitive Key Assignment"))
                     break;
@@ -144,13 +189,14 @@ export function findAllSecretsInCode(code, filePath, alreadySeen, secretOptions)
                 while (m !== null && iter < 20_000) {
                     iter++;
                     const k = m[1] ?? "";
-                    const quotedVal = m[2] ?? m[3];
-                    const unquotedVal = m[4];
+                    const sep = m[2] ?? "";
+                    const quotedVal = m[3] ?? m[4];
+                    const unquotedVal = m[5];
                     const val = quotedVal ?? unquotedVal ?? "";
                     if (k &&
                         val &&
                         keyMatcher(k) &&
-                        (quotedVal !== undefined || !isCodeReference(val)) &&
+                        (quotedVal !== undefined || !isCodeReference(val, sep)) &&
                         !isExplicitTemplateValue(val) &&
                         !safeValueSet?.has(val)) {
                         seen.add("Custom Sensitive Key Assignment");
@@ -214,6 +260,8 @@ export const noSecretsRule = {
                     "new_string",
                     "newString",
                     "new_str",
+                    "appendContent",
+                    "prependContent",
                     "file_text",
                     "CodeContent",
                     "ReplacementContent",

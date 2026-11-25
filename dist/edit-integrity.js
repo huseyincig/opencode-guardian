@@ -71,6 +71,8 @@ export function captureBeforeEdit(tool, input, directory) {
         typeof input.oldString === "string" ||
         typeof input.old_str === "string" ||
         typeof input.ReplacementContent === "string" ||
+        typeof input.appendContent === "string" ||
+        typeof input.prependContent === "string" ||
         typeof input.StartLine === "number" ||
         typeof input.EndLine === "number" ||
         typeof input.patch === "string" ||

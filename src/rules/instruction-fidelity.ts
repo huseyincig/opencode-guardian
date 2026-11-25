@@ -11,7 +11,8 @@ export const instructionFidelityRule: GuardRule = {
   inspect(context): RuleResult {
     const instruction = latestHumanInstruction(context);
     const evidence = context.evidence ?? collectTurnEvidence(context.currentTurn);
-    if (hasResearchOnlyConstraint(instruction)) {
+    const researchOnly = hasResearchOnlyConstraint(instruction);
+    if (researchOnly) {
       const mutations = evidence.records.filter((record) =>
         record.status !== "failure" &&
         ["file-mutation", "install", "git-push"].includes(record.kind));
@@ -57,7 +58,7 @@ export const instructionFidelityRule: GuardRule = {
     ) ?? false;
 
     const signals = detectInstructionFidelitySignals(instruction, prose, observableWork);
-    if (!signals.hasViolation) {
+    if (!signals.hasViolation || (researchOnly && signals.type === "redundant-handoff")) {
       return { ruleId: this.id, decision: "pass", findings: [] };
     }
 

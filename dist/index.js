@@ -259,13 +259,16 @@ export function normalizeV2Messages(messages, sessionID) {
             continue;
         if (isTrustedGuardianMetadata(sessionID, msg.metadata, "visible"))
             continue;
-        if (type === "user" && typeof msg.text === "string") {
+        if (type === "user") {
+            const userText = typeof msg.text === "string"
+                ? msg.text
+                : extractV2OutputText(msg.text, msg.content);
             const trustedMesh = isTrustedMeshMessage(msg, sessionID);
             normalized.push({
                 info: { id, role: "user" },
                 parts: [{
                         type: "text",
-                        text: msg.text,
+                        text: userText,
                         ...(trustedMesh ? { synthetic: true } : {}),
                         ...(msg.metadata && typeof msg.metadata === "object"
                             ? { metadata: msg.metadata }

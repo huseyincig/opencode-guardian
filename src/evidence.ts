@@ -91,10 +91,71 @@ function parseExitCode(part: MessagePart): number | undefined {
   return undefined;
 }
 
+function isSelfInterruptingRestartCommand(command: string): boolean {
+  if (!command) return false;
+  return executableShellStages(command).some((stage) =>
+    /^(?:opencode(?:\.exe)?\s+(?:service|server|daemon)\s+restart\b|systemctl\s+(?:--user\s+)?restart\s+opencode\b|launchctl\s+kickstart\b[^\n;&|]*opencode\b|brew\s+services\s+restart\s+opencode\b)/i.test(stage)
+  );
+}
+
+function isAbortedOrInterruptedTool(
+  part: MessagePart,
+  outputText: string,
+  errorText: string,
+  exitCode?: number
+): boolean {
+  const state = part.state;
+  if (!state) return false;
+
+  if (
+    state.metadata?.cancelled === true ||
+    state.metadata?.canceled === true ||
+    state.metadata?.aborted === true
+  ) {
+    return true;
+  }
+
+  const err = state.error;
+  if (err && typeof err === "object" && !Array.isArray(err)) {
+    const errType = (err as Record<string, unknown>).type;
+    if (
+      typeof errType === "string" &&
+      ["aborted", "cancelled", "canceled"].includes(errType.toLowerCase())
+    ) {
+      return true;
+    }
+  }
+
+  const combined = errorText || outputText;
+  if (
+    /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(combined) ||
+    /^(?:error:\s*)?(?:tool execution interrupted|step interrupted)\b/i.test(combined)
+  ) {
+    return true;
+  }
+
+  // Self-interrupting service restarts (e.g. `opencode service restart`)
+  // structurally terminate the server connection handling their own tool call.
+  const command = commandFromPart(part);
+  if (isSelfInterruptingRestartCommand(command)) {
+    const structurallyInterrupted =
+      exitCode === 130 ||
+      exitCode === 137 ||
+      exitCode === 143 ||
+      /(?:aborted|interrupted|killed by signal|econnreset|socket hang up|connection closed|terminated)/i.test(combined);
+    if (structurallyInterrupted) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function statusFromPart(part: MessagePart, outputText: string): {
   status: EvidenceStatus;
   exitCode?: number;
   errorText: string;
+  aborted?: boolean;
 } {
   const state = part.state;
   if (!state) return { status: "unknown", errorText: "" };
@@ -109,6 +170,19 @@ function statusFromPart(part: MessagePart, outputText: string): {
       const parsed = Number(exitMatch[1]);
       if (Number.isFinite(parsed)) exitCode = parsed;
     }
+  }
+
+  // Aborted / interrupted tool executions (e.g. OpenCode v2.4.x
+  // `{ type: "aborted", message: "Tool execution interrupted" }` from server
+  // restarts like `opencode service restart` or user cancellation) are neither
+  // successful verification nor concrete unresolved command failures.
+  if (isAbortedOrInterruptedTool(part, outputText, errorText, exitCode)) {
+    return {
+      status: "unknown",
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      errorText: errorText || outputText,
+      aborted: true,
+    };
   }
 
   if (state.status === "error" || state.metadata?.error === true) {
@@ -501,9 +575,12 @@ function recordFromPart(part: MessagePart, sequence: number): EvidenceRecord[] {
       isVerification && (nonSequentialCompound || pipedWithoutPipefail);
     const testSummary = kind === "test" ? parseTestSummary(outputText) : undefined;
     const testReason = kind === "test" ? testOutcomeReason(command, outcome.exitCode, testSummary) : undefined;
-    const cancelled = (outcome.exitCode === 130 || part.state.status === "error") &&
-      /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText) ||
-      part.state.metadata?.cancelled === true || part.state.metadata?.canceled === true;
+    const cancelled =
+      outcome.aborted === true ||
+      ((outcome.exitCode === 130 || part.state.status === "error") &&
+        /^(?:error:\s*)?(?:(?:tool|command|operation|execution)\s+)?(?:cancelled by user|canceled by user|user cancel(?:led|ed))\b/i.test(outcome.errorText || outputText)) ||
+      part.state.metadata?.cancelled === true ||
+      part.state.metadata?.canceled === true;
     const evidenceStatus =
       maskedVerification || ambiguousVerification
         ? "unknown"

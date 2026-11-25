@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.9 — 2026-11-25
+
+### Fixed
+- **Eliminated false-positive `"Unresolved command failure"` remediations on aborted/interrupted tools and `opencode service restart` (#4):**
+  - Updated `src/evidence.ts` (`statusFromPart` / `recordFromPart`) to classify OpenCode V2 aborted/interrupted tool outcomes (`error: { type: "aborted", message: "Tool execution interrupted..." }`, `"Step interrupted"`, explicit user cancellations, and structurally self-interrupting service restarts such as `opencode service restart`) as `status: "unknown"` with `outcomeReason: "cancelled"` instead of `status: "failure"`.
+  - Preserves verification integrity: aborted test/build commands never count as passing evidence (`integrity/no-unverified-claims` and explicit `task/completion-gate` verification requirements still enforce), and genuine CLI errors (e.g. non-zero exit with invalid flags) still register as failures.
+  - Hardened `normalizeV2Messages` (`src/index.ts`) so `type: "user"` messages without a string `text` field (such as attachment-only prompts) still establish a fresh human turn boundary and clear prior turn state.
+  - Added regression test suite `tests/issue4-service-restart-aborted.test.mjs`.
+
 ## 0.17.8 — 2026-11-25
 
 ### Fixed

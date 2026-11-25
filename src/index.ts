@@ -1011,7 +1011,6 @@ export async function finalizeSubagentHandoff(input: {
             Promise.resolve().then(() => input.interrupt?.()).catch(() => {}),
             new Promise<void>((r) => {
               graceTimer = setTimeout(r, 500);
-              graceTimer.unref?.();
             }),
           ]);
         } finally {
@@ -1032,7 +1031,6 @@ export async function finalizeSubagentHandoff(input: {
               reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
             });
           }, remediationTimeoutMs);
-          deadlineTimer.unref?.();
           onAbortHandler = () => {
             if (settled) return;
             settled = true;

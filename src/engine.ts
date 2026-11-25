@@ -458,6 +458,46 @@ function isGuardianRemediationMessage(
   );
 }
 
+function isPeerWakeMessage(
+  message: SessionMessage,
+  sessionID?: string
+): boolean {
+  if (message.info.role !== "user") return false;
+  if (isGuardianRemediationMessage(message, sessionID)) return false;
+  if (!isSyntheticUserMessage(message, sessionID)) return false;
+  return Boolean(
+    message.parts?.some((part) => {
+      if (part.synthetic !== true) return false;
+      const meta =
+        part.metadata && typeof part.metadata === "object" && !Array.isArray(part.metadata)
+          ? (part.metadata as Record<string, unknown>)
+          : undefined;
+      if (!meta) return false;
+      const mesh =
+        meta["opencode-mesh"] &&
+        typeof meta["opencode-mesh"] === "object" &&
+        !Array.isArray(meta["opencode-mesh"])
+          ? (meta["opencode-mesh"] as Record<string, unknown>)
+          : undefined;
+      if (
+        mesh?.kind === "wake" ||
+        mesh?.kind === "notice" ||
+        mesh?.kind === "status"
+      ) {
+        return true;
+      }
+      if (
+        meta["hi-internal"] === "attention" ||
+        meta["hi-internal"] === "notify" ||
+        meta["hi-internal"] === "wake"
+      ) {
+        return true;
+      }
+      return false;
+    })
+  );
+}
+
 export const NATIVE_QUESTION_TOOLS = new Set([
   "ask_question",
   "question",
@@ -695,23 +735,45 @@ export class GuardEngine {
       invalidateActiveMeshHandoff(sessionID);
     }
 
-    const contract = extractTaskContract(currentTurn);
-    const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
-    const freshTurn = isRemediationResponse && lastGuardianIndex >= 0
-      ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
+    const lastPeerWakeIndex = currentTurn.findLastIndex((msg) =>
+      isPeerWakeMessage(msg, sessionID)
+    );
+    const isPeerWakeTurn =
+      lastPeerWakeIndex > 0 && lastPeerWakeIndex > lastGuardianIndex;
+    const effectiveRemediationResponse = isRemediationResponse && !isPeerWakeTurn;
+    const completionTurn = isPeerWakeTurn
+      ? currentTurn.slice(lastPeerWakeIndex)
       : currentTurn;
+    const persistedRemediationCount = completionTurn.filter((msg) =>
+      isGuardianRemediationMessage(msg, sessionID)
+    ).length;
+
+    const contract = isPeerWakeTurn
+      ? undefined
+      : extractTaskContract(currentTurn);
+    const evidence = collectTurnEvidence(currentTurn, directory, snapshots);
+    const freshTurn = isPeerWakeTurn
+      ? [firstCurrentMessage, ...currentTurn.slice(lastPeerWakeIndex + 1)]
+      : effectiveRemediationResponse && lastGuardianIndex >= 0
+        ? [firstCurrentMessage, ...currentTurn.slice(lastGuardianIndex + 1)]
+        : currentTurn;
     // Reinspect only new work for the other rules; the completion gate alone
-    // needs the full human-turn history to evaluate progress across rounds.
+    // needs the full human-turn history to evaluate progress across rounds,
+    // except after a peer-plugin wake (e.g. startup attention notice) where
+    // pre-wake historical failures from earlier turns must not be re-audited.
     const freshEvidence = freshTurn === currentTurn
       ? evidence
       : collectTurnEvidence(freshTurn, directory, snapshots);
-    const pendingRules = isRemediationResponse
+    const completionEvidence = completionTurn === currentTurn
+      ? evidence
+      : collectTurnEvidence(completionTurn, directory, snapshots);
+    const pendingRules = effectiveRemediationResponse
       ? this.sessionState.getPendingRemediation(sessionID, turnKey) ?? []
       : [];
-    const pendingFiles = isRemediationResponse
+    const pendingFiles = effectiveRemediationResponse
       ? this.sessionState.getPendingRemediationFiles(sessionID, turnKey)
       : [];
-    const pendingFindingKeys = isRemediationResponse
+    const pendingFindingKeys = effectiveRemediationResponse
       ? this.sessionState.getPendingRemediationFindings(sessionID, turnKey)
       : [];
     const results: RuleResult[] = [];
@@ -765,11 +827,11 @@ export class GuardEngine {
         sessionID,
         directory,
         messages,
-        currentTurn: isCompletionGate ? currentTurn : freshTurn,
+        currentTurn: isCompletionGate ? completionTurn : freshTurn,
         isSubagent,
         agentCapability: options?.agentCapability,
         ruleConfig,
-        evidence: isCompletionGate ? evidence : freshEvidence,
+        evidence: isCompletionGate ? completionEvidence : freshEvidence,
       };
 
       const res = await rule.inspect(context);
@@ -812,6 +874,12 @@ export class GuardEngine {
           : 3;
         // A second prompt requires observable progress. A repeated final
         // message without any new tool work cannot cause an infinite loop.
+        if (
+          this.sessionState.getTurnContinuationCount(sessionID, turnKey) === 0 &&
+          persistedRemediationCount >= budget
+        ) {
+          return { decision: "pass", results };
+        }
         const progressKey = `${latestMutationSequence(evidence)}:${evidence.records.length}`;
         if (!this.sessionState.canContinue(sessionID, turnKey, progressKey, budget)) {
           return { decision: "pass", results };
@@ -879,6 +947,27 @@ export class GuardEngine {
             Math.min(32, this.rules.size * Math.max(1, budget))
           );
 
+      // Across process restarts or plugin hot-reloads, in-memory session state
+      // is reset; honor persisted `[opencode-guardian remediation]` messages
+      // already in the current turn so Guardian never re-remediates an old turn
+      // after OpenCode restarts.
+      const inMemoryTurnActivity =
+        this.sessionState.getTurnRemediationCount(sessionID, turnKey) +
+        this.sessionState.getTurnContinuationCount(sessionID, turnKey);
+      if (inMemoryTurnActivity === 0 && persistedRemediationCount >= budget) {
+        this.sessionState.clearPendingRemediation(sessionID);
+        return {
+          decision: "pass",
+          results,
+          ...(effectiveRemediationResponse
+            ? {
+                remediationStatus: pendingRules.length ? "failed" as const : "unverified" as const,
+                pendingRemediationRules: pendingRules,
+              }
+            : {}),
+        };
+      }
+
       if (
         !this.sessionState.canRemediate(
           sessionID,
@@ -893,7 +982,7 @@ export class GuardEngine {
         return {
           decision: "pass",
           results,
-          ...(isRemediationResponse
+          ...(effectiveRemediationResponse
             ? { remediationStatus: pendingRules.length ? "failed" as const : "unverified" as const,
                 pendingRemediationRules: pendingRules }
             : {}),
@@ -964,7 +1053,7 @@ export class GuardEngine {
       };
     }
 
-    if (isRemediationResponse) {
+    if (effectiveRemediationResponse) {
       // Absence of new findings is not proof of correction. A synthetic reply
       // without any successful follow-up work must never close an obligation.
       const successfulFresh = freshEvidence.records.filter(

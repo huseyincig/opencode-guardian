@@ -24,6 +24,7 @@ export declare class SessionStateStore {
     private static readonly MAX_SESSIONS;
     beginTurn(sessionID: string, turnKey: string): SessionState;
     getTurnRemediationCount(sessionID: string, turnKey: string): number;
+    getTurnContinuationCount(sessionID: string, turnKey: string): number;
     getRuleRemediationCount(sessionID: string, turnKey: string, ruleId: string): number;
     canRemediate(sessionID: string, turnKey: string, fingerprint: string | readonly string[], _rules: string[], budget: number, maxTurnBudget?: number): boolean;
     hasExhaustedRule(sessionID: string, turnKey: string, rules: string[], budget: number): boolean;

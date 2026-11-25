@@ -1,6 +1,6 @@
 # Engine discipline coverage and evidence boundaries
 
-Guardian v0.17.7 targets pure OpenCode V2 (`>=2.3.0`, verified through `v2.4.1`). It keeps the existing fourteen rule IDs and remediation budgets, adds the typed `./rpc` export, `shell.hook("create.before")` preflight (`"critical"` and `"strict"` modes), global config security floor protection (`allowProjectOverrides: false`), Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), and external per-project state isolation, and adds no runtime dependencies or installed skills. (OpenCode V1 support ended in `v0.14.0`.)
+Guardian v0.17.8 targets pure OpenCode V2 (`>=2.3.0`, verified through `v2.4.1`). It keeps the existing fourteen rule IDs and remediation budgets, adds the typed `./rpc` export, `shell.hook("create.before")` preflight (`"critical"` and `"strict"` modes), global config security floor protection (`allowProjectOverrides: false`), Universal V2 Plugin Mesh Bridge (`src/bridge.ts`), and external per-project state isolation, and adds no runtime dependencies or installed skills. (OpenCode V1 support ended in `v0.14.0`.)
 
 ## Evidence
 
@@ -66,5 +66,5 @@ Default production-dependency findings are advisory, including when the rule sev
 
 Validation commands: `npm test`, `npm run typecheck`, `npm run typecheck:strict`, `npm run lint`, `node sandbox/smoke-test.mjs`, `node sandbox/comprehensive-test.mjs`, `node sandbox/v2-live-acceptance.mjs`. A fresh automated run and simulated host callbacks are distinct from loading a real pinned OpenCode host or visually exercising its TUI. Existing published acceptance reports remain historical.
 
-Observed on 2026-11-25 for **v0.17.7**: **843 / 843 tests passed**, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 121 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
+Observed on 2026-11-25 for **v0.17.8**: **847 / 847 tests passed**, zero failed, cancelled or skipped; standard and strict TypeScript checks and Oxlint (`0 warnings, 0 errors` on 122 files) passed. The isolated smoke scenario, all **18 / 18** comprehensive sandbox scenarios, and **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks passed.
 

@@ -32,6 +32,12 @@ export class SessionStateStore {
             return 0;
         return state.remediationCount;
     }
+    getTurnContinuationCount(sessionID, turnKey) {
+        const state = this.sessions.get(sessionID);
+        if (!state || state.turnKey !== turnKey)
+            return 0;
+        return state.continuationCount;
+    }
     getRuleRemediationCount(sessionID, turnKey, ruleId) {
         const state = this.sessions.get(sessionID);
         if (!state || state.turnKey !== turnKey)

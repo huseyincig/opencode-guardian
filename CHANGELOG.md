@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.8 — 2026-11-25
+
+### Fixed
+- **Prevented spurious Guardian re-triggers on OpenCode restart / peer-plugin startup wakes:**
+  - Scoped `GuardEngine.inspect()` around synthetic peer-plugin wake messages (`metadata["opencode-mesh"].kind === "wake" | "notice" | "status"` and `metadata["hi-internal"] === "attention" | "notify" | "wake"`): when a peer plugin (such as `opencode-hi`) wakes an existing session on OpenCode startup, Guardian now evaluates only the work performed *after* the peer wake instead of walking back hours to an earlier human turn and re-flagging historical pre-restart tool failures in `task/completion-gate` (while still catching any brand-new violations or failing commands introduced after the wake).
+  - Added restart-safe persisted remediation budget accounting in `GuardEngine.inspect()` (`src/engine.ts`, `src/state.ts`): when in-memory session state is reset after an OpenCode restart or plugin hot-reload, Guardian now counts persisted synthetic `[opencode-guardian remediation]` messages already present in the current turn against `remediationBudget` (and `iterationBudget` for iterative review) so an already-remediated turn is never re-remediated on reopen, while rejecting spoofed non-synthetic human text.
+  - Added regression test suite `tests/v0178-restart-wake-guard.test.mjs`.
+
 ## 0.17.7 — 2026-11-25
 
 ### Fixed

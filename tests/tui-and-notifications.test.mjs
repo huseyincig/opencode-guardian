@@ -1736,4 +1736,29 @@ describe("Version Update Notice", () => {
     assert.equal(onResetCalls, 0, "failed reset must NOT call onReset or clear intervention visibility");
     assert.match(alerts[0]?.message ?? "", /Reset failed/i);
   });
+
+  test("R3 Dalga 3 (R3-051): dispatchGuardianToast does not double-deliver to both in-process listener and context.ui.toast.show", () => {
+    clearToastListeners();
+    let listenerCalls = 0;
+    let directToastCalls = 0;
+    const unreg = registerToastListener(() => { listenerCalls++; });
+    try {
+      dispatchGuardianToast(
+        { title: "Guardian Warning", message: "test", variant: "warning", duration: 3000 },
+        {
+          enabled: true,
+          directory: "/tmp/r3-051-dedupe",
+          sessionID: "s-r3-051",
+          context: {
+            ui: { toast: { show() { directToastCalls++; } } },
+          },
+        }
+      );
+      assert.equal(listenerCalls, 1, "in-process listener should receive toast");
+      assert.equal(directToastCalls, 0, "R3-051: when an in-process listener already handles toast delivery, direct context.ui.toast.show must not duplicate it");
+    } finally {
+      unreg();
+      clearToastListeners();
+    }
+  });
 });

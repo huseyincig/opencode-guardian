@@ -4269,4 +4269,177 @@ describe("Deep Runtime & Config Merge Regressions", () => {
       await cleanup?.();
     }
   });
+
+  test("23. R3 Dalga 1 (R3-001, R3-002): allowProjectOverrides:false locks implicit severity on global rule objects, preserves customPhrases against scalar overrides, and locks tightening booleans", () => {
+    const globalCfg = {
+      enabled: true,
+      allowProjectOverrides: false,
+      rules: {
+        "integrity/no-unverified-claims": { blockUnverified: true },
+        "quality/no-shortcuts": { severity: "error", customPhrases: ["global-banned-phrase"] },
+        "manifest/no-ghost-deps": { severity: "error", productionOnly: true, blockPythonGhostDeps: true },
+      },
+    };
+    const projectOverlay = {
+      rules: {
+        // R3-001: global object omitted severity (effective default "error"), project tries to turn it off
+        "integrity/no-unverified-claims": { severity: "off", blockUnverified: false },
+        // R3-002a: project scalar string tries to drop global customPhrases
+        "quality/no-shortcuts": "error",
+        // R3-002b: project object tries to flip tightening booleans to false
+        "manifest/no-ghost-deps": { severity: "error", productionOnly: false, blockPythonGhostDeps: false },
+      },
+    };
+    const effective = resolveEffectiveConfig(globalCfg, projectOverlay);
+    const claimsRule = effective.rules?.["integrity/no-unverified-claims"];
+    assert.equal(typeof claimsRule === "object" ? claimsRule.severity : claimsRule, "error", "R3-001: implicit default severity on global rule object must stay locked at error");
+    assert.equal(typeof claimsRule === "object" ? claimsRule.blockUnverified : undefined, true, "R3-002: blockUnverified:true must stay locked");
+
+    const shortcutsRule = effective.rules?.["quality/no-shortcuts"];
+    assert.equal(typeof shortcutsRule, "object", "R3-002: scalar project overlay must not wipe global rule object");
+    assert.deepEqual(shortcutsRule.customPhrases, ["global-banned-phrase"], "R3-002: global customPhrases must survive scalar project override");
+
+    const ghostRule = effective.rules?.["manifest/no-ghost-deps"];
+    assert.equal(ghostRule?.productionOnly, true, "R3-002: productionOnly:true must stay locked");
+    assert.equal(ghostRule?.blockPythonGhostDeps, true, "R3-002: blockPythonGhostDeps:true must stay locked");
+  });
+
+  test("24. R3 Dalga 1 (R3-003): cached directory with omitted enabled field must not bypass fail-closed hook readiness after config.updated", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r3-003-"));
+    const cfgPath = path.join(directory, "opencode-guardian.json");
+    // Omit `enabled` (defaults to active) and start with preflight: false so setup succeeds without tool.hook
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const queue = [];
+    let notify = null;
+    const pushEvent = (ev) => {
+      queue.push(ev);
+      if (notify) { const fn = notify; notify = null; fn(); }
+    };
+    let shellBeforeHook;
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            while (!signal.aborted) {
+              if (queue.length === 0) {
+                await new Promise((r) => {
+                  notify = r;
+                  signal.addEventListener("abort", r, { once: true });
+                });
+                continue;
+              }
+              yield queue.shift();
+            }
+          })();
+        },
+      },
+      shell: {
+        hook(kind, fn) {
+          if (kind === "create.before") shellBeforeHook = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get() { return { id: "s-r3-003", location: { directory } }; },
+        async context() { return []; },
+        async synthetic() {},
+      },
+    };
+    const cleanup = await Guardian.setup(host);
+    try {
+      // Reload config enabling preflight while still omitting `enabled`
+      fs.writeFileSync(cfgPath, JSON.stringify({
+        preflight: { enabled: true },
+        secrets: { enabled: false },
+      }));
+      pushEvent({ type: "config.updated", data: {} });
+      await new Promise((r) => setTimeout(r, 40));
+
+      await assert.rejects(
+        () => shellBeforeHook({ sessionID: "s-r3-003", command: "echo hi", location: { directory } }),
+        /preflight/i,
+        "omitted enabled (undefined) must NOT bypass fail-closed preflight readiness check on cached runtime"
+      );
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("25. R3 Dalga 2 (R3-013, R3-024): finalizeSubagentHandoff interrupts child on timeout and multi-instance telemetry ownership survives single-instance teardown", async (t) => {
+    const { finalizeSubagentHandoff, resolveTelemetrySettings } = await import("../dist/index.js");
+
+    // R3-013: deadline timeout must invoke interrupt callback so child doesn't continue orphaned
+    let interrupted = 0;
+    const engine = new GuardEngine({ enabled: true, remediationBudget: 1 });
+    await assert.rejects(
+      () => finalizeSubagentHandoff({
+        sessionID: "child-r3-013-timeout",
+        directory: process.cwd(),
+        engine,
+        leaseTtlMs: 80,
+        remediationTimeoutMs: 60,
+        interrupt: () => { interrupted++; },
+        resolveCapability: async () => ({ capability: "write-allowed", evidence: { reasons: ["test"] } }),
+        fetchMessages: async () => [
+          { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix bug" }] },
+          { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+        ],
+        sendAndWait: () => new Promise(() => {}), // hangs forever
+      }),
+      /could not complete subagent remediation/i
+    );
+    assert.equal(interrupted, 1, "R3-013: deadline timeout must invoke interrupt callback");
+
+    // R3-024: two instances on the same directory — disposing instance 1 must NOT erase instance 2's telemetry config
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r3-024-"));
+    fs.writeFileSync(path.join(dir, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+      telemetry: { enabled: true, level: "all" },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(dir, "state");
+    t.after(() => {
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const mkHost = () => ({
+      location: { directory: dir },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      session: { async context() { return []; }, async synthetic() {} },
+    });
+    const cleanup1 = await Guardian.setup(mkHost());
+    const cleanup2 = await Guardian.setup(mkHost());
+    try {
+      await cleanup1();
+      assert.equal(
+        resolveTelemetrySettings(dir).level,
+        "all",
+        "R3-024: disposing instance 1 must not wipe telemetry config owned by active instance 2"
+      );
+    } finally {
+      await cleanup2();
+    }
+  });
 });

@@ -426,7 +426,7 @@ const CLEAR_BLOCKER_REGEX =
   /\b(?:blocked|cannot\s+(?:proceed|continue|verify|run)|unable\s+to\s+(?:proceed|continue|verify|run)|need\s+(?:your\s+)?(?:permission|access|input)|not\s+(?:yet\s+)?(?:complete|done|finished)|unfinished)\b|\b(?:engellendi|ilerleyemiyorum|doğrulayamıyorum|çalıştıramıyorum|tamamlanmadı|izin\s+gerekiyor|erişim\s+gerekiyor|devam\s+edemiyorum|bitmedi|bitmiş\s+sayılmıyor|bitmiş\s+sayılmaz|tamamlanmış\s+sayılmıyor)\b/iu;
 
 const IN_PROGRESS_REGEX =
-  /(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report|running\s+in\s+the\s+background|moved\s+to\s+the\s+background|waiting\s+for\s+(?:the\s+)?background)|(?:işlem\w*\s+devam\s+ediyor|çalışma\w*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\w*\s+sürüyor|çalışıyorum|inceliyorum|hazırlıyorum|uyguluyorum|başlıyorum|deniyorum|devredildi|aktarıldı|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu|arka\s+planda\s+(?:çalışıyor|devam\s+ediyor))/iu;
+  /\b(?:in\s+progress|work\s+in\s+progress|processing|continuing|ongoing|working\s+on\s+it|still\s+working|step\s+\d+|proceeding|investigating|delegated|handed\s+off|status\s+update|progress\s+report|intermediate\s+report|running\s+in\s+the\s+background|moved\s+to\s+the\s+background|waiting\s+for\s+(?:the\s+)?background)\b|(?:işlem\w*\s+devam\s+ediyor|çalışma\w*\s+devam\s+ediyor|devam\s+ediyorum|devam\s+edilecek|işlem\w*\s+sürüyor|çalışıyorum|inceliyorum|hazırlıyorum|uyguluyorum|başlıyorum|deniyorum|devredildi|aktarıldı|ara\s+rapor|durum\s+güncellemesi|ilerleme\s+raporu|arka\s+planda\s+(?:çalışıyor|devam\s+ediyor))/iu;
 
 export function classifyAgentReport(input: string): {
   state: AgentReportState;
@@ -440,7 +440,22 @@ export function classifyAgentReport(input: string): {
   const isInProgress = IN_PROGRESS_REGEX.test(norm) || internationalReport === "in-progress";
   const proseWithoutBlockers = hasClearBlocker ? norm.replace(CLEAR_BLOCKER_REGEX, " ") : norm;
   const rawClosing = CLOSING_REGEX.test(proseWithoutBlockers) || internationalReport === "completed";
-  const isClosing = rawClosing && !isInProgress;
+  // When a multi-paragraph report mentions earlier progress ("Step 1: fixed processing")
+  // and concludes with a clean final completion paragraph ("All done, task completed."),
+  // treat the concluding statement as closing so completion-gate is never bypassed.
+  const rawParagraphs = input
+    .split(/\r?\n\s*\r?\n/)
+    .map((p) => normalizeReportText(p))
+    .filter(Boolean);
+  const finalParagraph = rawParagraphs.length > 1 ? rawParagraphs[rawParagraphs.length - 1]! : "";
+  const finalParagraphClosing =
+    finalParagraph.length > 0 &&
+    (CLOSING_REGEX.test(finalParagraph) || classifyInternationalAgentReport(finalParagraph) === "completed") &&
+    !IN_PROGRESS_REGEX.test(finalParagraph) &&
+    !CLEAR_BLOCKER_REGEX.test(finalParagraph) &&
+    classifyInternationalAgentReport(finalParagraph) !== "in-progress" &&
+    classifyInternationalAgentReport(finalParagraph) !== "blocked";
+  const isClosing = finalParagraphClosing || (rawClosing && !isInProgress);
   const state: AgentReportState =
     hasClearBlocker && !isClosing
       ? "blocked"
@@ -470,7 +485,7 @@ const VERIFICATION_REQUESTS: Array<{
   kind: VerificationKind;
   expression: RegExp;
 }> = [
-  { kind: "test", expression: /(?:\b(?:run|execute|rerun|re-run)\s+(?:the\s+|all\s+)?tests?\b|\b(?:testleri?|testleri\s+)?(?:çalıştır|çalıştırın|koştur|koşturun)\b)/iu },
+  { kind: "test", expression: /(?:\b(?:run|execute|rerun|re-run)\s+(?:the\s+|all\s+)?tests?\b|\btest(?:i|leri|lerini)?\s+(?:çalıştır|çalıştırın|koştur|koşturun)\b)/iu },
   { kind: "build", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?build\b|\b(?:build|derleme)(?:i|ı|yi|yı)?\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
   { kind: "typecheck", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?typecheck\b|\btypecheck\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
   { kind: "lint", expression: /(?:\b(?:run|execute)\s+(?:the\s+)?lint\b|\blint\s+(?:çalıştır|çalıştırın|yap|yapın)\b)/iu },
@@ -479,6 +494,15 @@ const VERIFICATION_REQUESTS: Array<{
 
 export function isExploratoryPrompt(text: string): boolean {
   return /^\s*(?:should\s+we|would\s+we|could\s+we|what\s+if|do\s+you\s+think\s+we\s+should|sence|acaba|ne\s+olur\s+eğer)\b/iu.test(text);
+}
+
+function isPureDiagnosticQuestion(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    trimmed.endsWith("?") &&
+    /^(?:why|what|how|when|where|neden|niye|niçin|nasıl)\b/iu.test(trimmed) &&
+    !ACTION_REQUEST.test(trimmed)
+  );
 }
 
 export function deniedVerification(text: string, kind: VerificationKind): boolean {
@@ -509,6 +533,7 @@ export function extractAdvisoryTaskSignals(body: string): AdvisoryTaskSignals {
 
   const iterativeReview =
     !exploratory &&
+    !isPureDiagnosticQuestion(body) &&
     !negatedLoop &&
     (international?.iterativeReview === true ||
       (ITERATION.test(body) && REVIEW.test(body) && CONTINUE.test(body)));

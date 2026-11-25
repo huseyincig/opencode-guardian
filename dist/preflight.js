@@ -2,7 +2,8 @@ import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } fro
 import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
-import { extractStructuredEditTexts, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
+import { extractStructuredEditTexts, extractToolAction, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
+export { extractToolAction } from "./tool-input.js";
 import { findTruncationPlaceholder } from "./edit-integrity.js";
 /**
  * Shell tools known to execute shell commands.
@@ -22,29 +23,23 @@ const FILE_MUTATION_TOOLS = new Set([
     "file_mutate", "file_write", "file_edit",
 ]);
 export function isShellExecutionTool(tool, additionalTools = []) {
-    const normalized = tool.toLowerCase();
-    // MCP tool IDs use double-underscore separators, e.g.
-    // mcp__Node_Command__shell_exec. Never treat an arbitrary file_* MCP
-    // action as a shell, but recognize a known shell action by its full suffix.
-    const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-    const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+    const normalized = tool.toLowerCase().trim();
+    // MCP tool IDs use provider-agnostic double-underscore or dotted separators,
+    // e.g. mcp__<provider>__shell_exec. Never treat an arbitrary file_* MCP
+    // action as a shell, but recognize a known shell action by its suffix.
+    const last = extractToolAction(normalized);
     return SHELL_TOOLS.has(last) || additionalTools.some((entry) => {
         const candidate = entry.trim().toLowerCase();
         return candidate === normalized || candidate === last;
     });
 }
 export function isFileMutationTool(tool) {
-    const normalized = tool.toLowerCase();
-    const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-    const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+    const last = extractToolAction(tool);
     return FILE_MUTATION_TOOLS.has(last);
 }
 /** A process launcher requires inspection of both the executable and argv. */
 export function isProcessStartTool(tool) {
-    const normalized = tool.toLowerCase();
-    const action = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1]
-        ?? normalized.split(/[.:/]/).at(-1);
-    return action === "process_start";
+    return extractToolAction(tool) === "process_start";
 }
 function evaluateProcessStartPreflight(input, mode = "strict") {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -108,7 +103,7 @@ function isWindowsDestructiveCommand(command, depth = 0) {
     // cmd /c and PowerShell -Command execute literal quoted scripts.
     return depth < 4 && literalWindowsShellScripts(command).some((script) => isWindowsDestructiveCommand(script, depth + 1));
 }
-export function evaluateFileMutationPreflight(tool, input) {
+export function evaluateFileMutationPreflight(tool, input, mode = "strict") {
     if (!isFileMutationTool(tool))
         return undefined;
     if (!input || typeof input !== "object" || Array.isArray(input))
@@ -117,11 +112,12 @@ export function evaluateFileMutationPreflight(tool, input) {
     const patchRaw = args.patchText ?? args.patch;
     const targetFile = args.path ??
         args.targetFile ??
+        args.TargetFile ??
         args.filePath ??
         args.file ??
         (typeof patchRaw === "string" ? extractFilePathFromPatch(patchRaw) : undefined);
     const textsToCheck = [];
-    for (const key of ["content", "new_string", "newString", "CodeContent", "ReplacementContent", "text"]) {
+    for (const key of ["content", "new_string", "newString", "new_str", "CodeContent", "ReplacementContent", "text", "file_text"]) {
         if (typeof args[key] === "string") {
             textsToCheck.push({
                 text: args[key],
@@ -170,7 +166,21 @@ export function evaluateFileMutationPreflight(tool, input) {
         textsToCheck.push(...extractStructuredEditTexts(args, typeof targetFile === "string" ? targetFile : undefined));
     }
     const action = typeof args.action === "string" ? args.action.toLowerCase() : "";
-    if (!["move", "copy", "delete", "remove"].includes(action) &&
+    if (action === "delete" || action === "remove") {
+        if (mode === "strict") {
+            return "destructive-command";
+        }
+        const delTarget = typeof targetFile === "string" ? targetFile.trim() : "";
+        const isCatastrophicDelete = args.recursive === true ||
+            args.force === true ||
+            !delTarget ||
+            /^(?:\/+|~|\.\.?|\*|[a-z]:\\?)$/i.test(delTarget);
+        if (isCatastrophicDelete) {
+            return "destructive-command";
+        }
+        return undefined;
+    }
+    if (!["move", "copy"].includes(action) &&
         !hasValidPatchStructure &&
         textsToCheck.length === 0) {
         return "uninspectable-file-input";
@@ -330,7 +340,7 @@ export function evaluatePreflight(tool, input, additionalTools = [], mode = "str
         return undefined;
     }
     if (isFileMutationTool(tool)) {
-        return evaluateFileMutationPreflight(tool, input);
+        return evaluateFileMutationPreflight(tool, input, mode);
     }
     return undefined;
 }

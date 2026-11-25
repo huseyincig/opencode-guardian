@@ -60,6 +60,7 @@ export declare function finalizeSubagentHandoff(input: {
     onRemediated?: (() => void) | undefined;
     leaseTtlMs?: number | undefined;
     remediationTimeoutMs?: number | undefined;
+    interrupt?: (() => Promise<unknown> | void) | undefined;
 }): Promise<string | undefined>;
 export declare function hasUnfinishedBackgroundTool(messages: readonly SessionMessage[]): boolean;
 /**

@@ -288,7 +288,7 @@ export declare function registerRoleProfileResolver(input: {
 export declare function resolveMeshAgentProfile(sessionID: string, directory?: string): Promise<MeshAgentProfile | undefined>;
 export declare function recordMeshIntervention(record: MeshInterventionRecord): void;
 export declare function getLatestMeshIntervention(sessionID: string, maxAgeMs?: number): MeshInterventionRecord | undefined;
-export declare function clearMeshIntervention(sessionID: string): void;
+export declare function clearMeshIntervention(sessionID: string, expectedOwner?: string): void;
 export declare function registerSkillCatalogProvider(provider: MeshSkillCatalogProvider): () => void;
 export declare function queryMeshSkills(query: string, options?: {
     directory?: string | undefined;

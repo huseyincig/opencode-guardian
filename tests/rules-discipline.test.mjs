@@ -668,6 +668,57 @@ describe("Report Audit Regressions", () => {
       fs.rmSync(outer, { recursive: true, force: true });
     }
   });
+
+  test("R3 Dalga 3 (R3-037, R3-038, R3-040): no-ghost-deps stays inside workspace root, treats oversized requirements as indeterminate, and handles Rust lifetimes/pub use and JS template imports", () => {
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r3-ghost-"));
+    const proj = path.join(outer, "workspace");
+    fs.mkdirSync(proj, { recursive: true });
+    try {
+      // R3-037: parent package.json outside workspace root must NOT be loaded
+      fs.writeFileSync(path.join(outer, "package.json"), JSON.stringify({ name: "outer", dependencies: { "outer-only-pkg": "1.0.0" } }));
+      clearDeclaredDepsCache();
+      const ctx37 = context([tool({ path: path.join(proj, "app.ts"), content: 'import x from "some-unlisted";\n' })]);
+      ctx37.directory = proj;
+      assert.equal(noGhostDepsRule.inspect(ctx37).decision, "pass", "R3-037: nearestFile must not walk above workspace root into parent package.json");
+
+      // R3-038: oversized requirements.txt (>256KiB) must fail open (indeterminate), not falsely report every import as ghost
+      const pyProj = path.join(outer, "py-big");
+      fs.mkdirSync(pyProj, { recursive: true });
+      fs.writeFileSync(path.join(pyProj, "requirements.txt"), "requests>=2.0\n" + "# ".padEnd(300 * 1024, "x") + "\n");
+      clearDeclaredDepsCache();
+      const ctx38 = context([tool({ path: path.join(pyProj, "app.py"), content: "import requests\n" })]);
+      ctx38.directory = pyProj;
+      ctx38.ruleConfig = { blockPythonGhostDeps: true };
+      assert.equal(noGhostDepsRule.inspect(ctx38).decision, "pass", "R3-038: oversized/truncated Python manifest must not produce false-positive ghost-dep block");
+
+      // R3-040a: Rust lifetime `'static` must not swallow subsequent `use` / `pub use`
+      const rsProj = path.join(outer, "rs-proj");
+      fs.mkdirSync(rsProj, { recursive: true });
+      fs.writeFileSync(path.join(rsProj, "Cargo.toml"), '[package]\nname = "demo"\n[dependencies]\nserde = "1"\n');
+      clearDeclaredDepsCache();
+      const ctx40rs = context([tool({
+        path: path.join(rsProj, "lib.rs"),
+        content: "const S: &'static str = \"ok\";\npub use ghost_crate::Thing;\n",
+      })]);
+      ctx40rs.directory = rsProj;
+      assert.equal(noGhostDepsRule.inspect(ctx40rs).decision, "block", "R3-040: Rust 'static lifetime must not mask subsequent pub use ghost_crate");
+
+      // R3-040b: JS template interpolation `${await import(...)}` must be inspected
+      const jsProj = path.join(outer, "js-proj");
+      fs.mkdirSync(jsProj, { recursive: true });
+      fs.writeFileSync(path.join(jsProj, "package.json"), JSON.stringify({ name: "js-proj", dependencies: {} }));
+      clearDeclaredDepsCache();
+      const ctx40js = context([tool({
+        path: path.join(jsProj, "index.mjs"),
+        content: 'const msg = `${await import("ghost-template-pkg")}`;\n',
+      })]);
+      ctx40js.directory = jsProj;
+      assert.equal(noGhostDepsRule.inspect(ctx40js).decision, "block", "R3-040: dynamic import inside JS template interpolation must be detected");
+    } finally {
+      clearDeclaredDepsCache();
+      fs.rmSync(outer, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Report Follow-up Regressions", () => {
@@ -1030,7 +1081,7 @@ describe("Full Audit Regressions", () => {
     for (const command of blocked) {
       assert.equal(isDestructiveCommand(command), true, command);
       assert.equal(evaluatePreflight("bash", { command }), "destructive-command", command);
-      assert.equal(evaluatePreflight("mcp__Node_Command__shell_exec", { command }), "destructive-command", command);
+      assert.equal(evaluatePreflight("mcp__provider_a__shell_exec", { command }), "destructive-command", command);
     }
     for (const command of [
       "git -C /repo status",

@@ -385,6 +385,11 @@ export function dispatchGuardianToast(
         recentDispatches.delete(key);
       }
     }
+    while (recentDispatches.size > 200) {
+      const oldest = recentDispatches.keys().next().value;
+      if (oldest === undefined) break;
+      recentDispatches.delete(oldest);
+    }
   }
 
   // 1. Notify only listeners in the same project/session scope.
@@ -392,6 +397,7 @@ export function dispatchGuardianToast(
     ...(options?.directory ? { directory: options.directory } : {}),
     ...(options?.sessionID ? { sessionID: options.sessionID } : {}),
   };
+  let deliveredToInProcessListener = false;
   for (const registration of activeListeners) {
     if (
       registration.scope.directory !== undefined &&
@@ -405,6 +411,7 @@ export function dispatchGuardianToast(
     ) {
       continue;
     }
+    deliveredToInProcessListener = true;
     try {
       void Promise.resolve(
         registration.listener(payload, dispatchScope)
@@ -417,6 +424,9 @@ export function dispatchGuardianToast(
   // Listener delivery also carries the same-process composer fallback state.
   // Disabling toast notifications must not disable that separate UI channel.
   if (options?.enabled === false) return;
+
+  // Avoid duplicate toasts when an in-process TUI listener already handles delivery.
+  if (deliveredToInProcessListener) return;
 
   // 2. V2 Context (context.ui.toast.show or context.client.tui.showToast)
   const context = options?.context as

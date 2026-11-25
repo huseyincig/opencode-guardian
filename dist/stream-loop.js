@@ -51,7 +51,13 @@ export class StreamLoopWatcher {
                 return;
             if (verify.deltas > 0) {
                 state.stopped = false;
+                delete state.stopUnconfirmed;
                 recordGuardianEvent({ kind: "stream-interrupt-ineffective", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, verify.directory);
+            }
+            else {
+                // No terminal host event arrived during the verification window; if delayed
+                // deltas resume later for the same response, reopen loop detection.
+                state.stopUnconfirmed = { directory: verify.directory };
             }
         }, verifyWindowMs());
         timer.unref?.();
@@ -108,6 +114,7 @@ export class StreamLoopWatcher {
                     recordGuardianEvent({ kind: "stream-interrupt-verified", session: sessionFingerprint(sid), rules: ["runtime/circuit-breaker"] }, verify.directory);
                 }
                 this.endVerification(state);
+                delete state.stopUnconfirmed;
                 state.active = false;
             }
             return;
@@ -137,6 +144,12 @@ export class StreamLoopWatcher {
             return;
         if (delta && state.verify)
             state.verify.deltas++;
+        if (delta && state.stopped && state.stopUnconfirmed && state.active) {
+            const unconfirmed = state.stopUnconfirmed;
+            delete state.stopUnconfirmed;
+            state.stopped = false;
+            recordGuardianEvent({ kind: "stream-interrupt-ineffective", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, unconfirmed.directory);
+        }
         if (!state.active || state.stopped || state.warned || state.attempts >= 3)
             return;
         let part = state.parts.get(key);

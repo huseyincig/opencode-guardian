@@ -189,7 +189,7 @@ function checkFile(file: string): void {
   if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) fs.chmodSync(file, 0o600);
 }
 
-const telemetryConfigRegistry = new Map<string, GuardianTelemetryConfig>();
+const telemetryConfigRegistry = new Map<string, Map<string, GuardianTelemetryConfig>>();
 const verifiedStateDirs = new Set<string>();
 const liveMemoryCounters = new Map<string, { inspectedSkippedDisk: number; redactions: number }>();
 type FileSignature = string;
@@ -249,14 +249,39 @@ export function recordGuardianRedaction(count = 1, directory?: string): void {
 
 export function configureGuardianTelemetry(
   directory: string | undefined,
-  config?: GuardianTelemetryConfig
+  config?: GuardianTelemetryConfig,
+  ownerId: string | number = "__default__"
 ): void {
   const key = directory ? path.resolve(directory) : "__default__";
+  const ownerKey = String(ownerId);
   if (config) {
-    telemetryConfigRegistry.set(key, config);
+    let owners = telemetryConfigRegistry.get(key);
+    if (!owners) {
+      owners = new Map();
+      telemetryConfigRegistry.set(key, owners);
+    }
+    owners.delete(ownerKey);
+    owners.set(ownerKey, config);
   } else {
-    telemetryConfigRegistry.delete(key);
+    const owners = telemetryConfigRegistry.get(key);
+    if (!owners) return;
+    if (ownerId === "__default__") {
+      telemetryConfigRegistry.delete(key);
+    } else {
+      owners.delete(ownerKey);
+      if (owners.size === 0) telemetryConfigRegistry.delete(key);
+    }
   }
+}
+
+function latestRegisteredTelemetryConfig(key: string): GuardianTelemetryConfig | undefined {
+  const owners = telemetryConfigRegistry.get(key);
+  if (!owners || owners.size === 0) return undefined;
+  let latest: GuardianTelemetryConfig | undefined;
+  for (const cfg of owners.values()) {
+    latest = cfg;
+  }
+  return latest;
 }
 
 export function clearGuardianTelemetryConfig(): void {
@@ -280,7 +305,8 @@ export function resolveTelemetrySettings(directory?: string): {
   const envMaxBytes = Number(process.env.OPENCODE_GUARDIAN_MAX_LOG_BYTES);
 
   const key = directory ? path.resolve(directory) : "__default__";
-  const registered = telemetryConfigRegistry.get(key) ?? telemetryConfigRegistry.get("__default__");
+  const registered =
+    latestRegisteredTelemetryConfig(key) ?? latestRegisteredTelemetryConfig("__default__");
 
   const enabled = registered?.enabled !== false;
   // Unconfigured processes (TUI, status CLI) must show the documented default.
@@ -297,12 +323,12 @@ export function resolveTelemetrySettings(directory?: string): {
   let maxBytes =
     registered?.maxBytes !== undefined &&
     Number.isFinite(registered.maxBytes) &&
-    registered.maxBytes >= 1
-      ? Math.floor(registered.maxBytes)
+    registered.maxBytes >= 256
+      ? Math.min(GUARDIAN_MAX_LOG_BYTES, Math.floor(registered.maxBytes))
       : DEFAULT_GUARDIAN_LOG_BYTES;
 
-  if (Number.isFinite(envMaxBytes) && envMaxBytes >= 1) {
-    maxBytes = Math.floor(envMaxBytes);
+  if (Number.isFinite(envMaxBytes) && envMaxBytes >= 256) {
+    maxBytes = Math.min(GUARDIAN_MAX_LOG_BYTES, Math.floor(envMaxBytes));
   }
 
   return { enabled, level, maxBytes };
@@ -310,6 +336,7 @@ export function resolveTelemetrySettings(directory?: string): {
 
 const ROTATION_LOCK_STALE_MS = 5_000;
 function acquireRotationLock(lockPath: string): (() => void) | undefined {
+  const token = `${process.pid}:${randomUUID()}`;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const lockFd = fs.openSync(
@@ -317,12 +344,20 @@ function acquireRotationLock(lockPath: string): (() => void) | undefined {
         fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0),
         0o600
       );
-      try { fs.closeSync(lockFd); } catch {}
+      try {
+        fs.writeSync(lockFd, token);
+      } finally {
+        try { fs.closeSync(lockFd); } catch {}
+      }
       let released = false;
       return () => {
         if (released) return;
         released = true;
-        try { fs.unlinkSync(lockPath); } catch {}
+        try {
+          if (fs.readFileSync(lockPath, "utf8") === token) {
+            fs.unlinkSync(lockPath);
+          }
+        } catch {}
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
@@ -396,9 +431,17 @@ export function recordGuardianEvent(event: Omit<GuardianEvent, "at">, directoryA
         const releaseLock = acquireRotationLock(filePath + ".lock");
         if (releaseLock) {
           try {
-            // Re-check file size after acquiring lock so concurrent processes do not double-rotate.
+            // Re-check file size and inode after acquiring lock so concurrent processes
+            // neither double-rotate nor append into a rotated archive via a stale fd.
             const freshStat = fs.lstatSync(filePath, { throwIfNoEntry: false });
-            if (freshStat && freshStat.isFile() && freshStat.size + Buffer.byteLength(line) > settings.maxBytes) {
+            if (freshStat && freshStat.isFile() && freshStat.ino !== info.ino) {
+              fs.closeSync(fd);
+              fd = fs.openSync(filePath,
+                fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT |
+                (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+            }
+            const activeStat = fs.fstatSync(fd);
+            if (activeStat.isFile() && activeStat.size + Buffer.byteLength(line) > settings.maxBytes) {
               // Keep exactly one bounded archive. Refuse unsafe pre-existing archive paths.
               if (fs.existsSync(archive) || fs.lstatSync(archive, { throwIfNoEntry: false })) {
                 checkFile(archive);

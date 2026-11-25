@@ -207,11 +207,42 @@ export function sanitizeString(
       );
     }
 
-    // 3. Line-by-line key-value checks (env, docker exec env, etc.)
+    // 3. Line-by-line key-value checks (env, docker exec env, YAML including block scalars)
     const lines = result.split('\n');
     let lineModified = false;
+    let activeYamlBlockIndent: number | null = null;
     for (let i = 0; i < lines.length; i++) {
       const original = lines[i] ?? '';
+      if (activeYamlBlockIndent !== null) {
+        if (original.trim().length === 0) {
+          continue;
+        }
+        const indentMatch = /^(\s*)/.exec(original);
+        const lineIndent = indentMatch?.[1]?.length ?? 0;
+        if (lineIndent > activeYamlBlockIndent) {
+          lines[i] = `${' '.repeat(lineIndent)}${replacement}`;
+          lineModified = true;
+          redactedCount++;
+          findings.push({ kind: 'key-value', category: 'yaml-block-scalar' });
+          continue;
+        }
+        activeYamlBlockIndent = null;
+      }
+
+      const yamlBlockHeader = /^(\s*)(["']?)([a-zA-Z0-9_.-]+)(["']?\s*:\s*)([|>][+-]?\d*(?:\s+#.*)?)$/.exec(original);
+      if (
+        yamlBlockHeader &&
+        isSensitiveKey(yamlBlockHeader[3] ?? '', options.customSensitiveKeys, options.safeKeyNames)
+      ) {
+        const leadingIndent = yamlBlockHeader[1] ?? '';
+        activeYamlBlockIndent = leadingIndent.length;
+        lines[i] = `${leadingIndent}${yamlBlockHeader[2] ?? ''}${yamlBlockHeader[3] ?? ''}${yamlBlockHeader[4] ?? ''}${replacement}`;
+        lineModified = true;
+        redactedCount++;
+        findings.push({ kind: 'key-value', category: 'yaml-assignment', keyName: yamlBlockHeader[3] ?? '' });
+        continue;
+      }
+
       const sanitized = sanitizeKeyValueLine(
         original,
         replacement,
@@ -231,17 +262,18 @@ export function sanitizeString(
     }
 
     // 3b. Inline key-value assignments (e.g. "token=xyz", "password: xyz", "password=\"multi word\"", "--api-key=xyz")
+    // Support long quoted tokens (up to 4096 chars) and unclosed/oversized quoted values on the same line.
     const inlineKvRegex =
-      /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)(?:"((?:\\.|[^"\\\r\n]){1,512})"|'((?:\\.|[^'\\\r\n]){1,512})'|([^\s,;)"'>\n\r]+))/gi;
-    result = result.replace(inlineKvRegex, (match, lead, key, sep, dqVal, sqVal, bareVal) => {
-      const val = (dqVal ?? sqVal ?? bareVal ?? "") as string;
+      /(^|[\s,;([{"'=-])([a-zA-Z0-9_.-]*(?:token|api[_-]?key|secret|password|passwd|pass|auth[_-]?token)[a-zA-Z0-9_.-]*)(\s*[:=]\s*|\s+)(?:"((?:\\.|[^"\\\r\n]){1,4096})"|'((?:\\.|[^'\\\r\n]){1,4096})'|"([^\r\n]{1,4096})|'([^\r\n]{1,4096})|([^\s,;)"'>\n\r]+))/gi;
+    result = result.replace(inlineKvRegex, (match, lead, key, sep, dqVal, sqVal, dqUnclosed, sqUnclosed, bareVal) => {
+      const val = (dqVal ?? sqVal ?? dqUnclosed ?? sqUnclosed ?? bareVal ?? "") as string;
       if (!isSensitiveKey(key, options.customSensitiveKeys, options.safeKeyNames)) {
         return match;
       }
       if (val === replacement || val === '[REDACTED:PRIVATE_KEY]' || safeValueSet?.has(val)) {
         return match;
       }
-      if (/^\s+$/.test(sep) && dqVal === undefined && sqVal === undefined) {
+      if (/^\s+$/.test(sep) && dqVal === undefined && sqVal === undefined && dqUnclosed === undefined && sqUnclosed === undefined) {
         if (val.length < 6 || INLINE_STOPWORDS.has(val.toLowerCase())) {
           return match;
         }
@@ -331,7 +363,7 @@ const UUID_TOKEN_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 const NUMERIC_COUNTER_KEY_REGEX =
   /(?:[_-]?(?:count|total|len|length|size|limit|max|min|ttl|ms|sec|seconds|timeout|retries|attempts|version|port|age|timestamp|index|idx))$/i;
 
-function neutralizeInheritedSerializer(
+export function neutralizeInheritedSerializer(
   output: Record<string, unknown>,
   proto: object | null,
   options: SanitizerOptions,
@@ -470,7 +502,26 @@ export function sanitizeObject<T>(
             configurable: true,
           });
         }
+        neutralizeInheritedSerializer(
+          output as unknown as Record<string, unknown>,
+          errProto,
+          options,
+          replacement
+        );
         return output;
+      }
+
+      if (Buffer.isBuffer(val)) {
+        if (val.byteLength > 0 && val.byteLength <= 256 * 1024 && !val.includes(0)) {
+          const decoded = val.toString('utf8');
+          const res = sanitizeString(decoded, options);
+          if (res.redactedCount > 0) {
+            redactedCount += res.redactedCount;
+            findings.push(...res.findings);
+            return Buffer.from(res.sanitized, 'utf8');
+          }
+        }
+        return val;
       }
 
       if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {

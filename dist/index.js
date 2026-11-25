@@ -3,14 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { GuardEngine, loadConfig, resolveEffectiveConfig } from "./engine.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
-import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
+import { evaluatePreflight, extractToolAction, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
 import { configureGuardianTelemetry, recordGuardianEvent, recordGuardianRedaction, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore } from "./evidence.js";
 import { createIdleQueue } from "./idle-queue.js";
 import { registerGuardianCapability } from "./handoff.js";
 import { resolveV2AgentCapability, getCachedAgentCapability, cacheAgentCapability, cacheV2SessionPermissions, clearAgentCapability, clearAllAgentCapabilities, extractAgentNameFromMessages, } from "./agent-capability.js";
-import { defaultRuntimeSecrets, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
+import { defaultRuntimeSecrets, neutralizeInheritedSerializer, resolveSanitizerOptions, sanitizeMessages, sanitizeObject, sanitizeString, sanitizeToolResultWithMeta, } from "./secrets/index.js";
 import { createGuardianToastNotifier, dispatchGuardianToastClear, formatGuardianToast, } from "./toast.js";
 import { createGuardianMessageMetadata, forgetGuardianProvenance, isTrustedGuardianMetadata, } from "./provenance.js";
 import { GUARDIAN_INTERVENTION_CLEAR_RPC_METHOD, GUARDIAN_INTERVENTION_RPC_DEFINITION, GUARDIAN_INTERVENTION_RPC_METHOD, activeGuardianIntervention, inactiveGuardianIntervention, readGuardianInterventionDirectory, readGuardianInterventionSessionID, } from "./intervention-rpc.js";
@@ -55,13 +55,9 @@ export * from "./provenance.js";
 export { MESH_VERSION, BRIDGE_REVISION, MESH_SYMBOL, MESH_METADATA_KEY, MESH_REMEDIATION_MARKER, MESH_STATE_RPC_ID, MESH_STATE_RPC_DEFINITION, registerMeshPeer, getMeshPeers, hasMeshCapability, stampMeshMetadata, verifyMeshMetadata, isTrustedMeshMessage, isMeshProtectedPart, wasMeshSanitized, wasMeshBounded, forgetMeshSession, acquireSessionLease, getBlockingSessionLease, isSessionWaitingOnUser, isSessionRemediating, registerRoleProfileResolver, resolveMeshAgentProfile, recordMeshIntervention, getLatestMeshIntervention, clearMeshIntervention, setActiveMeshHandoff, getActiveMeshHandoff, consumeActiveMeshHandoff, invalidateActiveMeshHandoff, clearActiveMeshHandoff, callMeshRpc, resetMeshStateForTests, } from "./bridge.js";
 function sanitizeV2ToolErrorWithMeta(error, options) {
     const fallback = () => {
+        // Return a plain Error without re-attaching an untrusted prototype that could
+        // carry a leaking toJSON() or sensitive getter.
         const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
-        if (error && typeof error === "object") {
-            try {
-                Object.setPrototypeOf(safe, Object.getPrototypeOf(error));
-            }
-            catch { }
-        }
         return { sanitized: safe, redactedCount: 1 };
     };
     try {
@@ -87,8 +83,11 @@ function sanitizeV2ToolErrorWithMeta(error, options) {
         if (!res.sanitized || typeof res.sanitized !== "object" || Array.isArray(res.sanitized)) {
             return fallback();
         }
+        const proto = Object.getPrototypeOf(error);
+        const sanitizedOut = Object.assign(proto === null ? Object.create(null) : Object.create(proto), res.sanitized);
+        neutralizeInheritedSerializer(sanitizedOut, proto, options, options.replacement ?? "[REDACTED]");
         return {
-            sanitized: Object.assign(Object.create(Object.getPrototypeOf(error)), res.sanitized),
+            sanitized: sanitizedOut,
             redactedCount: res.redactedCount,
         };
     }
@@ -194,14 +193,20 @@ function normalizeV2AssistantParts(part) {
             continue;
         const rec = call;
         const toolName = typeof rec.tool === "string" ? rec.tool : undefined;
-        const callStatus = typeof rec.status === "string" ? rec.status : "completed";
+        const recMeta = rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
+            ? rec.metadata
+            : {};
+        const callStatus = typeof rec.status === "string"
+            ? rec.status
+            : rec.error !== undefined || recMeta.error === true
+                ? "error"
+                : normalizedState.status === "running" || normalizedState.status === "pending"
+                    ? "running"
+                    : "completed";
         if (!toolName)
             continue;
         const callInput = rec.input && typeof rec.input === "object" && !Array.isArray(rec.input)
             ? rec.input
-            : {};
-        const recMeta = rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
-            ? rec.metadata
             : {};
         const callOutput = extractV2OutputText(rec.output, rec.content);
         const callID = typeof rec.id === "string" && rec.id.length > 0
@@ -216,10 +221,15 @@ function normalizeV2AssistantParts(part) {
             : typeof recMeta.exit === "number" && Number.isFinite(recMeta.exit)
                 ? recMeta.exit
                 : undefined;
-        const isBackgroundOrOutputExit = recMeta.status === "running" ||
+        const isBackgroundOrOutputExit = rec.error !== undefined ||
+            recMeta.error === true ||
+            recMeta.status === "running" ||
             recMeta.state === "running" ||
+            typeof recMeta.jobID === "string" ||
+            typeof recMeta.shellID === "string" ||
             /(?:^|\n)Exit code:\s*\d+/i.test(callOutput) ||
-            /(?:^|\n)Command moved to the background\b/i.test(callOutput);
+            /(?:^|\n)Command (?:killed by signal|timed out)\b/i.test(callOutput) ||
+            /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(callOutput);
         nestedParts.push({
             type: "tool",
             tool: toolName,
@@ -416,39 +426,64 @@ export function normalizeV2Messages(messages, sessionID) {
 }
 const MAX_SUBAGENT_HANDOFF_ROUNDS = 6;
 const FOREGROUND_HANDOFF_TTL_MS = 5 * 60_000;
+const MAX_IDLE_LEASE_DURATION_MS = 10 * 60_000;
 const activeRemediationLeases = new Map();
-function setRemediationLeaseForSession(sessionID, release) {
-    const existing = activeRemediationLeases.get(sessionID);
-    if (existing && existing !== release) {
-        activeRemediationLeases.delete(sessionID);
-        try {
-            existing();
-        }
-        catch { }
+function disposeRemediationLeaseEntry(entry) {
+    if (entry.heartbeat !== undefined)
+        clearInterval(entry.heartbeat);
+    try {
+        entry.release();
     }
+    catch { }
+}
+function setRemediationLeaseForSession(sessionID, release, options) {
+    const existing = activeRemediationLeases.get(sessionID);
+    if (existing && existing.release !== release) {
+        activeRemediationLeases.delete(sessionID);
+        disposeRemediationLeaseEntry(existing);
+    }
+    const ttlMs = options?.ttlMs ?? 45_000;
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => {
+        if (Date.now() - startedAt >= MAX_IDLE_LEASE_DURATION_MS) {
+            releaseRemediationLeaseForSession(sessionID);
+            return;
+        }
+        const renewed = renewSessionLease({
+            sessionID,
+            owner: "opencode-guardian",
+            kind: "active_remediation",
+            ttlMs,
+        });
+        if (!renewed) {
+            releaseRemediationLeaseForSession(sessionID);
+        }
+    }, Math.max(50, Math.floor(ttlMs / 3)));
+    heartbeat.unref?.();
     activeRemediationLeases.delete(sessionID);
-    activeRemediationLeases.set(sessionID, release);
+    activeRemediationLeases.set(sessionID, {
+        release,
+        heartbeat,
+        ...(options?.instanceId !== undefined ? { instanceId: options.instanceId } : {}),
+    });
     while (activeRemediationLeases.size > 512) {
         const oldest = activeRemediationLeases.keys().next().value;
         if (oldest === undefined)
             break;
-        const oldRelease = activeRemediationLeases.get(oldest);
+        const oldEntry = activeRemediationLeases.get(oldest);
         activeRemediationLeases.delete(oldest);
-        try {
-            oldRelease?.();
-        }
-        catch { }
+        if (oldEntry)
+            disposeRemediationLeaseEntry(oldEntry);
     }
 }
-function releaseRemediationLeaseForSession(sessionID) {
-    const release = activeRemediationLeases.get(sessionID);
-    if (!release)
+function releaseRemediationLeaseForSession(sessionID, ownerInstanceId) {
+    const existing = activeRemediationLeases.get(sessionID);
+    if (!existing)
+        return;
+    if (ownerInstanceId !== undefined && existing.instanceId !== ownerInstanceId)
         return;
     activeRemediationLeases.delete(sessionID);
-    try {
-        release();
-    }
-    catch { }
+    disposeRemediationLeaseEntry(existing);
 }
 function pruneExpiredForegroundHandoffs(handoffs, sessionID, now = Date.now()) {
     const active = handoffs.get(sessionID);
@@ -743,10 +778,12 @@ export async function finalizeSubagentHandoff(input) {
                 const waitPromise = input.sendAndWait(result.combinedRemediationPrompt);
                 const guardedWait = new Promise((resolve, reject) => {
                     deadlineTimer = setTimeout(() => {
+                        void Promise.resolve(input.interrupt?.()).catch(() => { });
                         reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
                     }, remediationTimeoutMs);
                     deadlineTimer.unref?.();
                     onAbortHandler = () => {
+                        void Promise.resolve(input.interrupt?.()).catch(() => { });
                         reject(new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation."));
                     };
                     if (input.signal?.aborted) {
@@ -900,7 +937,7 @@ export function hasUnfinishedBackgroundTool(messages) {
 /**
  * Common handler to process session.idle events in OpenCode V2.
  */
-async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability, toastNotifier) {
+async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt, engine, snapshots, signal, isSubagent, resolveCapability, toastNotifier, ownerInstanceId) {
     let stage = "message-fetch";
     try {
         if (signal?.aborted)
@@ -982,7 +1019,10 @@ async function handleSessionIdle(sessionID, directory, fetchMessages, sendPrompt
                     releaseRemediationLease();
                     return;
                 }
-                setRemediationLeaseForSession(sessionID, releaseRemediationLease);
+                setRemediationLeaseForSession(sessionID, releaseRemediationLease, {
+                    ...(ownerInstanceId !== undefined ? { instanceId: ownerInstanceId } : {}),
+                    ttlMs: 45_000,
+                });
                 recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
                 toastNotifier?.notify({
                     kind: "remediation",
@@ -1028,7 +1068,7 @@ function inspectPreflight(tool, args, sessionID, directory, additionalTools = []
         return;
     const finding = evaluatePreflight(tool, args, additionalTools, mode);
     const session = sessionFingerprint(sessionID);
-    const safeTool = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1);
+    const safeTool = extractToolAction(tool);
     recordGuardianEvent({
         kind: finding ? "preflight-blocked" : "preflight-allowed",
         ...(session ? { session } : {}),
@@ -1246,8 +1286,9 @@ function acquireProcessIdleSlot(sessionID, instanceId) {
     if (existing && existing.instanceId !== instanceId && now - existing.startedAt < INFLIGHT_IDLE_TTL_MS) {
         return undefined;
     }
+    const token = (reg.nextIdleSlotToken = (reg.nextIdleSlotToken ?? 0) + 1);
     reg.inflightIdle.delete(sessionID);
-    reg.inflightIdle.set(sessionID, { instanceId, startedAt: now });
+    reg.inflightIdle.set(sessionID, { instanceId, startedAt: now, token });
     while (reg.inflightIdle.size > MAX_TRACKED_PROCESS_SESSIONS) {
         const oldest = reg.inflightIdle.keys().next().value;
         if (oldest === undefined)
@@ -1256,7 +1297,7 @@ function acquireProcessIdleSlot(sessionID, instanceId) {
     }
     return () => {
         const current = reg.inflightIdle.get(sessionID);
-        if (current?.instanceId === instanceId) {
+        if (current?.token === token) {
             reg.inflightIdle.delete(sessionID);
         }
     };
@@ -1297,10 +1338,10 @@ const setup = async (context) => {
     const directory = context?.location?.directory ?? process.cwd();
     defaultRuntimeSecrets.refreshEnv();
     const mergedConfig = resolveEffectiveConfig(loadConfig(directory), context.options);
-    configureGuardianTelemetry(directory, mergedConfig.telemetry);
     if (mergedConfig.enabled === false) {
+        configureGuardianTelemetry(directory, mergedConfig.telemetry, "setup-disabled");
         recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
-        configureGuardianTelemetry(directory, undefined);
+        configureGuardianTelemetry(directory, undefined, "setup-disabled");
         return;
     }
     const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
@@ -1310,7 +1351,6 @@ const setup = async (context) => {
         typeof context.event?.subscribe !== "function" ||
         typeof context.session?.context !== "function" ||
         typeof context.session?.synthetic !== "function") {
-        configureGuardianTelemetry(directory, undefined);
         if (strictPreflight) {
             throw new Error("[opencode-guardian preflight] V2 host context is unavailable; strict preflight cannot be enabled.");
         }
@@ -1332,7 +1372,7 @@ const setup = async (context) => {
                 continue;
             map.delete(candidate);
             if (map === runtimeByDirectory) {
-                configureGuardianTelemetry(candidate, undefined);
+                configureGuardianTelemetry(candidate, undefined, instanceId);
             }
         }
     };
@@ -1340,11 +1380,12 @@ const setup = async (context) => {
     const controller = new AbortController();
     const instanceRegistration = registerGuardianInstance(directory);
     const instanceId = instanceRegistration.id;
+    configureGuardianTelemetry(directory, mergedConfig.telemetry, instanceId);
     controller.signal.addEventListener("abort", () => {
         instanceRegistration.unregister();
-        configureGuardianTelemetry(directory, undefined);
+        configureGuardianTelemetry(directory, undefined, instanceId);
         for (const key of runtimeByDirectory.keys()) {
-            configureGuardianTelemetry(key, undefined);
+            configureGuardianTelemetry(key, undefined, instanceId);
         }
     });
     const provenanceSessions = new Set();
@@ -1393,7 +1434,7 @@ const setup = async (context) => {
         const key = runtimeDirectory || directory;
         const cached = runtimeByDirectory.get(key);
         if (cached &&
-            (!cached.config.enabled ||
+            (cached.config.enabled === false ||
                 ((!cached.sanitizer || (toolOutputProtectionReady && modelRequestProtectionReady)) &&
                     (cached.config.preflight?.enabled !== true || isPreflightReady())))) {
             return cached;
@@ -1409,7 +1450,7 @@ const setup = async (context) => {
             return disabledRuntime;
         }
         const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
-        configureGuardianTelemetry(key, config.telemetry);
+        configureGuardianTelemetry(key, config.telemetry, instanceId);
         const runtime = cached ?? {
             config,
             sanitizer: resolveSanitizerOptions(config),
@@ -1562,7 +1603,10 @@ const setup = async (context) => {
                     const contextDir = typeof rpcContext?.location?.directory === "string" && rpcContext.location.directory.trim()
                         ? rpcContext.location.directory
                         : undefined;
-                    const targetDirectory = readGuardianInterventionDirectory(input) ?? contextDir ?? directory;
+                    const targetDirectory = contextDir ?? readGuardianInterventionDirectory(input) ?? directory;
+                    if (!isDirectoryInGuardianScope(directory, targetDirectory)) {
+                        return { cleared: false };
+                    }
                     for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
                         const sessionDir = sessionDirectories.get(activeSessionID) ??
                             await resolveSessionDirectory(activeSessionID);
@@ -1777,7 +1821,7 @@ const setup = async (context) => {
                     if (event.status === "completed" &&
                         event.sessionID &&
                         getLatestMeshIntervention(event.sessionID)?.kind === "preflight-blocked") {
-                        clearMeshIntervention(event.sessionID);
+                        clearMeshIntervention(event.sessionID, "opencode-guardian");
                     }
                     if (tracked && event.status === "completed") {
                         const current = event.result;
@@ -1810,10 +1854,10 @@ const setup = async (context) => {
                                 : observedDirectory);
                             const childRuntime = runtimeForDirectory(childDirectory);
                             const rawChildAgent = child.agent;
-                            const childAgent = typeof input.agent === "string" && input.agent.trim().length > 0
-                                ? input.agent
-                                : typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
-                                    ? rawChildAgent.trim()
+                            const childAgent = typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
+                                ? rawChildAgent.trim()
+                                : typeof input.agent === "string" && input.agent.trim().length > 0
+                                    ? input.agent.trim()
                                     : undefined;
                             let subagentRemediated = false;
                             const revised = childRuntime.config.enabled === false
@@ -1842,7 +1886,7 @@ const setup = async (context) => {
                                             cacheAgentCapability(childID, resolved);
                                             return resolved;
                                         }
-                                        let resolvedName = meshProfile?.agentName ?? childAgent;
+                                        let resolvedName = childAgent ?? meshProfile?.agentName;
                                         if (!resolvedName) {
                                             try {
                                                 const ctxMsgs = normalizeV2Messages(await context.session.context({ sessionID: childID }), childID);
@@ -1851,7 +1895,8 @@ const setup = async (context) => {
                                             catch { }
                                         }
                                         const hostProfile = await resolveV2AgentCapability(context, childID, resolvedName, undefined, childDirectory);
-                                        if (hostProfile.capability === "read-only") {
+                                        if (hostProfile.capability === "read-only" ||
+                                            hostProfile.capability === "write-requires-approval") {
                                             cacheAgentCapability(childID, hostProfile);
                                             return hostProfile;
                                         }
@@ -1889,6 +1934,9 @@ const setup = async (context) => {
                                     snapshots: () => verificationStore.snapshots(childID),
                                     signal: controller.signal,
                                     toastNotifier,
+                                    interrupt: typeof context.session.interrupt === "function"
+                                        ? () => context.session.interrupt({ sessionID: childID, resume: false })
+                                        : undefined,
                                 });
                             if (revised !== undefined) {
                                 const existingText = extractV2OutputText(current.output, current.content).replace(/\r?\n?<\/subagent>\s*$/i, "");
@@ -2414,10 +2462,13 @@ const setup = async (context) => {
                         clearAllAgentCapabilities();
                         for (const [runtimeKey, existing] of Array.from(runtimeByDirectory.entries())) {
                             try {
-                                if (!isDirectoryInGuardianScope(directory, runtimeKey))
+                                if (!isDirectoryInGuardianScope(directory, runtimeKey)) {
+                                    runtimeByDirectory.delete(runtimeKey);
+                                    configureGuardianTelemetry(runtimeKey, undefined, instanceId);
                                     continue;
+                                }
                                 const nextConfig = resolveEffectiveConfig(loadConfig(runtimeKey), context.options);
-                                configureGuardianTelemetry(runtimeKey, nextConfig.telemetry);
+                                configureGuardianTelemetry(runtimeKey, nextConfig.telemetry, instanceId);
                                 existing.config = nextConfig;
                                 existing.sanitizer = resolveSanitizerOptions(nextConfig);
                                 existing.engine.updateConfig(nextConfig);
@@ -2536,7 +2587,7 @@ const setup = async (context) => {
                                             cacheAgentCapability(sessionID, resolved);
                                         return resolved;
                                     }
-                                    let agentName = meshProfile?.agentName ?? sessionAgentName;
+                                    let agentName = sessionAgentName ?? meshProfile?.agentName;
                                     if (!agentName) {
                                         try {
                                             const normalized = fetchedNormalizedMessages ??
@@ -2546,7 +2597,8 @@ const setup = async (context) => {
                                         catch { }
                                     }
                                     const hostProfile = await resolveV2AgentCapability(context, sessionID, agentName, undefined, activeDirectory);
-                                    if (hostProfile.capability === "read-only") {
+                                    if (hostProfile.capability === "read-only" ||
+                                        hostProfile.capability === "write-requires-approval") {
                                         if (!idleSignal.aborted)
                                             cacheAgentCapability(sessionID, hostProfile);
                                         return hostProfile;
@@ -2568,7 +2620,7 @@ const setup = async (context) => {
                                     }
                                     return hostProfile;
                                 }
-                                : undefined, toastNotifier);
+                                : undefined, toastNotifier, instanceId);
                         }
                         finally {
                             releaseProcessIdleSlot();
@@ -2630,7 +2682,7 @@ const setup = async (context) => {
         streamWatcher.clear();
         await streamWatcher.drain();
         for (const sessionID of Array.from(activeRemediationLeases.keys())) {
-            releaseRemediationLeaseForSession(sessionID);
+            releaseRemediationLeaseForSession(sessionID, instanceId);
         }
         contracts.clear();
         verificationStore.clear();

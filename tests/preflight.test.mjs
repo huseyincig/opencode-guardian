@@ -49,11 +49,11 @@ describe("Preflight Engine & Hooks", () => {
     assert.equal(evaluatePreflight("read_file", { command: "rm -rf sandbox/marker" }), undefined);
     assert.doesNotThrow(() => enforcePreflight("write", { content: "rm -rf sandbox/marker" }));
     assert.equal(evaluatePreflight("mcp.tool.bash", { cmd: "git clean -fd" }), "destructive-command");
-    for (const tool of ["mcp__Node_Command__shell_exec", "mcp__Remote_Desktop_Commander__shell_exec"]) {
+    for (const tool of ["mcp__provider_a__shell_exec", "mcp__provider-b__shell_exec", "mcp__vendor.v2__shell_exec"]) {
       assert.equal(evaluatePreflight(tool, { command: "rm -rf sandbox/marker" }), "destructive-command");
       assert.equal(evaluatePreflight(tool, { command: "npm test" }), undefined);
     }
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_read", { command: "rm -rf sandbox/marker" }), undefined);
+    assert.equal(evaluatePreflight("mcp__provider_a__file_read", { command: "rm -rf sandbox/marker" }), undefined);
     assert.equal(evaluatePreflight("bash", { command: "rm fixture.tmp" }), "destructive-command");
     assert.equal(evaluatePreflight("execute_command", { script: "find src -delete" }), "destructive-command");
     assert.equal(evaluatePreflight("run_shell_command", { command: "rm -rf sandbox" }), "destructive-command");
@@ -122,7 +122,7 @@ describe("Preflight Engine & Hooks", () => {
         executed++;
       };
       await run("bash", { command: "npm test" });
-      await run("mcp__Node_Command__shell_exec", { command: "npm test" });
+      await run("mcp__provider_a__shell_exec", { command: "npm test" });
       await run("read_file", { path: "example.ts", command: "git clean -fd" });
       assert.equal(executed, 3);
       await assert.rejects(run("bash", { command: "r''m -rf sandbox/marker" }),
@@ -188,12 +188,12 @@ describe("Preflight Engine & Hooks", () => {
         executed++;
       };
       await run("bash", { command: "npm test" });
-      await run("mcp__Node_Command__shell_exec", { command: "git status" });
+      await run("mcp__provider_a__shell_exec", { command: "git status" });
       await assert.rejects(run("bash", { command: "find sandbox/marker -delete" }),
         (error) => error.reason === "destructive-command");
       await assert.rejects(run("bash", { command: "printf YWJj | base64 -d | sh" }),
         (error) => error.reason === "opaque-shell-execution");
-      await assert.rejects(run("mcp__Node_Command__shell_exec", { command: "mkfs.ext4 /dev/sdb" }),
+      await assert.rejects(run("mcp__provider_a__shell_exec", { command: "mkfs.ext4 /dev/sdb" }),
         (error) => error.reason === "destructive-command");
       assert.equal(executed, 2);
     } finally {
@@ -544,7 +544,7 @@ describe("Rollback & Windows Shell Preflight", () => {
   });
 });
 
-describe("Node Command & Structured Process Preflight", () => {
+describe("Generic MCP Shell & Structured Process Preflight", () => {
   function fixture(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-repair-"));
     const previous = process.env.OPENCODE_GUARDIAN_STATE_DIR;
@@ -564,21 +564,22 @@ describe("Node Command & Structured Process Preflight", () => {
     }
   }
   test("strict preflight blocks elevated shell and dangerous process starts", () => {
-    assert.equal(isShellExecutionTool("mcp__Node_Command__privileged_shell_exec"), true);
-    assert.equal(evaluatePreflight("mcp__Node_Command__privileged_shell_exec", { command: "rm -rf fixtures" }), "destructive-command");
-    assert.equal(evaluatePreflight("mcp__Node_Command__privileged_shell_exec", { command: "npm test" }), undefined);
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start", { executable: "/bin/bash", args: ["-lc", "rm -rf fixtures"] }), "destructive-command");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start", { executable: "/bin/rm", args: ["fixtures"] }), "destructive-command");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start", { executable: "/usr/bin/node", args: ["--version"] }), undefined);
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start", { executable: "/bin/bash", args: ["-c"] }), "uninspectable-shell-input");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start", { executable: "/usr/bin/node", args: ["-e", "process.exit(0)"] }), "uninspectable-shell-input");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start",
+    assert.equal(isShellExecutionTool("mcp__provider_a__privileged_shell_exec"), true);
+    assert.equal(isShellExecutionTool("mcp__custom-provider__privileged_shell_exec"), true);
+    assert.equal(evaluatePreflight("mcp__provider_a__privileged_shell_exec", { command: "rm -rf fixtures" }), "destructive-command");
+    assert.equal(evaluatePreflight("mcp__provider_a__privileged_shell_exec", { command: "npm test" }), undefined);
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start", { executable: "/bin/bash", args: ["-lc", "rm -rf fixtures"] }), "destructive-command");
+    assert.equal(evaluatePreflight("mcp__custom-runner__process_start", { executable: "/bin/rm", args: ["fixtures"] }), "destructive-command");
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start", { executable: "/usr/bin/node", args: ["--version"] }), undefined);
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start", { executable: "/bin/bash", args: ["-c"] }), "uninspectable-shell-input");
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start", { executable: "/usr/bin/node", args: ["-e", "process.exit(0)"] }), "uninspectable-shell-input");
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start",
       { executable: "C:\\\\Windows\\\\System32\\\\cmd.exe", args: ["/c", "del fixtures"] }), "destructive-command");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start",
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start",
       { executable: "C:\\\\Windows\\\\System32\\\\powershell.exe", args: ["-Command", "Remove-Item fixtures"] }), "destructive-command");
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start",
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start",
       { executable: "C:\\\\Windows\\\\System32\\\\cmd.exe", args: ["/c", "echo safe"] }), undefined);
-    assert.equal(evaluatePreflight("mcp__Node_Command__process_start",
+    assert.equal(evaluatePreflight("mcp__provider_a__process_start",
       { executable: "/bin/sh", args: [] }), "uninspectable-shell-input");
   });
   test("V2 after-hook hashes the session root, not the plugin root", async (t) => {
@@ -665,7 +666,7 @@ describe("Node Command & Structured Process Preflight", () => {
     t.after(async () => { await cleanup?.(); });
     await assert.rejects(
       hooks.get("execute.before")({
-        tool: "mcp__Node_Command__process_start",
+        tool: "mcp__provider_a__process_start",
         sessionID: "v2",
         callID: "danger",
         input: { executable: "/bin/rm", args: ["fixtures"] },
@@ -991,5 +992,23 @@ describe("Backtick & Inert Discussion Preflight Gaps", () => {
     ]) {
       assert.equal(evaluatePreflight_7("bash", { command }), undefined, command);
     }
+  });
+
+  test("R3 Dalga 2 (R3-018): file mutation action delete/remove is blocked in strict mode and catastrophic delete is blocked in critical mode while move remains allowed", () => {
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "delete", path: "src/app.ts" }, [], "strict"),
+      "destructive-command",
+      "R3-018: file_mutate delete must block in strict mode"
+    );
+    assert.equal(
+      evaluatePreflight_7("mcp__provider-b__file_mutate", { action: "remove", path: "/", recursive: true }, [], "critical"),
+      "destructive-command",
+      "R3-018: catastrophic/recursive file_mutate remove must block in critical mode"
+    );
+    assert.equal(
+      evaluatePreflight_7("mcp__provider_a__file_mutate", { action: "move", source: "src/a.ts", destination: "src/b.ts" }, [], "strict"),
+      undefined,
+      "move action must remain allowed"
+    );
   });
 });

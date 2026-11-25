@@ -205,6 +205,7 @@ interface LegacyHandoffGlobalState {
 
 interface RpcStandbyCandidate {
   owner: string;
+  directory?: string | undefined;
   rpcRegister: NonNullable<Parameters<typeof registerMeshStateRpc>[0]["rpcRegister"]>;
   disposed: boolean;
   activeDispose?: (() => Promise<void>) | undefined;
@@ -528,6 +529,12 @@ export function hasMeshCapability(
   directory?: string
 ): boolean {
   if (getMeshPeers({ directory, capability }).length > 0) return true;
+  const targetDir = directory ? canonicalMeshDirectory(directory) : undefined;
+  // Never leak a directory-scoped v2 peer from another project into an unrelated
+  // directory via the unscoped legacy global registry.
+  if (targetDir && targetDir !== "*" && getMeshPeers({ capability }).length > 0) {
+    return false;
+  }
   const g = globalThis as unknown as {
     [LEGACY_COORDINATION_SYMBOL]?: {
       guardian?: { supportsHandoff?: boolean };
@@ -765,11 +772,32 @@ export function isTrustedMeshMessage(
   const meta = extractMetadataRecord(value);
   const meshEnv = isRecord(meta?.[MESH_METADATA_KEY]) ? meta[MESH_METADATA_KEY] : undefined;
 
-  if (sessionID && verifyMeshMetadata(sessionID, value, effectiveExpectedKind)) {
-    if (expectedKind === undefined && meshEnv?.synthetic === false) {
+  if (sessionID) {
+    const state = getMeshState();
+    const primaryToken = typeof meshEnv?.token === "string" ? meshEnv.token : undefined;
+    const legacyToken =
+      typeof meta?.["opencode-guardian-provenance"] === "string"
+        ? (meta["opencode-guardian-provenance"] as string)
+        : undefined;
+    const sessionTokens = state.provenanceBySession.get(sessionID);
+    const globalTokens =
+      sessionID !== "global" ? state.provenanceBySession.get("global") : undefined;
+    const tokenInLedger = Boolean(
+      (primaryToken && (sessionTokens?.has(primaryToken) || globalTokens?.has(primaryToken))) ||
+      (legacyToken && (sessionTokens?.has(legacyToken) || globalTokens?.has(legacyToken)))
+    );
+    if (verifyMeshMetadata(sessionID, value, effectiveExpectedKind)) {
+      if (expectedKind === undefined && meshEnv?.synthetic === false) {
+        return false;
+      }
+      return true;
+    }
+    // If the token exists in the immutable ledger yet verifyMeshMetadata failed,
+    // trust-critical envelope fields were tampered or kind/owner mismatched:
+    // never fall through to host-synthetic fallback.
+    if (tokenInLedger) {
       return false;
     }
-    return true;
   }
   const isHostSynthetic =
     value.type === "synthetic" ||
@@ -941,6 +969,16 @@ function pruneExpiredLeases(state: MeshGlobalState, sessionID: string, now = Dat
   return leases;
 }
 
+const MAX_LEASE_TTL_MS = 10 * 60_000;
+
+function clampLeaseTtl(kind: MeshLeaseKind, ttlMs?: number): number {
+  const raw =
+    typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0
+      ? ttlMs
+      : DEFAULT_LEASE_TTL_MS[kind];
+  return Math.min(raw, MAX_LEASE_TTL_MS);
+}
+
 export function acquireSessionLease(input: {
   sessionID: string;
   owner: string;
@@ -952,13 +990,15 @@ export function acquireSessionLease(input: {
   if (!sID) return () => {};
   const state = getMeshState();
   const now = Date.now();
-  const ttl =
-    typeof input.ttlMs === "number" && Number.isFinite(input.ttlMs) && input.ttlMs > 0
-      ? input.ttlMs
-      : DEFAULT_LEASE_TTL_MS[input.kind];
+  const ttl = clampLeaseTtl(input.kind, input.ttlMs);
 
   let leases = pruneExpiredLeases(state, sID, now);
   if (!leases) {
+    if (state.leasesBySession.size >= MAX_BOUNDED_SESSIONS) {
+      for (const candidateSession of Array.from(state.leasesBySession.keys())) {
+        pruneExpiredLeases(state, candidateSession, now);
+      }
+    }
     leases = new Map();
     setBoundedMap(state.leasesBySession, sID, leases, MAX_BOUNDED_SESSIONS);
   }
@@ -1004,10 +1044,7 @@ export function renewSessionLease(input: {
   const key = `${input.owner}::${input.kind}`;
   const existing = leases.get(key);
   if (!existing) return false;
-  const ttl =
-    typeof input.ttlMs === "number" && Number.isFinite(input.ttlMs) && input.ttlMs > 0
-      ? input.ttlMs
-      : DEFAULT_LEASE_TTL_MS[input.kind];
+  const ttl = clampLeaseTtl(input.kind, input.ttlMs);
   existing.expiresAt = now + ttl;
   return true;
 }
@@ -1359,17 +1396,22 @@ export async function resolveMeshAgentProfile(
   if (!sessionID) return undefined;
   const state = getMeshState();
   const targetDir = canonicalMeshDirectory(directory);
-  for (const entry of state.roleResolversByKey.values()) {
-    if (
-      targetDir !== "*" &&
-      entry.directory !== "*" &&
-      entry.directory !== targetDir
-    ) {
-      continue;
-    }
+  const matching = Array.from(state.roleResolversByKey.values()).filter(
+    (entry) => targetDir === "*" || entry.directory === "*" || entry.directory === targetDir
+  );
+  // Exact directory resolvers always take precedence over wildcard "*" resolvers.
+  matching.sort((a, b) => {
+    const aExact = a.directory === targetDir && targetDir !== "*" ? 0 : 1;
+    const bExact = b.directory === targetDir && targetDir !== "*" ? 0 : 1;
+    return aExact - bExact;
+  });
+  for (const entry of matching) {
     try {
       const profile = await entry.resolve(sessionID, targetDir);
       if (profile && profile.capability !== "unknown") {
+        if (profile.sessionID && profile.sessionID !== sessionID) {
+          continue;
+        }
         return profile;
       }
     } catch {
@@ -1405,9 +1447,14 @@ export function getLatestMeshIntervention(
   return entry;
 }
 
-export function clearMeshIntervention(sessionID: string): void {
+export function clearMeshIntervention(sessionID: string, expectedOwner?: string): void {
   if (!sessionID) return;
-  getMeshState().interventionsBySession.delete(sessionID);
+  const map = getMeshState().interventionsBySession;
+  if (expectedOwner) {
+    const existing = map.get(sessionID);
+    if (existing && existing.owner !== expectedOwner) return;
+  }
+  map.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,14 +1490,15 @@ export async function queryMeshSkills(
 ): Promise<readonly MeshSkillHit[] | undefined> {
   const state = getMeshState();
   const targetDir = canonicalMeshDirectory(options?.directory);
-  for (const provider of state.skillProvidersByKey.values()) {
-    if (
-      targetDir !== "*" &&
-      provider.directory !== "*" &&
-      provider.directory !== targetDir
-    ) {
-      continue;
-    }
+  const matching = Array.from(state.skillProvidersByKey.values()).filter(
+    (provider) => targetDir === "*" || provider.directory === "*" || provider.directory === targetDir
+  );
+  matching.sort((a, b) => {
+    const aExact = a.directory === targetDir && targetDir !== "*" ? 0 : 1;
+    const bExact = b.directory === targetDir && targetDir !== "*" ? 0 : 1;
+    return aExact - bExact;
+  });
+  for (const provider of matching) {
     try {
       return await provider.search(query, {
         ...(options?.topK !== undefined ? { topK: options.topK } : {}),
@@ -1548,6 +1596,7 @@ export async function registerMeshStateRpc(input: {
   if (activeHostDir !== undefined) {
     const candidate: RpcStandbyCandidate = {
       owner: input.owner,
+      directory: input.directory,
       rpcRegister: input.rpcRegister,
       disposed: false,
     };
@@ -1570,6 +1619,29 @@ export async function registerMeshStateRpc(input: {
       }
     };
   }
+  const promoteStandbyForDir = async (queueDir: string): Promise<void> => {
+    const queue = standbysByDir.get(queueDir);
+    while (queue && queue.length > 0 && !state.rpcHostsByDir.has(queueDir)) {
+      const next = queue.shift();
+      if (!next || next.disposed) continue;
+      if (queue.length === 0) standbysByDir.delete(queueDir);
+      next.activeDispose = await registerMeshStateRpc({
+        rpcRegister: next.rpcRegister,
+        owner: next.owner,
+        directory: next.directory,
+      });
+      if (next.disposed && next.activeDispose) {
+        const fn = next.activeDispose;
+        next.activeDispose = undefined;
+        await fn();
+      } else {
+        const nextDir = canonicalMeshDirectory(next.directory);
+        if (state.rpcHostsByDir.has(queueDir) || state.rpcHostsByDir.has(nextDir)) {
+          break;
+        }
+      }
+    }
+  };
   let reg: { dispose?: () => Promise<void> | void } | void;
   const hostEntry = {
     owner: input.owner,
@@ -1622,13 +1694,23 @@ export async function registerMeshStateRpc(input: {
             ttlMs: arg.ttlMs,
             reason: arg.reason,
           });
-          setBoundedMap(state.remoteInteractionLeases, leaseKey, release, MAX_BOUNDED_SESSIONS);
+          while (state.remoteInteractionLeases.size >= MAX_BOUNDED_SESSIONS) {
+            const oldestKey = state.remoteInteractionLeases.keys().next().value;
+            if (oldestKey === undefined) break;
+            const oldestRelease = state.remoteInteractionLeases.get(oldestKey);
+            state.remoteInteractionLeases.delete(oldestKey);
+            try { oldestRelease?.(); } catch {}
+          }
+          state.remoteInteractionLeases.set(leaseKey, release);
         }
         return { ok: true };
       },
     });
   } catch {
-    state.rpcHostsByDir.delete(dir);
+    if (state.rpcHostsByDir.get(dir) === hostEntry) {
+      state.rpcHostsByDir.delete(dir);
+    }
+    await promoteStandbyForDir(dir);
     return async () => {};
   }
 
@@ -1642,24 +1724,7 @@ export async function registerMeshStateRpc(input: {
     try {
       await reg?.dispose?.();
     } catch {}
-    const queue = standbysByDir.get(dir);
-    while (queue && queue.length > 0 && !state.rpcHostsByDir.has(dir)) {
-      const next = queue.shift();
-      if (!next || next.disposed) continue;
-      if (queue.length === 0) standbysByDir.delete(dir);
-      next.activeDispose = await registerMeshStateRpc({
-        rpcRegister: next.rpcRegister,
-        owner: next.owner,
-        directory: input.directory,
-      });
-      if (next.disposed && next.activeDispose) {
-        const fn = next.activeDispose;
-        next.activeDispose = undefined;
-        await fn();
-      } else if (state.rpcHostsByDir.has(dir)) {
-        break;
-      }
-    }
+    await promoteStandbyForDir(dir);
     if (!state.rpcHostsByDir.has(dir)) {
       hostEntry.releaseAll();
     }

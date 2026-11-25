@@ -49,7 +49,7 @@ export declare function guardianEventPath(directory?: string): string;
 export declare function sessionFingerprint(value: string): string;
 export declare function sessionFingerprint(value?: string): string | undefined;
 export declare function recordGuardianRedaction(count?: number, directory?: string): void;
-export declare function configureGuardianTelemetry(directory: string | undefined, config?: GuardianTelemetryConfig): void;
+export declare function configureGuardianTelemetry(directory: string | undefined, config?: GuardianTelemetryConfig, ownerId?: string | number): void;
 export declare function clearGuardianTelemetryConfig(): void;
 export declare function resolveTelemetrySettings(directory?: string): {
     enabled: boolean;

@@ -3,6 +3,7 @@ import type { SanitizerOptions, SanitizeResult } from './types.js';
  * Sanitizes text content against all secret rules.
  */
 export declare function sanitizeString(text: string, options?: SanitizerOptions): SanitizeResult<string>;
+export declare function neutralizeInheritedSerializer(output: Record<string, unknown>, proto: object | null, options: SanitizerOptions, replacement: string): void;
 /**
  * Recursively sanitizes JavaScript objects, arrays, and Error instances.
  */

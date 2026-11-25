@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseTestSummary, testOutcomeReason } from "./verification-report.js";
 import { captureBeforeEdit, finishEditObservation } from "./edit-integrity.js";
-import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolCommand, splitFilePatches } from "./tool-input.js";
+import { extractLikelyShellMutation, extractStructuredEditTexts, extractToolAction, extractToolCommand, splitFilePatches } from "./tool-input.js";
 import { activeBacktickSubstitutions, activeCommandSubstitutions, hasFindDeletion, literalShellScripts, literalWindowsShellScripts, shellCommandVariants, splitShellStages, } from "./shell-risk.js";
 export { isOpaqueShellExecution } from "./shell-risk.js";
 function stringify(value) {
@@ -48,9 +48,24 @@ function stableStringify(value) {
         return String(value);
     }
 }
+function isCommandExecutionToolName(toolName) {
+    const last = extractToolAction(toolName);
+    return (last === "" ||
+        last === "tool" ||
+        last === "execute" ||
+        last === "process_start" ||
+        [
+            "bash", "sh", "zsh", "shell", "terminal", "exec", "shell_exec",
+            "execute_command", "command", "run_command", "run_shell_command",
+            "powershell", "pwsh", "cmd", "privileged_shell_exec", "run_terminal_cmd",
+        ].includes(last));
+}
 function commandFromPart(part) {
     const input = part.state?.input;
     if (!input)
+        return "";
+    const toolName = toolNameFromPart(part);
+    if (!isCommandExecutionToolName(toolName))
         return "";
     return extractToolCommand(input).trim();
 }
@@ -124,8 +139,10 @@ function statusFromPart(part, outputText) {
     const errorText = stringify(state.error).trim();
     let exitCode = parseExitCode(part);
     // OpenCode v2.2.7+ shell results explicitly end with "Exit code: N" in the output
+    // (optionally wrapped in </shell>). Do NOT use multiline `m` flag so stdout text
+    // printing "Exit code: 0" mid-output can never shadow the real trailing exit code.
     if (exitCode === undefined && outputText) {
-        const exitMatch = /(?:^|\n)Exit code:\s*(\d+)\s*$/im.exec(outputText);
+        const exitMatch = /(?:^|\n)Exit code:\s*(\d+)\s*(?:\n?<\/shell>\s*)?$/i.exec(outputText);
         if (exitMatch && exitMatch[1]) {
             const parsed = Number(exitMatch[1]);
             if (Number.isFinite(parsed))
@@ -162,7 +179,9 @@ function statusFromPart(part, outputText) {
     const isMovedToBackground = /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(outputText) ||
         /(?:^|\n)The (?:command|execution) did not finish within its timeout\b[\s\S]*\bmoved to the background\b/i.test(outputText) ||
         /\bmoved to the background\s*\(job\b/i.test(outputText);
-    if (state.metadata?.status === "running" ||
+    if (state.status === "running" ||
+        state.status === "pending" ||
+        state.metadata?.status === "running" ||
         state.metadata?.state === "running" ||
         (typeof state.metadata?.shellID === "string" && exitCode === undefined) ||
         hasRunningJobID ||
@@ -226,10 +245,7 @@ function executableShellStages(command) {
 }
 function classifyCommand(command, toolName) {
     const stages = executableShellStages(command);
-    const t = toolName.toLowerCase();
-    const toolAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(t)?.[1] ??
-        t.split(/[.:/]/).at(-1) ??
-        "";
+    const toolAction = extractToolAction(toolName);
     const kinds = new Set();
     const anyStage = (pattern) => stages.some((stage) => {
         pattern.lastIndex = 0;
@@ -407,20 +423,96 @@ function isLikelyShellFileDeletion(command, depth = 0) {
         ...literalShellScripts(command),
     ].some((nested) => isLikelyShellFileDeletion(nested, depth + 1));
 }
+function hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds) {
+    if (!command || !/;|\|\|/.test(command))
+        return false;
+    // Split top-level sequential separators while respecting single/double quotes and escapes.
+    const segments = [];
+    let current = "";
+    let quote = null;
+    let escaped = false;
+    for (let i = 0; i < command.length; i++) {
+        const ch = command[i];
+        if (escaped) {
+            current += ch;
+            escaped = false;
+            continue;
+        }
+        if (ch === "\\" && quote !== "'") {
+            current += ch;
+            escaped = true;
+            continue;
+        }
+        if (quote) {
+            current += ch;
+            if (ch === quote)
+                quote = null;
+            continue;
+        }
+        if (ch === "'" || ch === '"') {
+            current += ch;
+            quote = ch;
+            continue;
+        }
+        if (ch === ";") {
+            segments.push({ text: current.trim(), followedBy: ";" });
+            current = "";
+            continue;
+        }
+        if (ch === "|" && command[i + 1] === "|") {
+            segments.push({ text: current.trim(), followedBy: "||" });
+            current = "";
+            i++;
+            continue;
+        }
+        if (ch === "&" && command[i + 1] === "&") {
+            segments.push({ text: current.trim(), followedBy: "&&" });
+            current = "";
+            i++;
+            continue;
+        }
+        current += ch;
+    }
+    if (current.trim())
+        segments.push({ text: current.trim() });
+    for (let idx = 0; idx < segments.length - 1; idx++) {
+        const seg = segments[idx];
+        if (seg.followedBy !== ";" && seg.followedBy !== "||")
+            continue;
+        if (!segments[idx + 1]?.text)
+            continue;
+        const segKinds = classifyCommand(seg.text, toolName);
+        if (segKinds.some((k) => verificationKinds.has(k))) {
+            return true;
+        }
+    }
+    return false;
+}
 function hasFileMutation(part) {
     const input = part.state?.input;
     if (!input)
         return false;
     const action = typeof input.action === "string" ? input.action.toLowerCase() : "";
-    if (action === "delete" || action === "remove")
+    if (action === "delete" || action === "remove" || action === "move" || action === "copy")
         return true;
     const command = commandFromPart(part);
     if (isLikelyShellFileDeletion(command))
         return true;
     if (extractStructuredEditTexts(input).length > 0)
         return true;
-    if (["content", "new_string", "newString", "patch", "patchText"].some((key) => typeof input[key] === "string" &&
-        (["content", "new_string", "newString"].includes(key) || input[key].length > 0))) {
+    if ([
+        "content",
+        "CodeContent",
+        "text",
+        "file_text",
+        "new_string",
+        "newString",
+        "new_str",
+        "ReplacementContent",
+        "patch",
+        "patchText",
+    ].some((key) => typeof input[key] === "string" &&
+        (["content", "CodeContent", "text", "file_text", "new_string", "newString", "new_str", "ReplacementContent"].includes(key) || input[key].length > 0))) {
         return true;
     }
     return Boolean(extractLikelyShellMutation(input));
@@ -443,7 +535,8 @@ function recordFromPart(part, sequence) {
         "audit",
     ]);
     const verificationKindCount = kinds.filter((kind) => verificationKinds.has(kind)).length;
-    const nonSequentialCompound = verificationKindCount > 1 && /;|\|\|/.test(command);
+    const nonSequentialCompound = (verificationKindCount > 1 && /;|\|\|/.test(command)) ||
+        hasTrailingSeparatorAfterVerification(command, toolName, verificationKinds);
     const pipedWithoutPipefail = /(?:^|[^|])\|(?!\|)/.test(command) &&
         !/\bset\s+-[a-z]*o\s+pipefail\b/i.test(command);
     for (const kind of kinds) {
@@ -549,9 +642,14 @@ export function extractMutatedFilePaths(part) {
     };
     add(input.path);
     add(input.targetFile);
+    add(input.TargetFile);
     add(input.filePath);
     add(input.file);
-    const defaultPath = [input.path, input.targetFile, input.filePath, input.file]
+    add(input.source);
+    add(input.from);
+    add(input.destination);
+    add(input.to);
+    const defaultPath = [input.path, input.targetFile, input.TargetFile, input.filePath, input.file]
         .find((value) => typeof value === "string" && value.trim().length > 0);
     for (const edit of extractStructuredEditTexts(input, defaultPath))
         add(edit.filePath);

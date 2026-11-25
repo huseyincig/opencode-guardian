@@ -761,4 +761,18 @@ describe("Default Telemetry Level Semantics", () => {
     assert.equal(fs.existsSync(lockPath), false, "stale lockfile must be cleaned up after rotation");
     assert.equal(fs.existsSync(logPath + ".1"), true, "rotation archive must be created cleanly");
   });
+
+  test("R3 Dalga 3 (R3-049): validateConfig rejects maxBytes below 256 bytes or above 2 MiB", async () => {
+    const { resolveEffectiveConfig } = await import("../dist/engine.js");
+    assert.throws(
+      () => resolveEffectiveConfig({}, { telemetry: { maxBytes: 1 } }),
+      /telemetry\.maxBytes/,
+      "R3-049: maxBytes smaller than a single event line (<256) must be rejected"
+    );
+    assert.throws(
+      () => resolveEffectiveConfig({}, { telemetry: { maxBytes: 10 * 1024 * 1024 } }),
+      /telemetry\.maxBytes/,
+      "R3-049: maxBytes above 2 MiB read window must be rejected"
+    );
+  });
 });

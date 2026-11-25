@@ -83,8 +83,60 @@ export function clearDeclaredDepsCache() {
 function normalizePackageName(value) {
     return value.trim().toLowerCase().replace(/[_.]+/g, "-");
 }
-function nearestFile(directory, names, dynamicName) {
+const MAX_MANIFEST_FILE_BYTES = 512 * 1024;
+function readManifestBounded(filePath, stopRoot, maxBytes = MAX_MANIFEST_FILE_BYTES) {
+    let realFile;
+    try {
+        realFile = fs.realpathSync(path.resolve(filePath));
+    }
+    catch {
+        return null;
+    }
+    if (stopRoot) {
+        try {
+            const realStop = fs.realpathSync(path.resolve(stopRoot));
+            const rel = path.relative(realStop, realFile);
+            if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
+                return { rejected: true };
+            }
+        }
+        catch {
+            return { rejected: true };
+        }
+    }
+    let fd;
+    try {
+        fd = fs.openSync(realFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.size > maxBytes) {
+            return { rejected: true };
+        }
+        const buf = Buffer.alloc(stat.size);
+        const bytesRead = stat.size > 0 ? fs.readSync(fd, buf, 0, stat.size, 0) : 0;
+        return { text: buf.toString("utf8", 0, bytesRead) };
+    }
+    catch {
+        return null;
+    }
+    finally {
+        if (fd !== undefined) {
+            try {
+                fs.closeSync(fd);
+            }
+            catch { }
+        }
+    }
+}
+function nearestFile(directory, names, dynamicName, stopRoot) {
     let current = path.resolve(directory);
+    let resolvedStop;
+    if (stopRoot) {
+        resolvedStop = path.resolve(stopRoot);
+        const rel = path.relative(resolvedStop, current);
+        if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
+            resolvedStop = undefined;
+        }
+    }
     while (true) {
         for (const name of names) {
             const candidate = path.join(current, name);
@@ -106,6 +158,8 @@ function nearestFile(directory, names, dynamicName) {
                 // Fail open when a directory cannot be inspected.
             }
         }
+        if (resolvedStop && current === resolvedStop)
+            return null;
         const parent = path.dirname(current);
         if (parent === current)
             return null;
@@ -131,10 +185,10 @@ function dependenciesFromPackage(pkg, productionOnly = false) {
     }
     return deps;
 }
-function loadNodeDependencies(directory, productionOnly = false) {
+function loadNodeDependencies(directory, productionOnly = false, stopRoot) {
     const resolvedDir = path.resolve(directory);
-    const cacheKey = `node:${productionOnly ? "production:" : ""}${resolvedDir}`;
-    const manifest = nearestFile(resolvedDir, ["package.json"]);
+    const cacheKey = `node:${productionOnly ? "production:" : ""}${resolvedDir}:${stopRoot ? path.resolve(stopRoot) : ""}`;
+    const manifest = nearestFile(resolvedDir, ["package.json"], undefined, stopRoot);
     if (!manifest)
         return null;
     const files = [manifest.path];
@@ -145,7 +199,10 @@ function loadNodeDependencies(directory, productionOnly = false) {
         now - cached.timestamp < CACHE_TTL_MS)
         return cached.deps;
     try {
-        const pkg = JSON.parse(fs.readFileSync(manifest.path, "utf8"));
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const pkg = JSON.parse(read.text);
         const result = pkg && typeof pkg === "object" && !Array.isArray(pkg)
             ? dependenciesFromPackage(pkg, productionOnly) : null;
         setDepsCache(cacheKey, { timestamp: now, deps: result, manifestPath: manifest.path, revision, files });
@@ -184,9 +241,15 @@ const MAX_REQUIREMENTS_FILE_BYTES = 256 * 1024;
 const MAX_REQUIREMENTS_TOTAL_BYTES = 1024 * 1024;
 const MAX_REQUIREMENTS_DEPTH = 8;
 const MAX_REQUIREMENTS_FILES = 32;
-function parseRequirementsFile(filePath, root, seen = new Set(), budget = { bytes: 0, files: 0, depth: 0 }) {
+function parseRequirementsFile(filePath, root, seen = new Set(), budget = {
+    bytes: 0,
+    files: 0,
+    depth: 0,
+    truncated: false,
+}) {
     const deps = new Set();
     if (budget.depth > MAX_REQUIREMENTS_DEPTH || budget.files >= MAX_REQUIREMENTS_FILES) {
+        budget.truncated = true;
         return deps;
     }
     let realRoot;
@@ -214,6 +277,7 @@ function parseRequirementsFile(filePath, root, seen = new Set(), budget = { byte
         if (!stat.isFile() ||
             stat.size > MAX_REQUIREMENTS_FILE_BYTES ||
             budget.bytes + stat.size > MAX_REQUIREMENTS_TOTAL_BYTES) {
+            budget.truncated = true;
             return deps;
         }
         const buffer = Buffer.alloc(stat.size);
@@ -238,12 +302,18 @@ function parseRequirementsFile(filePath, root, seen = new Set(), budget = { byte
         const include = /^(?:-r|--requirement)\s+(.+)$/i.exec(line)?.[1]?.trim();
         if (include) {
             const nested = path.resolve(path.dirname(realFile), include);
-            const childBudget = { bytes: budget.bytes, files: budget.files, depth: budget.depth + 1 };
+            const childBudget = {
+                bytes: budget.bytes,
+                files: budget.files,
+                depth: budget.depth + 1,
+                truncated: budget.truncated,
+            };
             for (const dep of parseRequirementsFile(nested, realRoot, seen, childBudget)) {
                 deps.add(dep);
             }
             budget.bytes = childBudget.bytes;
             budget.files = childBudget.files;
+            budget.truncated = childBudget.truncated;
             continue;
         }
         const name = parseRequirementName(line);
@@ -342,12 +412,12 @@ function parsePythonManifest(text, fileName) {
     }
     return deps;
 }
-function loadPythonDependencies(directory) {
+function loadPythonDependencies(directory, stopRoot) {
     const resolvedDir = path.resolve(directory);
-    const manifest = nearestFile(resolvedDir, ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "requirements.in"], /^requirements(?:[-_.][A-Za-z0-9_-]+)?\.txt$/i);
+    const manifest = nearestFile(resolvedDir, ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "requirements.in"], /^requirements(?:[-_.][A-Za-z0-9_-]+)?\.txt$/i, stopRoot);
     if (!manifest)
         return null;
-    const cacheKey = `python:${manifest.root}`;
+    const cacheKey = `python:${manifest.root}:${stopRoot ? path.resolve(stopRoot) : ""}`;
     const cached = DEPS_CACHE.get(cacheKey);
     const now = Date.now();
     if (cached?.deps && cached.manifestPath === manifest.path &&
@@ -360,16 +430,25 @@ function loadPythonDependencies(directory) {
         const pyproject = path.join(manifest.root, "pyproject.toml");
         const files = [manifest.root, pyproject];
         if (fs.existsSync(pyproject)) {
-            for (const dep of parsePythonManifest(fs.readFileSync(pyproject, "utf8"), "pyproject.toml"))
+            const pyRead = readManifestBounded(pyproject, stopRoot ?? manifest.root, MAX_REQUIREMENTS_FILE_BYTES);
+            if (!pyRead || "rejected" in pyRead) {
+                return null;
+            }
+            for (const dep of parsePythonManifest(pyRead.text, "pyproject.toml")) {
                 deps.add(dep);
+            }
         }
         const requirementFiles = fs.readdirSync(manifest.root)
             .filter((name) => /^requirements(?:[-_.][A-Za-z0-9_-]+)?\.txt$/i.test(name) ||
             name === "requirements.in").sort();
         const seen = new Set();
+        const sharedBudget = { bytes: 0, files: 0, depth: 0, truncated: false };
         for (const name of requirementFiles) {
-            for (const dep of parseRequirementsFile(path.join(manifest.root, name), manifest.root, seen))
+            for (const dep of parseRequirementsFile(path.join(manifest.root, name), manifest.root, seen, sharedBudget))
                 deps.add(dep);
+        }
+        if (sharedBudget.truncated) {
+            return null;
         }
         files.push(...seen);
         setDepsCache(cacheKey, {
@@ -383,12 +462,15 @@ function loadPythonDependencies(directory) {
         return null;
     }
 }
-function loadGoManifest(directory) {
-    const manifest = nearestFile(directory, ["go.mod"]);
+function loadGoManifest(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["go.mod"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const ownModule = /^\s*module\s+([^\s]+)\s*$/m.exec(text)?.[1] ?? "";
         const modules = new Set();
         for (const match of text.matchAll(/^\s*require\s+([^\s()]+)\s+v?[^\s]+/gm)) {
@@ -414,12 +496,15 @@ function loadGoManifest(directory) {
         return null;
     }
 }
-function loadRustDependencies(directory) {
-    const manifest = nearestFile(directory, ["Cargo.toml"]);
+function loadRustDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["Cargo.toml"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const deps = new Set();
         let inDeps = false;
         let inPackage = false;
@@ -469,12 +554,15 @@ const PHP_BUILTIN_NAMESPACES = new Set([
     "domdocument", "simplexmlelement", "xmlreader", "xmlwriter", "ziparchive", "intlchar", "transliterator",
     "numberformatter", "collator", "intldateformatter", "soapclient", "soapserver", "soapfault"
 ]);
-function loadComposerDependencies(directory) {
-    const manifest = nearestFile(directory, ["composer.json"]);
+function loadComposerDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["composer.json"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const json = JSON.parse(text);
         const deps = new Set();
         const vendorRoots = new Set();
@@ -529,20 +617,26 @@ function extractPhpImports(code) {
 const CSHARP_BUILTIN_NAMESPACES = new Set([
     "system", "microsoft", "windows"
 ]);
-function loadCSharpDependencies(directory) {
-    const manifest = nearestFile(directory, ["Directory.Packages.props"], /\.csproj$/i);
+function loadCSharpDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, [], /\.csproj$/i, stopRoot) ??
+        nearestFile(directory, ["Directory.Packages.props"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const deps = new Set();
         for (const match of text.matchAll(/<PackageReference\s+[^>]*Include=["']([^"']+)["']/gi)) {
             if (match[1])
                 deps.add(match[1].toLowerCase());
         }
-        for (const match of text.matchAll(/<PackageVersion\s+[^>]*Include=["']([^"']+)["']/gi)) {
-            if (match[1])
-                deps.add(match[1].toLowerCase());
+        if (manifest.path.endsWith("Directory.Packages.props")) {
+            for (const match of text.matchAll(/<PackageVersion\s+[^>]*Include=["']([^"']+)["']/gi)) {
+                if (match[1])
+                    deps.add(match[1].toLowerCase());
+            }
         }
         return { deps, root: manifest.root };
     }
@@ -568,12 +662,15 @@ function extractCSharpUsings(code) {
 const JVM_BUILTIN_ROOTS = new Set([
     "java", "javax", "jakarta", "kotlin", "kotlinx", "android", "androidx", "sun", "com.sun", "org.w3c", "org.xml"
 ]);
-function loadJvmDependencies(directory) {
-    const manifest = nearestFile(directory, ["pom.xml", "build.gradle", "build.gradle.kts"]);
+function loadJvmDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["pom.xml", "build.gradle", "build.gradle.kts"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const deps = new Set();
         if (manifest.path.endsWith("pom.xml")) {
             for (const match of text.matchAll(/<groupId>([^<]+)<\/groupId>\s*<artifactId>([^<]+)<\/artifactId>/g)) {
@@ -622,12 +719,15 @@ const RUBY_STDLIB = new Set([
     "base64", "cgi", "erb", "forwardable", "ostruct", "set", "strscan", "timeout", "zlib", "delegate",
     "singleton", "observer", "prettyprint", "pp", "pstore", "resolv", "shellwords", "tsort", "weakref"
 ]);
-function loadRubyDependencies(directory) {
-    const manifest = nearestFile(directory, ["Gemfile"]);
+function loadRubyDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["Gemfile"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const deps = new Set();
         for (const match of text.matchAll(/^\s*gem\s+["']([A-Za-z0-9_-]+)["']/gm)) {
             if (match[1])
@@ -653,12 +753,15 @@ function extractRubyRequires(code) {
 const DART_BUILTIN = new Set([
     "flutter", "flutter_test", "flutter_web_plugins"
 ]);
-function loadDartDependencies(directory) {
-    const manifest = nearestFile(directory, ["pubspec.yaml"]);
+function loadDartDependencies(directory, stopRoot) {
+    const manifest = nearestFile(directory, ["pubspec.yaml"], undefined, stopRoot);
     if (!manifest)
         return null;
     try {
-        const text = fs.readFileSync(manifest.path, "utf8");
+        const read = readManifestBounded(manifest.path, stopRoot);
+        if (!read || "rejected" in read)
+            return null;
+        const text = read.text;
         const deps = new Set();
         let ownPackage = "";
         let inDeps = false;
@@ -807,6 +910,15 @@ function buildJsCodeMask(code, nestedBlockComments = false, rustRawStrings = fal
             continue;
         }
         if (ch === "'" || ch === '"' || ch === "`") {
+            // Rust lifetimes ('a, 'static, '_) are NOT character/string literals.
+            if (rustRawStrings && ch === "'") {
+                const afterQuote = code.slice(i + 1);
+                const lifetimeMatch = /^([A-Za-z_][A-Za-z0-9_]*)(?!')/.exec(afterQuote);
+                if (lifetimeMatch) {
+                    i += 1 + lifetimeMatch[1].length;
+                    continue;
+                }
+            }
             const quote = ch;
             const start = i;
             i++;
@@ -815,13 +927,72 @@ function buildJsCodeMask(code, nestedBlockComments = false, rustRawStrings = fal
                     i += 2;
                     continue;
                 }
+                if (!rustRawStrings && quote === "`" && code[i] === "$" && code[i + 1] === "{") {
+                    // Leave JS template interpolation `${...}` executable (mask = 1) while masking template chunks.
+                    mask.fill(2, start, i + 2);
+                    i += 2;
+                    let depth = 1;
+                    while (i < code.length && depth > 0) {
+                        const inner = code[i];
+                        if (inner === "{")
+                            depth++;
+                        else if (inner === "}") {
+                            depth--;
+                            if (depth === 0) {
+                                mask[i] = 2;
+                                i++;
+                                break;
+                            }
+                        }
+                        else if (inner === "'" || inner === '"') {
+                            const innerQuote = inner;
+                            i++;
+                            while (i < code.length) {
+                                if (code[i] === "\\") {
+                                    i += 2;
+                                    continue;
+                                }
+                                if (code[i] === innerQuote) {
+                                    i++;
+                                    break;
+                                }
+                                i++;
+                            }
+                            continue;
+                        }
+                        i++;
+                    }
+                    // Continue masking remainder of template literal after closing `}`
+                    const resumeStart = i;
+                    while (i < code.length) {
+                        if (code[i] === "\\") {
+                            i += 2;
+                            continue;
+                        }
+                        if (code[i] === "`") {
+                            i++;
+                            break;
+                        }
+                        if (code[i] === "$" && code[i + 1] === "{")
+                            break;
+                        i++;
+                    }
+                    mask.fill(2, resumeStart, Math.min(i, code.length));
+                    if (i < code.length && code[i] === "$" && code[i + 1] === "{") {
+                        continue;
+                    }
+                    break;
+                }
                 if (code[i] === quote) {
                     i++;
+                    mask.fill(2, start, Math.min(i, code.length));
                     break;
                 }
                 i++;
             }
-            mask.fill(2, start, Math.min(i, code.length));
+            if (i >= code.length && mask[start] === 1) {
+                mask.fill(2, start, code.length);
+            }
             continue;
         }
         i++;
@@ -980,7 +1151,7 @@ function extractRustCrates(code) {
         if (crate)
             crates.add(crate);
     }
-    for (const match of code.matchAll(/(?:^|\n)\s*use\s+([A-Za-z_][\w]*)::/g)) {
+    for (const match of code.matchAll(/(?:^|[;\n{])\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s+([A-Za-z_][\w]*)::/g)) {
         const matchStart = match.index;
         if (matchStart === undefined)
             continue;
@@ -1122,8 +1293,8 @@ export const noGhostDepsRule = {
             if (!dir)
                 return;
             if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"].includes(ext) || !ext) {
-                const declared = loadNodeDependencies(dir);
-                const production = loadNodeDependencies(dir, true);
+                const declared = loadNodeDependencies(dir, false, context.directory);
+                const production = loadNodeDependencies(dir, true, context.directory);
                 const productionFile = targetFile !== undefined &&
                     !isDevelopmentNodeFile(path.relative(context.directory, path.resolve(context.directory, targetFile)));
                 if (declared) {
@@ -1151,7 +1322,7 @@ export const noGhostDepsRule = {
                     return;
             }
             if (ext === ".py") {
-                const manifest = loadPythonDependencies(dir);
+                const manifest = loadPythonDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const moduleName of extractPythonImports(code)) {
@@ -1172,7 +1343,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".go") {
-                const manifest = loadGoManifest(dir);
+                const manifest = loadGoManifest(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const importPath of extractGoImports(code)) {
@@ -1192,7 +1363,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".rs") {
-                const manifest = loadRustDependencies(dir);
+                const manifest = loadRustDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 const localMods = new Set([...code.matchAll(/(?:^|\n)\s*mod\s+([A-Za-z_][\w]*)\s*;/g)].map((match) => match[1]));
@@ -1213,7 +1384,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".php") {
-                const manifest = loadComposerDependencies(dir);
+                const manifest = loadComposerDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const importPath of extractPhpImports(code)) {
@@ -1235,7 +1406,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".cs") {
-                const manifest = loadCSharpDependencies(dir);
+                const manifest = loadCSharpDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const usingPath of extractCSharpUsings(code)) {
@@ -1245,14 +1416,16 @@ export const noGhostDepsRule = {
                     const usingLower = usingPath.toLowerCase();
                     if (manifest.deps.has(usingLower) || manifest.deps.has(rootNs))
                         continue;
-                    if ([...manifest.deps].some((dep) => usingLower.startsWith(dep) || dep.startsWith(usingLower)))
+                    if ([...manifest.deps].some((dep) => usingLower === dep ||
+                        usingLower.startsWith(`${dep}.`) ||
+                        dep.startsWith(`${usingLower}.`)))
                         continue;
                     addFinding("C#", usingPath.split(".")[0] ?? usingPath, usingPath, source, "*.csproj");
                 }
                 return;
             }
             if (ext === ".java" || ext === ".kt") {
-                const manifest = loadJvmDependencies(dir);
+                const manifest = loadJvmDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const importPath of extractJvmImports(code)) {
@@ -1261,10 +1434,16 @@ export const noGhostDepsRule = {
                     if (JVM_BUILTIN_ROOTS.has(rootNs))
                         continue;
                     const fullLower = importPath.toLowerCase();
+                    const fullSegments = fullLower.split(".");
                     const artifactCandidate = parts.slice(0, 3).join(".");
+                    const artifactCandidateLower = artifactCandidate.toLowerCase();
                     if (manifest.deps.has(rootNs) ||
                         manifest.deps.has(parts[1]?.toLowerCase() ?? "") ||
-                        [...manifest.deps].some((dep) => fullLower.includes(dep) || dep.includes(artifactCandidate))) {
+                        [...manifest.deps].some((dep) => fullLower === dep ||
+                            fullLower.startsWith(`${dep}.`) ||
+                            dep.startsWith(`${artifactCandidateLower}.`) ||
+                            dep === artifactCandidateLower ||
+                            (dep.length >= 4 && fullSegments.includes(dep)))) {
                         continue;
                     }
                     addFinding("JVM", artifactCandidate, importPath, source, "pom.xml / build.gradle");
@@ -1272,7 +1451,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".rb") {
-                const manifest = loadRubyDependencies(dir);
+                const manifest = loadRubyDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const req of extractRubyRequires(code)) {
@@ -1291,7 +1470,7 @@ export const noGhostDepsRule = {
                 return;
             }
             if (ext === ".dart") {
-                const manifest = loadDartDependencies(dir);
+                const manifest = loadDartDependencies(dir, context.directory);
                 if (!manifest)
                     return;
                 for (const pkg of extractDartImports(code)) {

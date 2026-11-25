@@ -188,11 +188,11 @@ describe("Multi-Layer Secret Output Redaction", () => {
       'HOME=/root',
       'PORT=3000',
       'NODE_ENV=production',
-      'USER=nodecommand',
+      'USER=appservice',
       'SHELL=/bin/bash',
       'LANG=en_US.UTF-8',
       'HOSTNAME=vps-prod-node-01',
-      'URL=https://api.nodecommand.app/v1/health',
+      'URL=https://api.example.invalid/v1/health',
       'COMMIT_SHA=7c161913f581533c18caeeeb91cb04645d72acae',
       'PRIMARY_KEY=id',
     ].join('\n');
@@ -336,13 +336,13 @@ describe("Multi-Layer Secret Output Redaction", () => {
 
   test('Database connection strings have only password component redacted', () => {
     const secretPass = 'super_secret_db_password_12345';
-    const connStr = `postgres://app_user:${secretPass}@db.internal.nodecommand.app:5432/production_db?sslmode=require`;
+    const connStr = `postgres://app_user:${secretPass}@db.internal.example.invalid:5432/production_db?sslmode=require`;
 
     const sanitized = sanitizeToolResult(connStr);
     assert.equal(sanitized.includes(secretPass), false);
     assert.equal(
       sanitized,
-      'postgres://app_user:[REDACTED]@db.internal.nodecommand.app:5432/production_db?sslmode=require'
+      'postgres://app_user:[REDACTED]@db.internal.example.invalid:5432/production_db?sslmode=require'
     );
   });
 
@@ -889,5 +889,59 @@ describe("Dynamic Shell & Example-File Credential Rules", () => {
     reg.refreshEnv({ MY_API_TOKEN: "rotated-secret-token-222" });
     assert.ok(reg.getSecrets().includes("rotated-secret-token-222"), "rotated secret must be present");
     assert.ok(!reg.getSecrets().includes("initial-secret-token-111"), "stale rotated-out secret must be evicted");
+  });
+
+  test("R3 Dalga 1 (R3-016): custom Error subclass prototype toJSON and getters are neutralized by sanitizeObject", async () => {
+    const { sanitizeObject } = await import("../dist/secrets/index.js");
+    class CustomSdkError extends Error {
+      constructor(msg) {
+        super(msg);
+        this.name = "CustomSdkError";
+      }
+      toJSON() {
+        return { message: this.message, leakedSecret: "raw-error-proto-secret-777" };
+      }
+      get apiKey() {
+        return "raw-getter-secret-888";
+      }
+    }
+    const err = new CustomSdkError("request failed");
+    const { sanitized } = sanitizeObject(err, { includeRuntimeEnv: false });
+    assert.equal(sanitized instanceof CustomSdkError, true, "Error subclass prototype preserved");
+    const json = JSON.stringify(sanitized);
+    assert.ok(!json.includes("raw-error-proto-secret-777"), `Error prototype toJSON must not leak: ${json}`);
+    assert.equal(sanitized.apiKey, "[REDACTED]", "Error prototype sensitive getter must be neutralized");
+  });
+
+  test("R3 Dalga 1 (R3-034): YAML block scalar body lines and >512-char quoted inline secrets are fully redacted", async () => {
+    const { sanitizeString } = await import("../dist/secrets/index.js");
+    const yaml = [
+      "service: api",
+      "client_secret: |-",
+      "  line-one-secret-payload",
+      "  line-two-secret-payload",
+      "public_flag: true",
+    ].join("\n");
+    const resYaml = sanitizeString(yaml, { includeRuntimeEnv: false });
+    assert.ok(!resYaml.sanitized.includes("line-one-secret-payload"), `YAML block line 1 must be redacted: ${resYaml.sanitized}`);
+    assert.ok(!resYaml.sanitized.includes("line-two-secret-payload"), `YAML block line 2 must be redacted: ${resYaml.sanitized}`);
+    assert.ok(resYaml.sanitized.includes("public_flag: true"), "non-indented following YAML key must remain intact");
+
+    const longVal = "A".repeat(700);
+    const resLong = sanitizeString(`auth token="${longVal}" done`, { includeRuntimeEnv: false });
+    assert.ok(!resLong.sanitized.includes("AAAAAAAAAA"), `>512-char quoted secret must be redacted: ${resLong.sanitized}`);
+    assert.ok(resLong.sanitized.includes("[REDACTED]"));
+  });
+
+  test("R3 Dalga 2 (R3-017): text-bearing Node Buffer containing secrets is redacted while binary Uint8Array media stays intact", async () => {
+    const { sanitizeObject } = await import("../dist/secrets/index.js");
+    const rawBuf = Buffer.from("Authorization: Bearer sk-proj-1234567890abcdefghijklmnop", "utf8");
+    const media = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+    const { sanitized, redactedCount } = sanitizeObject({ stdout: rawBuf, media }, { includeRuntimeEnv: false });
+    assert.ok(Buffer.isBuffer(sanitized.stdout), "redacted Buffer should remain a Buffer");
+    assert.ok(!sanitized.stdout.toString("utf8").includes("sk-proj-1234567890"), "R3-017: Buffer secret must be redacted");
+    assert.ok(redactedCount >= 1);
+    assert.equal(sanitized.media instanceof Uint8Array, true);
+    assert.deepEqual([...sanitized.media], [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
   });
 });

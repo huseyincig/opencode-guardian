@@ -815,4 +815,22 @@ describe("International Adapter Behavior", () => {
     assert.match(issued[0].text, /another substantive review/);
     await cleanup();
   });
+
+  test("R3 Dalga 3 (R3-041, R3-042): bare Turkish calistir does not require tests, interrogative 'again' does not trigger iterativeReview, and concluding completion paragraph overrides earlier progress prose", async () => {
+    const { extractAdvisoryTaskSignals, classifyAgentReport } = await import("../dist/locale-intents.js");
+
+    const trBuild = extractAdvisoryTaskSignals("Lütfen buildi çalıştır.");
+    assert.equal(trBuild.requiredVerifications.includes("test"), false, "R3-041: bare Turkish 'buildi çalıştır' must not require tests");
+    assert.equal(trBuild.requiredVerifications.includes("build"), true);
+
+    const trTest = extractAdvisoryTaskSignals("Lütfen testleri çalıştır.");
+    assert.equal(trTest.requiredVerifications.includes("test"), true, "explicit Turkish 'testleri çalıştır' must still require tests");
+
+    const enQuestion = extractAdvisoryTaskSignals("Why did the test fail again?");
+    assert.equal(enQuestion.iterativeReview, false, "R3-041: interrogative 'Why did the test fail again?' must not trigger iterativeReview");
+
+    const closingAfterProgress = classifyAgentReport("Step 1: fixed JSON processing.\n\nAll done, task completed.");
+    assert.equal(closingAfterProgress.isClosing, true, "R3-042: explicit completion in final paragraph must classify as closing even when earlier prose mentions processing/step");
+    assert.equal(closingAfterProgress.state, "completed");
+  });
 });

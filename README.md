@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/opencode-guardian?color=blue&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-guardian)
 [![OpenCode: V2 (>=2.3.0)](https://img.shields.io/badge/OpenCode-V2%20(%3E%3D2.3.0)-10b981?logo=terminal&logoColor=white)](https://opencode.ai)
 [![V2 host baseline](https://img.shields.io/badge/Host%20baseline-v2.4.1%20verified-10b981?logo=checkmarx&logoColor=white)](docs/acceptance-v2.md)
-[![Tests: 852/852 Passing](https://img.shields.io/badge/Tests-852%2F852%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
+[![Tests: 892/892 Passing](https://img.shields.io/badge/Tests-892%2F892%20Passing-339933?logo=githubactions&logoColor=white)](docs/discipline-coverage.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -23,7 +23,7 @@ OpenCode Guardian continuously supervises agent turns: guiding model execution b
 
 > Guardian **v0.17.9** was verified on **25 November 2026** against live **OpenCode v2.4.1** on Node **26.13.1** and Bun **1.4.4**.
 
-- **Current Automated Verification:** **852 / 852** unit, security, mesh interoperability, project scope isolation, toast notification, and regression tests passing.
+- **Current Automated Verification:** **892 / 892** unit, security, mesh interoperability, project scope isolation, toast notification, and regression tests passing.
 - **Sandbox Scenarios:** **18 / 18** end-to-end multi-turn agent failure and recovery scenarios verified.
 - **Live V2 Host Acceptance:** **10 / 10** real-host checks verified (packed `.tgz` in Node 26.13.1 + Bun 1.4.4, full V2.4.1 server hooks + `./rpc` + TUI slots/commands, and live `opencode v2.4.1` CLI host).
 - **Static Analysis:** standard and strict TypeScript gates pass (`--strict --exactOptionalPropertyTypes`); Oxlint reports **0 warnings / 0 errors** across 119 files.
@@ -318,7 +318,7 @@ Guardian works out of the box with zero configuration. You can customize rules a
   - `"violations"`: (Default) Logs only security violations, preflight blocks, warnings, and remediation actions. Bypasses clean turns and benign commands (`preflight-allowed`, `post-inspected`), reducing disk I/O by 90–95%.
   - `"all"`: Logs all events including benign command executions and clean turn evaluations.
   - `"off"`: Disables all file writes (zero I/O), ideal for headless CI/CD runs.
-- `telemetry.maxBytes`: Maximum size in bytes (positive integer `>= 1`) before rotating to `guardian-events.jsonl.1` (default: 512 KiB). Rotation uses an atomic `.lock` guard with stale-lock recovery.
+- `telemetry.maxBytes`: Maximum size in bytes (`256` bytes – `2 MiB` / `2,097,152` bytes) before rotating to `guardian-events.jsonl.1` (default: 512 KiB). Rotation uses an owner-verified atomic `.lock` guard with stale-lock recovery and inode-aware re-open checks.
 - Unknown rule IDs in `rules` are rejected during config validation so typos cannot silently disable protection. When telemetry is disabled (`enabled: false` or `level: "off"`), `/guardian-reset` reports failure instead of falsely claiming counters were reset.
 
 ### 🌐 Environment Variables (Pipeline & CI Overrides):
@@ -364,7 +364,7 @@ Blocks catastrophic, irreversible shell commands (`rm -rf`, `git reset --hard`, 
 }
 ```
 
-- Setting `"allowProjectOverrides": false` in your global `~/.config/opencode/opencode-guardian.json` locks the effective security floor — including unlisted built-in rule defaults, rule `exceptions`, secret `safeKeyNames` / `safeValues` / `includeRuntimeEnv`, effective default `preflight.mode` (`"strict"` when omitted), and remediation/iteration budgets — so an untrusted cloned repository cannot weaken protection via a repo-local `opencode-guardian.json`.
+- Setting `"allowProjectOverrides": false` in your global `~/.config/opencode/opencode-guardian.json` locks the effective security floor — including unlisted built-in rule defaults, rule `exceptions` and tightening flags (`productionOnly`, `blockPythonGhostDeps`), secret `redactOutputs` / `redactContext` / `safeKeyNames` / `safeValues` / `includeRuntimeEnv`, `streamWatcher.enabled`, effective default `preflight.mode` (`"strict"` when omitted), and remediation/iteration budgets — so an untrusted cloned repository cannot weaken protection via a repo-local `opencode-guardian.json`.
 
 ### Detailed Conversation Banners (opt-in)
 
@@ -388,7 +388,7 @@ Detailed notices are delivered exclusively via the TUI RPC bridge (never via `se
 ```
 
 - In `"strict"` mode (the default when `preflight.enabled: true` and `mode` is omitted), Guardian also blocks simple `rm <file>`, broad environment dumps (`printenv`, `env`, `docker inspect`), and uninformative git commit messages (`git commit -m "update"`).
-- Operates at the V2 host hook level (`ctx.tool.hook("execute.before")` and `ctx.shell?.hook("create.before")`). Recognized file-writing actions (including `mcp__Node_Command__file_mutate`) also check inspectable content and replacement edits for potential hardcoded secrets and source truncation placeholders.
+- Operates at the V2 host hook level (`ctx.tool.hook("execute.before")` and `ctx.shell?.hook("create.before")`). Recognized file-writing and file-mutation actions (such as `mcp__<provider>__file_mutate`) also check inspectable content and replacement edits for potential hardcoded secrets and source truncation placeholders, and inspect `delete` / `remove` actions (blocking unauthorized deletions in `"strict"` mode and catastrophic root/workspace deletions in `"critical"` mode).
 
 Standard MCP tool IDs ending in recognized shell actions (for example `mcp__provider__shell_exec`) are inspected automatically. For an MCP or custom tool with an unrecognized execution action, explicitly opt it in:
 

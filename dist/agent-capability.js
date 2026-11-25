@@ -1,4 +1,4 @@
-import { isFileMutationTool, isShellExecutionTool } from "./preflight.js";
+import { extractToolAction, isFileMutationTool, isShellExecutionTool } from "./preflight.js";
 export const KNOWN_READ_ONLY_TOOLS = new Set([
     "read_file", "view_file", "cat", "read", "file_read", "read_text_file",
     "glob", "list", "file_list", "dir", "ls", "directory_list", "list_files", "file_search",
@@ -11,8 +11,7 @@ export const KNOWN_READ_ONLY_TOOLS = new Set([
 ]);
 export function isKnownReadOnlyTool(toolName) {
     const normalized = toolName.toLowerCase().trim();
-    const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-    const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+    const last = extractToolAction(normalized);
     return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
 }
 function resolveV2ChannelEffect(rules, targetAction) {

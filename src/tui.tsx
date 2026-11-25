@@ -269,6 +269,8 @@ function GuardianSidebar(props: {
   refreshVersion?: () => number;
   checkUpdates?: boolean;
   configInvalid?: () => boolean;
+  configEnabled?: () => boolean;
+  configPreflight?: () => boolean;
 }) {
   const currentDirectory = () => props.currentDirectory?.() ?? props.directory ?? process.cwd();
   const [open, setOpen] = createSignal(false);
@@ -314,6 +316,8 @@ function GuardianSidebar(props: {
   const errorColor = () => props.colors.error ?? props.colors.accent;
 
   const preflightLabel = () => {
+    if (props.configInvalid?.()) return "! invalid config";
+    if (props.configEnabled?.() === false || props.configPreflight?.() === false) return "○ disabled";
     const pf = status().preflight;
     if (pf === "active") return "● active";
     if (pf === "disabled") return "○ disabled";
@@ -322,6 +326,8 @@ function GuardianSidebar(props: {
   };
 
   const preflightColor = () => {
+    if (props.configInvalid?.()) return errorColor();
+    if (props.configEnabled?.() === false || props.configPreflight?.() === false) return props.colors.muted;
     const pf = status().preflight;
     if (pf === "active") return successColor();
     if (pf === "unavailable") return warningColor();
@@ -330,6 +336,7 @@ function GuardianSidebar(props: {
 
   const statusLabel = () => {
     if (props.configInvalid?.()) return "✕ invalid config";
+    if (props.configEnabled?.() === false) return "○ disabled";
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested": return "! stream stop";
@@ -353,6 +360,7 @@ function GuardianSidebar(props: {
 
   const statusColor = () => {
     if (props.configInvalid?.()) return errorColor();
+    if (props.configEnabled?.() === false) return props.colors.muted;
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
@@ -533,7 +541,8 @@ const v2Plugin: Plugin.Definition = {
 
     const [interventions, setInterventions] = createSignal<Record<string, GuardianToastPayload>>({});
     const [sidebarVersion, setSidebarVersion] = createSignal(0);
-    const rpcInFlight = new Set<string>();
+    const rpcInFlight = new Map<string, number>();
+    let rpcRequestSeq = 0;
     const interventionTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const dismissedInterventionSignatures = new Map<string, string>();
     let rpcGeneration = 0;
@@ -630,7 +639,8 @@ const v2Plugin: Plugin.Definition = {
 
     const refreshIntervention = async (sessionID: string): Promise<void> => {
       if (!interventionRpc || disposed || rpcInFlight.has(sessionID)) return;
-      rpcInFlight.add(sessionID);
+      const reqToken = ++rpcRequestSeq;
+      rpcInFlight.set(sessionID, reqToken);
       const generation = rpcGeneration;
       const sessionLocation =
         context.data?.session?.get?.(sessionID)?.location ?? context.location;
@@ -679,7 +689,9 @@ const v2Plugin: Plugin.Definition = {
         // Same-process toast bridge remains available when RPC is unavailable.
       } finally {
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-        rpcInFlight.delete(sessionID);
+        if (rpcInFlight.get(sessionID) === reqToken) {
+          rpcInFlight.delete(sessionID);
+        }
       }
     };
 
@@ -933,6 +945,8 @@ const v2Plugin: Plugin.Definition = {
           refreshVersion={sidebarVersion}
           checkUpdates={sessionConfig().updateNotice?.enabled !== false}
           configInvalid={() => sessionConfig().configInvalid}
+          configEnabled={() => sessionConfig().enabled !== false}
+          configPreflight={() => (sessionConfig() as { preflight?: { enabled?: boolean } }).preflight?.enabled === true}
           colors={colors()} />;
       },
     });

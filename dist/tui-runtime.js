@@ -312,6 +312,8 @@ function GuardianSidebar(props) {
   const warningColor = () => props.colors.warning ?? props.colors.accent;
   const errorColor = () => props.colors.error ?? props.colors.accent;
   const preflightLabel = () => {
+    if (props.configInvalid?.()) return "! invalid config";
+    if (props.configEnabled?.() === false || props.configPreflight?.() === false) return "○ disabled";
     const pf = status().preflight;
     if (pf === "active") return "● active";
     if (pf === "disabled") return "○ disabled";
@@ -319,6 +321,8 @@ function GuardianSidebar(props) {
     return "—";
   };
   const preflightColor = () => {
+    if (props.configInvalid?.()) return errorColor();
+    if (props.configEnabled?.() === false || props.configPreflight?.() === false) return props.colors.muted;
     const pf = status().preflight;
     if (pf === "active") return successColor();
     if (pf === "unavailable") return warningColor();
@@ -326,6 +330,7 @@ function GuardianSidebar(props) {
   };
   const statusLabel = () => {
     if (props.configInvalid?.()) return "✕ invalid config";
+    if (props.configEnabled?.() === false) return "○ disabled";
     // Historical counters must not masquerade as the latest event.
     switch (status().lastKind) {
       case "stream-interrupt-requested":
@@ -364,6 +369,7 @@ function GuardianSidebar(props) {
   };
   const statusColor = () => {
     if (props.configInvalid?.()) return errorColor();
+    if (props.configEnabled?.() === false) return props.colors.muted;
     switch (status().lastKind) {
       case "inspection-error":
       case "preflight-blocked":
@@ -732,7 +738,8 @@ const v2Plugin = {
     });
     const [interventions, setInterventions] = createSignal({});
     const [sidebarVersion, setSidebarVersion] = createSignal(0);
-    const rpcInFlight = new Set();
+    const rpcInFlight = new Map();
+    let rpcRequestSeq = 0;
     const interventionTimers = new Map();
     const dismissedInterventionSignatures = new Map();
     let rpcGeneration = 0;
@@ -809,7 +816,8 @@ const v2Plugin = {
     const INTERVENTION_RPC_TIMEOUT_MS = 1500;
     const refreshIntervention = async sessionID => {
       if (!interventionRpc || disposed || rpcInFlight.has(sessionID)) return;
-      rpcInFlight.add(sessionID);
+      const reqToken = ++rpcRequestSeq;
+      rpcInFlight.set(sessionID, reqToken);
       const generation = rpcGeneration;
       const sessionLocation = context.data?.session?.get?.(sessionID)?.location ?? context.location;
       const requestedDirectory = sessionLocation?.directory;
@@ -847,7 +855,9 @@ const v2Plugin = {
         // Same-process toast bridge remains available when RPC is unavailable.
       } finally {
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-        rpcInFlight.delete(sessionID);
+        if (rpcInFlight.get(sessionID) === reqToken) {
+          rpcInFlight.delete(sessionID);
+        }
       }
     };
     clearOnReset = targetDirectory => {
@@ -1091,6 +1101,8 @@ const v2Plugin = {
             return sessionConfig().updateNotice?.enabled !== false;
           },
           configInvalid: () => sessionConfig().configInvalid,
+          configEnabled: () => sessionConfig().enabled !== false,
+          configPreflight: () => sessionConfig().preflight?.enabled === true,
           get colors() {
             return colors();
           }

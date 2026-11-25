@@ -6,7 +6,7 @@ import { GuardEngine, loadConfig, resolveEffectiveConfig, type EngineExecutionRe
 import type { MessagePart, PreflightMode, SessionMessage } from "./types.js";
 import { extractTaskContract, taskGuidance } from "./task-contract.js";
 import type { TaskContract } from "./task-contract.js";
-import { evaluatePreflight, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
+import { evaluatePreflight, extractToolAction, GuardianPreflightError, isShellExecutionTool, isFileMutationTool, isProcessStartTool } from "./preflight.js";
 import { configureGuardianTelemetry, recordGuardianEvent, recordGuardianRedaction, sessionFingerprint } from "./telemetry.js";
 import { auditReasons } from "./audit.js";
 import { VerificationSnapshotStore, type VerificationSnapshot } from "./evidence.js";
@@ -25,6 +25,7 @@ import {
 } from "./agent-capability.js";
 import {
   defaultRuntimeSecrets,
+  neutralizeInheritedSerializer,
   resolveSanitizerOptions,
   sanitizeMessages,
   sanitizeObject,
@@ -145,10 +146,9 @@ function sanitizeV2ToolErrorWithMeta<T>(
   options: NonNullable<ReturnType<typeof resolveSanitizerOptions>>
 ): { sanitized: T; redactedCount: number } {
   const fallback = (): { sanitized: T; redactedCount: number } => {
+    // Return a plain Error without re-attaching an untrusted prototype that could
+    // carry a leaking toJSON() or sensitive getter.
     const safe = new Error("[OUTPUT REDACTED: sanitization failure]");
-    if (error && typeof error === "object") {
-      try { Object.setPrototypeOf(safe, Object.getPrototypeOf(error)); } catch {}
-    }
     return { sanitized: safe as unknown as T, redactedCount: 1 };
   };
 
@@ -178,11 +178,19 @@ function sanitizeV2ToolErrorWithMeta<T>(
       return fallback();
     }
 
+    const proto = Object.getPrototypeOf(error);
+    const sanitizedOut = Object.assign(
+      proto === null ? Object.create(null) : Object.create(proto),
+      res.sanitized
+    ) as Record<string, unknown>;
+    neutralizeInheritedSerializer(
+      sanitizedOut,
+      proto,
+      options,
+      options.replacement ?? "[REDACTED]"
+    );
     return {
-      sanitized: Object.assign(
-        Object.create(Object.getPrototypeOf(error)),
-        res.sanitized
-      ) as T,
+      sanitized: sanitizedOut as T,
       redactedCount: res.redactedCount,
     };
   } catch {
@@ -287,15 +295,22 @@ function normalizeV2AssistantParts(part: unknown): MessagePart[] {
     if (!call || typeof call !== "object") continue;
     const rec = call as Record<string, unknown>;
     const toolName = typeof rec.tool === "string" ? rec.tool : undefined;
-    const callStatus = typeof rec.status === "string" ? rec.status : "completed";
+    const recMeta =
+      rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
+        ? (rec.metadata as Record<string, unknown>)
+        : {};
+    const callStatus =
+      typeof rec.status === "string"
+        ? rec.status
+        : rec.error !== undefined || recMeta.error === true
+          ? "error"
+          : normalizedState.status === "running" || normalizedState.status === "pending"
+            ? "running"
+            : "completed";
     if (!toolName) continue;
     const callInput =
       rec.input && typeof rec.input === "object" && !Array.isArray(rec.input)
         ? (rec.input as Record<string, unknown>)
-        : {};
-    const recMeta =
-      rec.metadata && typeof rec.metadata === "object" && !Array.isArray(rec.metadata)
-        ? (rec.metadata as Record<string, unknown>)
         : {};
     const callOutput = extractV2OutputText(rec.output, rec.content);
     const callID =
@@ -313,10 +328,15 @@ function normalizeV2AssistantParts(part: unknown): MessagePart[] {
           ? recMeta.exit
           : undefined;
     const isBackgroundOrOutputExit =
+      rec.error !== undefined ||
+      recMeta.error === true ||
       recMeta.status === "running" ||
       recMeta.state === "running" ||
+      typeof recMeta.jobID === "string" ||
+      typeof recMeta.shellID === "string" ||
       /(?:^|\n)Exit code:\s*\d+/i.test(callOutput) ||
-      /(?:^|\n)Command moved to the background\b/i.test(callOutput);
+      /(?:^|\n)Command (?:killed by signal|timed out)\b/i.test(callOutput) ||
+      /(?:^|\n)(?:Command|Execution)\s+moved to the background\b/i.test(callOutput);
     nestedParts.push({
       type: "tool",
       tool: toolName,
@@ -535,30 +555,70 @@ export function normalizeV2Messages(
 
 const MAX_SUBAGENT_HANDOFF_ROUNDS = 6;
 const FOREGROUND_HANDOFF_TTL_MS = 5 * 60_000;
-const activeRemediationLeases = new Map<string, () => void>();
+const MAX_IDLE_LEASE_DURATION_MS = 10 * 60_000;
+const activeRemediationLeases = new Map<
+  string,
+  { release: () => void; heartbeat?: ReturnType<typeof setInterval>; instanceId?: number }
+>();
 
-function setRemediationLeaseForSession(sessionID: string, release: () => void): void {
+function disposeRemediationLeaseEntry(entry: {
+  release: () => void;
+  heartbeat?: ReturnType<typeof setInterval>;
+}): void {
+  if (entry.heartbeat !== undefined) clearInterval(entry.heartbeat);
+  try { entry.release(); } catch {}
+}
+
+function setRemediationLeaseForSession(
+  sessionID: string,
+  release: () => void,
+  options?: { instanceId?: number; ttlMs?: number }
+): void {
   const existing = activeRemediationLeases.get(sessionID);
-  if (existing && existing !== release) {
+  if (existing && existing.release !== release) {
     activeRemediationLeases.delete(sessionID);
-    try { existing(); } catch {}
+    disposeRemediationLeaseEntry(existing);
   }
+  const ttlMs = options?.ttlMs ?? 45_000;
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    if (Date.now() - startedAt >= MAX_IDLE_LEASE_DURATION_MS) {
+      releaseRemediationLeaseForSession(sessionID);
+      return;
+    }
+    const renewed = renewSessionLease({
+      sessionID,
+      owner: "opencode-guardian",
+      kind: "active_remediation",
+      ttlMs,
+    });
+    if (!renewed) {
+      releaseRemediationLeaseForSession(sessionID);
+    }
+  }, Math.max(50, Math.floor(ttlMs / 3)));
+  heartbeat.unref?.();
+
   activeRemediationLeases.delete(sessionID);
-  activeRemediationLeases.set(sessionID, release);
+  activeRemediationLeases.set(sessionID, {
+    release,
+    heartbeat,
+    ...(options?.instanceId !== undefined ? { instanceId: options.instanceId } : {}),
+  });
   while (activeRemediationLeases.size > 512) {
     const oldest = activeRemediationLeases.keys().next().value;
     if (oldest === undefined) break;
-    const oldRelease = activeRemediationLeases.get(oldest);
+    const oldEntry = activeRemediationLeases.get(oldest);
     activeRemediationLeases.delete(oldest);
-    try { oldRelease?.(); } catch {}
+    if (oldEntry) disposeRemediationLeaseEntry(oldEntry);
   }
 }
 
-function releaseRemediationLeaseForSession(sessionID: string): void {
-  const release = activeRemediationLeases.get(sessionID);
-  if (!release) return;
+function releaseRemediationLeaseForSession(sessionID: string, ownerInstanceId?: number): void {
+  const existing = activeRemediationLeases.get(sessionID);
+  if (!existing) return;
+  if (ownerInstanceId !== undefined && existing.instanceId !== ownerInstanceId) return;
   activeRemediationLeases.delete(sessionID);
-  try { release(); } catch {}
+  disposeRemediationLeaseEntry(existing);
 }
 
 function pruneExpiredForegroundHandoffs(
@@ -822,6 +882,7 @@ export async function finalizeSubagentHandoff(input: {
   onRemediated?: (() => void) | undefined;
   leaseTtlMs?: number | undefined;
   remediationTimeoutMs?: number | undefined;
+  interrupt?: (() => Promise<unknown> | void) | undefined;
 }): Promise<string | undefined> {
   let remediated = false;
   let resolvedCapability: AgentMutationProfile | undefined;
@@ -930,10 +991,12 @@ export async function finalizeSubagentHandoff(input: {
         const waitPromise = input.sendAndWait(result.combinedRemediationPrompt);
         const guardedWait = new Promise<void>((resolve, reject) => {
           deadlineTimer = setTimeout(() => {
+            void Promise.resolve(input.interrupt?.()).catch(() => {});
             reject(new Error("[opencode-guardian handoff] subagent remediation exceeded deadline."));
           }, remediationTimeoutMs);
           deadlineTimer.unref?.();
           onAbortHandler = () => {
+            void Promise.resolve(input.interrupt?.()).catch(() => {});
             reject(new Error("[opencode-guardian handoff] plugin teardown interrupted subagent remediation."));
           };
           if (input.signal?.aborted) {
@@ -1110,7 +1173,8 @@ async function handleSessionIdle(
   signal?: AbortSignal | undefined,
   isSubagent?: boolean | undefined,
   resolveCapability?: (() => Promise<AgentMutationProfile>) | undefined,
-  toastNotifier?: GuardianToastNotifier | undefined
+  toastNotifier?: GuardianToastNotifier | undefined,
+  ownerInstanceId?: number | undefined
 ): Promise<void> {
   let stage: "message-fetch" | "engine-inspect" | "prompt-send" = "message-fetch";
   try {
@@ -1193,7 +1257,10 @@ async function handleSessionIdle(
           releaseRemediationLease();
           return;
         }
-        setRemediationLeaseForSession(sessionID, releaseRemediationLease);
+        setRemediationLeaseForSession(sessionID, releaseRemediationLease, {
+          ...(ownerInstanceId !== undefined ? { instanceId: ownerInstanceId } : {}),
+          ttlMs: 45_000,
+        });
         recordGuardianEvent({ kind: "post-remediation", session: sessionFingerprint(sessionID), rules: findings.map((item) => item.ruleId), reasons: auditReasons(findings) }, directory);
         toastNotifier?.notify({
           kind: "remediation",
@@ -1241,7 +1308,7 @@ function inspectPreflight(
   if (!isShellExecutionTool(tool, additionalTools) && !isFileMutationTool(tool) && !isProcessStartTool(tool)) return;
   const finding = evaluatePreflight(tool, args, additionalTools, mode);
   const session = sessionFingerprint(sessionID);
-  const safeTool = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1);
+  const safeTool = extractToolAction(tool);
   recordGuardianEvent({
     kind: finding ? "preflight-blocked" : "preflight-allowed",
     ...(session ? { session } : {}),
@@ -1384,8 +1451,9 @@ interface GuardianInstanceEntry {
 
 interface GuardianProcessRegistry {
   nextInstanceId: number;
+  nextIdleSlotToken?: number;
   activeInstances: Map<number, GuardianInstanceEntry>;
-  inflightIdle: Map<string, { instanceId: number; startedAt: number }>;
+  inflightIdle: Map<string, { instanceId: number; startedAt: number; token: number }>;
   inspectedMessages: Map<string, { messageID: string; canonicalDir: string }>;
 }
 
@@ -1501,8 +1569,9 @@ function acquireProcessIdleSlot(sessionID: string, instanceId: number): (() => v
   if (existing && existing.instanceId !== instanceId && now - existing.startedAt < INFLIGHT_IDLE_TTL_MS) {
     return undefined;
   }
+  const token = (reg.nextIdleSlotToken = (reg.nextIdleSlotToken ?? 0) + 1);
   reg.inflightIdle.delete(sessionID);
-  reg.inflightIdle.set(sessionID, { instanceId, startedAt: now });
+  reg.inflightIdle.set(sessionID, { instanceId, startedAt: now, token });
   while (reg.inflightIdle.size > MAX_TRACKED_PROCESS_SESSIONS) {
     const oldest = reg.inflightIdle.keys().next().value;
     if (oldest === undefined) break;
@@ -1510,7 +1579,7 @@ function acquireProcessIdleSlot(sessionID: string, instanceId: number): (() => v
   }
   return () => {
     const current = reg.inflightIdle.get(sessionID);
-    if (current?.instanceId === instanceId) {
+    if (current?.token === token) {
       reg.inflightIdle.delete(sessionID);
     }
   };
@@ -1558,10 +1627,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const directory = context?.location?.directory ?? process.cwd();
   defaultRuntimeSecrets.refreshEnv();
   const mergedConfig = resolveEffectiveConfig(loadConfig(directory), context.options);
-  configureGuardianTelemetry(directory, mergedConfig.telemetry);
   if (mergedConfig.enabled === false) {
+    configureGuardianTelemetry(directory, mergedConfig.telemetry, "setup-disabled");
     recordGuardianEvent({ kind: "runtime-started", runtime: "v2", preflight: "disabled" }, directory);
-    configureGuardianTelemetry(directory, undefined);
+    configureGuardianTelemetry(directory, undefined, "setup-disabled");
     return;
   }
   const sanitizerOpts = resolveSanitizerOptions(mergedConfig);
@@ -1573,7 +1642,6 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     typeof context.session?.context !== "function" ||
     typeof context.session?.synthetic !== "function"
   ) {
-    configureGuardianTelemetry(directory, undefined);
     if (strictPreflight) {
       throw new Error("[opencode-guardian preflight] V2 host context is unavailable; strict preflight cannot be enabled.");
     }
@@ -1593,7 +1661,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       if (candidate === directory || candidate === key || protectedDirs?.has(candidate)) continue;
       map.delete(candidate);
       if (map === (runtimeByDirectory as unknown)) {
-        configureGuardianTelemetry(candidate, undefined);
+        configureGuardianTelemetry(candidate, undefined, instanceId);
       }
     }
   };
@@ -1605,11 +1673,12 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
   const controller = new AbortController();
   const instanceRegistration = registerGuardianInstance(directory);
   const instanceId = instanceRegistration.id;
+  configureGuardianTelemetry(directory, mergedConfig.telemetry, instanceId);
   controller.signal.addEventListener("abort", () => {
     instanceRegistration.unregister();
-    configureGuardianTelemetry(directory, undefined);
+    configureGuardianTelemetry(directory, undefined, instanceId);
     for (const key of runtimeByDirectory.keys()) {
-      configureGuardianTelemetry(key, undefined);
+      configureGuardianTelemetry(key, undefined, instanceId);
     }
   });
   const provenanceSessions = new Set<string>();
@@ -1665,7 +1734,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     const cached = runtimeByDirectory.get(key);
     if (
       cached &&
-      (!cached.config.enabled ||
+      (cached.config.enabled === false ||
         ((!cached.sanitizer || (toolOutputProtectionReady && modelRequestProtectionReady)) &&
           (cached.config.preflight?.enabled !== true || isPreflightReady())))
     ) {
@@ -1682,7 +1751,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
       return disabledRuntime;
     }
     const config = cached?.config ?? resolveEffectiveConfig(loadConfig(key), context.options);
-    configureGuardianTelemetry(key, config.telemetry);
+    configureGuardianTelemetry(key, config.telemetry, instanceId);
     const runtime = cached ?? {
       config,
       sanitizer: resolveSanitizerOptions(config),
@@ -1841,7 +1910,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 ? rpcContext.location.directory
                 : undefined;
             const targetDirectory =
-              readGuardianInterventionDirectory(input) ?? contextDir ?? directory;
+              contextDir ?? readGuardianInterventionDirectory(input) ?? directory;
+            if (!isDirectoryInGuardianScope(directory, targetDirectory)) {
+              return { cleared: false };
+            }
             for (const activeSessionID of Array.from(interventionSnapshots.keys())) {
               const sessionDir =
                 sessionDirectories.get(activeSessionID) ??
@@ -2072,7 +2144,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
             event.sessionID &&
             getLatestMeshIntervention(event.sessionID)?.kind === "preflight-blocked"
           ) {
-            clearMeshIntervention(event.sessionID);
+            clearMeshIntervention(event.sessionID, "opencode-guardian");
           }
 
           if (tracked && event.status === "completed") {
@@ -2118,10 +2190,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
               const childRuntime = runtimeForDirectory(childDirectory);
               const rawChildAgent = (child as { agent?: unknown }).agent;
               const childAgent =
-                typeof input.agent === "string" && input.agent.trim().length > 0
-                  ? input.agent
-                  : typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
-                    ? rawChildAgent.trim()
+                typeof rawChildAgent === "string" && rawChildAgent.trim().length > 0
+                  ? rawChildAgent.trim()
+                  : typeof input.agent === "string" && input.agent.trim().length > 0
+                    ? input.agent.trim()
                     : undefined;
               let subagentRemediated = false;
               const revised = childRuntime.config.enabled === false
@@ -2149,7 +2221,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                     cacheAgentCapability(childID, resolved);
                     return resolved;
                   }
-                  let resolvedName = meshProfile?.agentName ?? childAgent;
+                  let resolvedName = childAgent ?? meshProfile?.agentName;
                   if (!resolvedName) {
                     try {
                       const ctxMsgs = normalizeV2Messages(
@@ -2166,7 +2238,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                     undefined,
                     childDirectory
                   );
-                  if (hostProfile.capability === "read-only") {
+                  if (
+                    hostProfile.capability === "read-only" ||
+                    hostProfile.capability === "write-requires-approval"
+                  ) {
                     cacheAgentCapability(childID, hostProfile);
                     return hostProfile;
                   }
@@ -2208,6 +2283,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                 snapshots: () => verificationStore.snapshots(childID),
                 signal: controller.signal,
                 toastNotifier,
+                interrupt:
+                  typeof context.session.interrupt === "function"
+                    ? () => context.session.interrupt!({ sessionID: childID, resume: false })
+                    : undefined,
               });
 
               if (revised !== undefined) {
@@ -2804,9 +2883,13 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
           clearAllAgentCapabilities();
           for (const [runtimeKey, existing] of Array.from(runtimeByDirectory.entries())) {
             try {
-              if (!isDirectoryInGuardianScope(directory, runtimeKey)) continue;
+              if (!isDirectoryInGuardianScope(directory, runtimeKey)) {
+                runtimeByDirectory.delete(runtimeKey);
+                configureGuardianTelemetry(runtimeKey, undefined, instanceId);
+                continue;
+              }
               const nextConfig = resolveEffectiveConfig(loadConfig(runtimeKey), context.options);
-              configureGuardianTelemetry(runtimeKey, nextConfig.telemetry);
+              configureGuardianTelemetry(runtimeKey, nextConfig.telemetry, instanceId);
               existing.config = nextConfig;
               existing.sanitizer = resolveSanitizerOptions(nextConfig);
               existing.engine.updateConfig(nextConfig);
@@ -2940,7 +3023,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                       if (!idleSignal.aborted) cacheAgentCapability(sessionID, resolved);
                       return resolved;
                     }
-                    let agentName = meshProfile?.agentName ?? sessionAgentName;
+                    let agentName = sessionAgentName ?? meshProfile?.agentName;
                     if (!agentName) {
                       try {
                         const normalized =
@@ -2959,7 +3042,10 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                       undefined,
                       activeDirectory
                     );
-                    if (hostProfile.capability === "read-only") {
+                    if (
+                      hostProfile.capability === "read-only" ||
+                      hostProfile.capability === "write-requires-approval"
+                    ) {
                       if (!idleSignal.aborted) cacheAgentCapability(sessionID, hostProfile);
                       return hostProfile;
                     }
@@ -2980,7 +3066,8 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
                     return hostProfile;
                   }
                 : undefined,
-              toastNotifier
+              toastNotifier,
+              instanceId
             );
           } finally {
             releaseProcessIdleSlot();
@@ -3040,7 +3127,7 @@ const setup: OpenCodeV2.Plugin["setup"] = async (
     streamWatcher.clear();
     await streamWatcher.drain();
     for (const sessionID of Array.from(activeRemediationLeases.keys())) {
-      releaseRemediationLeaseForSession(sessionID);
+      releaseRemediationLeaseForSession(sessionID, instanceId);
     }
     contracts.clear();
     verificationStore.clear();

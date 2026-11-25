@@ -276,7 +276,7 @@ describe("Closed-Loop Remediation & State-Bound Evidence", () => {
     assert.equal(isFileMutationTool("replace_file_content"), true);
     assert.equal(isFileMutationTool("edit_file"), true);
     assert.equal(isFileMutationTool("apply_patch"), true);
-    assert.equal(isFileMutationTool("mcp__filesystem__write_file"), true);
+    assert.equal(isFileMutationTool("mcp__provider_fs__write_file"), true);
     assert.equal(isFileMutationTool("read_file"), false);
 
     // Hardcoded secret in write_to_file
@@ -660,21 +660,22 @@ describe("Closed-Loop Remediation & State-Bound Evidence", () => {
     assert.equal(unrelated.remediationStatus, "unverified");
   });
 
-  test("Preflight understands Node Command file mutations and rejects opaque write payloads", () => {
+  test("Preflight understands generic MCP file mutations and rejects opaque write payloads", () => {
     const secret = "sk-" + "p".repeat(40);
-    assert.equal(isFileMutationTool("mcp__Node_Command__file_mutate"), true);
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_mutate", {
+    assert.equal(isFileMutationTool("mcp__provider_a__file_mutate"), true);
+    assert.equal(isFileMutationTool("mcp__custom-provider__file_mutate"), true);
+    assert.equal(evaluatePreflight("mcp__provider_a__file_mutate", {
       action: "write", path: "src/key.ts", content: "const key = '" + secret + "';",
     }), "hardcoded-secret-in-file-write");
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_mutate", {
+    assert.equal(evaluatePreflight("mcp__provider_a__file_mutate", {
       action: "edit", path: "src/key.ts", edits: [{ replacement: "const key = '" + secret + "';" }],
     }), "hardcoded-secret-in-file-write");
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_mutate", {
+    assert.equal(evaluatePreflight("mcp__provider_a__file_mutate", {
       action: "write", path: "src/key.ts",
     }), "uninspectable-file-input");
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_mutate", null),
+    assert.equal(evaluatePreflight("mcp__provider_a__file_mutate", null),
       "uninspectable-file-input");
-    assert.equal(evaluatePreflight("mcp__Node_Command__file_mutate", {
+    assert.equal(evaluatePreflight("mcp__provider_a__file_mutate", {
       action: "move", source: "src/key.ts", destination: "src/renamed.ts",
     }), undefined);
   });
@@ -1603,5 +1604,154 @@ describe("Aborted Tools & Service Restart Handling", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("R3 Dalga 1 (R3-007, R3-008, R3-009, R3-010, R3-031): evidence guards, exit trailer authority, task policy unverified-state, and unified mutation schema", async () => {
+    const { evaluateTaskPolicy } = await import("../dist/task-policy.js");
+
+    // R3-007: Code Mode nested shell with rec.error, jobID, or timeout must NOT synthesize exitCode:0
+    const cmNormalized = normalizeV2Messages([
+      {
+        id: "cm-a1",
+        type: "assistant",
+        content: [{
+          type: "tool",
+          tool: "execute",
+          id: "exec-1",
+          state: {
+            status: "completed",
+            input: { code: "await tools.shell({ command: 'npm test' })" },
+            metadata: {
+              codemode: true,
+              toolCalls: [
+                { tool: "shell", input: { command: "npm test" }, error: "boom" },
+                { tool: "shell", status: "completed", input: { command: "npm test" }, output: "Command timed out after 30s" },
+                { tool: "shell", status: "completed", input: { command: "npm test" }, metadata: { jobID: "job-running-1" } },
+              ],
+            },
+          },
+        }],
+      },
+    ], "sess-r3-007");
+    const cmEvidence = collectTurnEvidence(cmNormalized);
+    assert.equal(cmEvidence.successfulVerifications.length, 0, "R3-007: errored, timed-out, or backgrounded Code Mode shell calls must not count as successful verification");
+
+    // R3-008: trailing `;` or `||` after verification stage masks failure; leading `set -o pipefail;` still passes
+    const evMasked1 = collectTurnEvidence([{
+      info: { id: "a1", role: "assistant" },
+      parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test; echo done" }, output: "done", metadata: { exit: 0 } } }],
+    }]);
+    assert.equal(evMasked1.successfulVerifications.length, 0, "R3-008: `npm test; echo done` must be unknown, not success");
+
+    const evMasked2 = collectTurnEvidence([{
+      info: { id: "a2", role: "assistant" },
+      parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: "pytest a.py; pytest b.py" }, output: "1 passed", metadata: { exit: 0 } } }],
+    }]);
+    assert.equal(evMasked2.successfulVerifications.length, 0, "R3-008: same-kind sequential `;` compound `pytest a.py; pytest b.py` must be unknown");
+
+    // R3-009: mid-output "Exit code: 0" must NOT shadow real trailing "Exit code: 1", and state.status === "running" must be unknown
+    const evMidExit = collectTurnEvidence([{
+      info: { id: "a3", role: "assistant" },
+      parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "Fixture printed:\nExit code: 0\nFAIL tests/a.test.mjs\nExit code: 1", metadata: {} } }],
+    }]);
+    assert.equal(evMidExit.records[0]?.status, "failure", "R3-009: mid-stdout Exit code: 0 must not shadow trailing Exit code: 1");
+
+    const evRunning = collectTurnEvidence([{
+      info: { id: "a4", role: "assistant" },
+      parts: [{ type: "tool", tool: "bash", state: { status: "running", input: { command: "npm test" }, output: "Exit code: 0", metadata: { exit: 0 } } }],
+    }]);
+    assert.equal(evRunning.records[0]?.status, "unknown", "R3-009: state.status === running must never become terminal success");
+
+    // R3-010: evaluateTaskPolicy must return status:"unknown" (not "passed") when stateFingerprint === "unverified-state"
+    const fakeUnverifiedEvidence = {
+      records: [{ kind: "test", status: "success", sequence: 2, toolName: "bash", command: "npm test", stateFingerprint: "unverified-state" }],
+      successfulVerifications: [{ kind: "test", status: "success", sequence: 2, toolName: "bash", command: "npm test", stateFingerprint: "unverified-state" }],
+      failures: [],
+      fileMutations: [{ kind: "file-mutation", status: "success", sequence: 1, toolName: "write", filePath: "src/a.ts" }],
+      mutatedFiles: new Set(["src/a.ts"]),
+    };
+    const policy = evaluateTaskPolicy({
+      iterativeReview: false,
+      requiresSourceReview: false,
+      requiredVerifications: ["test"],
+      explicitAction: true,
+      requiresExplicitCompletion: true,
+    }, fakeUnverifiedEvidence);
+    assert.equal(policy.verifications[0]?.status, "unknown", "R3-010: unverified-state snapshot must not pass task policy");
+
+    // R3-031: TargetFile + CodeContent triggers fileMutations AND editIntegrity observation end-to-end
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r3-031-"));
+    try {
+      fs.writeFileSync(path.join(dir, "mod.ts"), "export function one() { return 1; }\nexport function two() { return 2; }\n");
+      const store = new VerificationSnapshotStore();
+      store.observeBefore("s31", "c31", "write_to_file", { TargetFile: "mod.ts", CodeContent: "export function one() { return 1; }\n" }, dir);
+      fs.writeFileSync(path.join(dir, "mod.ts"), "export function one() { return 1; }\n");
+      store.observe("s31", "c31", "write_to_file", { TargetFile: "mod.ts", CodeContent: "export function one() { return 1; }\n" }, "ok", {}, dir, "completed");
+      const snap = store.snapshots("s31").get("c31");
+      assert.equal(snap?.editIntegrity?.status, "observed", "R3-031: CodeContent+TargetFile write must complete editIntegrity observation");
+      assert.equal(snap?.editIntegrity?.removedDefinitions, 1, "R3-031: removed definition must be detected");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("R3 Dalga 2 (R3-012, R3-030, R3-032): iterative exhaustion emits remediationStatus failed, non-shell custom tool cannot forge test evidence, and remediation verification requires freshness", async () => {
+    // R3-030: custom non-shell tool with `command: "npm test"` and `metadata.code: 0` must NOT forge test verification
+    const nonShellEv = collectTurnEvidence([{
+      info: { id: "a1", role: "assistant" },
+      parts: [{
+        type: "tool",
+        tool: "notes_save",
+        state: { status: "completed", input: { command: "npm test" }, output: "saved note", metadata: { code: 0 } },
+      }],
+    }]);
+    assert.equal(nonShellEv.successfulVerifications.length, 0, "R3-030: non-shell custom tool must not forge test verification evidence");
+
+    // R3-032: verification run BEFORE a later edit in remediation turn must NOT verify no-unverified-claims remediation
+    const engine32 = new GuardEngine({ enabled: true, remediationBudget: 1, rules: { "integrity/no-unverified-claims": { severity: "error", blockUnverified: true } } });
+    const t1 = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "Fix src/a.ts and run tests" }] },
+      { info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "All tests passed." }] },
+    ];
+    const b1 = await engine32.inspect("s-r3-032", process.cwd(), t1);
+    assert.equal(b1.decision, "block");
+    const t2 = [
+      ...t1,
+      { info: { id: "g1", role: "user" }, parts: [{ type: "text", text: REMEDIATION_MARKER + "\nVerify properly", synthetic: true, metadata: { "opencode-guardian": true } }] },
+      {
+        info: { id: "a2", role: "assistant" },
+        parts: [
+          // Ran test FIRST, then edited file AFTER -> stale!
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "3 passed", metadata: { exit: 0 } } },
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/a.ts", content: "export const x = 2;\n" }, output: "ok", metadata: {} } },
+          { type: "text", text: "Done updating." },
+        ],
+      },
+    ];
+    const b2 = await engine32.inspect("s-r3-032", process.cwd(), t2);
+    assert.notEqual(b2.remediationStatus, "verified", "R3-032: test run BEFORE a subsequent file edit must not mark remediation verified");
+
+    // R3-012: iterative review budget exhaustion after remediation must report remediationStatus: "failed"
+    const engine12 = new GuardEngine({ enabled: true, iterationBudget: 1, remediationBudget: 1 });
+    const it1 = [
+      { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "@guardian-task {\"mode\":\"iterative-review\",\"review\":\"source\",\"verify\":[\"test\"]}\nFix bug and review." }] },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "tool", tool: "write", state: { status: "completed", input: { path: "src/x.ts", content: "export const x = 1;\n" }, output: "ok", metadata: {} } },
+          { type: "text", text: "Finished everything." },
+        ],
+      },
+    ];
+    const ir1 = await engine12.inspect("s-r3-012", process.cwd(), it1);
+    assert.equal(ir1.decision, "block");
+    const it2 = [
+      ...it1,
+      { info: { id: "g1", role: "user" }, parts: [{ type: "text", text: REMEDIATION_MARKER + "\nRun review and tests.", synthetic: true, metadata: { "opencode-guardian": true } }] },
+      { info: { id: "a2", role: "assistant" }, parts: [{ type: "text", text: "Still finished without running tests." }] },
+    ];
+    const ir2 = await engine12.inspect("s-r3-012", process.cwd(), it2);
+    assert.equal(ir2.decision, "pass");
+    assert.equal(ir2.remediationStatus, "failed", "R3-012: exhausted iterative review with unresolved blocking finding must report remediationStatus: failed");
   });
 });

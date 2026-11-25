@@ -2,7 +2,8 @@ import { isDestructiveCommand, isOpaqueShellExecution, isSimpleFileRemoval } fro
 import { assessCommandPreflight } from "./secrets/preflight.js";
 import { hasDynamicCommandName, literalWindowsShellScripts, splitShellStages } from "./shell-risk.js";
 import { extractAddedLines, extractFilePathFromPatch, findSecretInCode } from "./rules/no-secrets.js";
-import { extractStructuredEditTexts, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
+import { extractStructuredEditTexts, extractToolAction, quoteProcessArgument, splitFilePatches } from "./tool-input.js";
+export { extractToolAction } from "./tool-input.js";
 import { findTruncationPlaceholder } from "./edit-integrity.js";
 import type { PreflightMode } from "./types.js";
 
@@ -40,12 +41,11 @@ export function isShellExecutionTool(
   tool: string,
   additionalTools: readonly string[] = []
 ): boolean {
-  const normalized = tool.toLowerCase();
-  // MCP tool IDs use double-underscore separators, e.g.
-  // mcp__Node_Command__shell_exec. Never treat an arbitrary file_* MCP
-  // action as a shell, but recognize a known shell action by its full suffix.
-  const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-  const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+  const normalized = tool.toLowerCase().trim();
+  // MCP tool IDs use provider-agnostic double-underscore or dotted separators,
+  // e.g. mcp__<provider>__shell_exec. Never treat an arbitrary file_* MCP
+  // action as a shell, but recognize a known shell action by its suffix.
+  const last = extractToolAction(normalized);
   return SHELL_TOOLS.has(last) || additionalTools.some((entry) => {
     const candidate = entry.trim().toLowerCase();
     return candidate === normalized || candidate === last;
@@ -53,18 +53,13 @@ export function isShellExecutionTool(
 }
 
 export function isFileMutationTool(tool: string): boolean {
-  const normalized = tool.toLowerCase();
-  const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-  const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+  const last = extractToolAction(tool);
   return FILE_MUTATION_TOOLS.has(last);
 }
 
 /** A process launcher requires inspection of both the executable and argv. */
 export function isProcessStartTool(tool: string): boolean {
-  const normalized = tool.toLowerCase();
-  const action = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1]
-    ?? normalized.split(/[.:/]/).at(-1);
-  return action === "process_start";
+  return extractToolAction(tool) === "process_start";
 }
 
 function evaluateProcessStartPreflight(
@@ -141,7 +136,8 @@ function isWindowsDestructiveCommand(command: string, depth = 0): boolean {
 
 export function evaluateFileMutationPreflight(
   tool: string,
-  input: unknown
+  input: unknown,
+  mode: PreflightMode = "strict"
 ): PreflightFinding | undefined {
   if (!isFileMutationTool(tool)) return undefined;
   if (!input || typeof input !== "object" || Array.isArray(input)) return "uninspectable-file-input";
@@ -150,12 +146,13 @@ export function evaluateFileMutationPreflight(
   const targetFile =
     (args.path as string) ??
     (args.targetFile as string) ??
+    (args.TargetFile as string) ??
     (args.filePath as string) ??
     (args.file as string) ??
     (typeof patchRaw === "string" ? extractFilePathFromPatch(patchRaw) : undefined);
 
   const textsToCheck: Array<{ text: string; filePath?: string }> = [];
-  for (const key of ["content", "new_string", "newString", "CodeContent", "ReplacementContent", "text"]) {
+  for (const key of ["content", "new_string", "newString", "new_str", "CodeContent", "ReplacementContent", "text", "file_text"]) {
     if (typeof args[key] === "string") {
       textsToCheck.push({
         text: args[key] as string,
@@ -212,8 +209,23 @@ export function evaluateFileMutationPreflight(
   }
 
   const action = typeof args.action === "string" ? args.action.toLowerCase() : "";
+  if (action === "delete" || action === "remove") {
+    if (mode === "strict") {
+      return "destructive-command";
+    }
+    const delTarget = typeof targetFile === "string" ? targetFile.trim() : "";
+    const isCatastrophicDelete =
+      args.recursive === true ||
+      args.force === true ||
+      !delTarget ||
+      /^(?:\/+|~|\.\.?|\*|[a-z]:\\?)$/i.test(delTarget);
+    if (isCatastrophicDelete) {
+      return "destructive-command";
+    }
+    return undefined;
+  }
   if (
-    !["move", "copy", "delete", "remove"].includes(action) &&
+    !["move", "copy"].includes(action) &&
     !hasValidPatchStructure &&
     textsToCheck.length === 0
   ) {
@@ -398,7 +410,7 @@ export function evaluatePreflight(
   }
 
   if (isFileMutationTool(tool)) {
-    return evaluateFileMutationPreflight(tool, input);
+    return evaluateFileMutationPreflight(tool, input, mode);
   }
 
   return undefined;

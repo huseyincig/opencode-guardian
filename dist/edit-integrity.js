@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { maskCodeLiterals } from "./code-context.js";
+import { extractToolAction } from "./tool-input.js";
 export const TRUNCATION_PLACEHOLDERS = [
     /(?:\/\/|#|\/\*|<!--)\s*\.{3}\s*(?:existing|rest\s+of|remaining|previous|earlier|unchanged|keep\s+existing|other|more|code\s+here)\b/i,
     /(?:\/\/|#|\/\*|<!--)\s*(?:existing|rest\s+of|remaining|previous|earlier|unchanged)\s*(?:code|methods|functions|implementation|content|logic)\s*(?:remains|here|unchanged|as\s+is|continues)?\s*\.{3}/i,
@@ -61,7 +62,7 @@ function fileState(directory, target) {
     }
 }
 export function captureBeforeEdit(tool, input, directory) {
-    const action = tool.toLowerCase().replace(/^mcp__[a-z0-9_]+__/, "").split(/[.:/]/).at(-1) ?? "";
+    const action = extractToolAction(tool);
     if (!/^(?:write|write_file|write_to_file|create_file|save_file|replace_file_content|file_write|file_mutate|file_edit|edit|edit_file|str_replace_editor)$/.test(action))
         return undefined;
     const hasFullContent = (Object.hasOwn(input, "content") && typeof input.content === "string") ||

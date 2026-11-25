@@ -31,7 +31,7 @@ Sources:
 ## Reproducible Test Regressions
 
 The mappings above are continuously validated through automated domain test suites:
-- [`tests/preflight.test.mjs`](../tests/preflight.test.mjs): 17-case synthetic preflight benchmark, GuardFall obfuscated shell rewrites, path scoping, `sudo` privilege escalation, and Windows/Node command preflight.
+- [`tests/preflight.test.mjs`](../tests/preflight.test.mjs): 17-case synthetic preflight benchmark, GuardFall obfuscated shell rewrites, path scoping, `sudo` privilege escalation, and Windows/generic MCP command preflight.
 - [`tests/rules-discipline.test.mjs`](../tests/rules-discipline.test.mjs): 28-case balanced 14-rule baseline (one violation and one legitimate-negative per rule), scoped Git authorization boundaries, recognized MCP shell tools, and literal format/fork-bomb signatures.
 - [`tests/rules-completion-and-evidence.test.mjs`](../tests/rules-completion-and-evidence.test.mjs): Supported test-runner counts, outcome semantics, aborted/interrupted tool classification, verification claims, and edit integrity.
 - [`tests/secrets-and-redaction.test.mjs`](../tests/secrets-and-redaction.test.mjs): Multi-layer secret redaction across tool outputs and model context, plus example-file credential rules.

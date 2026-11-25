@@ -11,7 +11,7 @@ console.log("===================================================================
 console.log("     OPENCODE-GUARDIAN — COMPREHENSIVE END-TO-END SCENARIO TEST SUITE");
 console.log("================================================================================");
 
-const sandboxDir = path.dirname(new URL(import.meta.url).pathname);
+const sandboxDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
 const SCENARIOS = [
   {

@@ -1898,4 +1898,272 @@ describe("Chat Turn Isolation & Hardening", () => {
       "tampered requiredSkills must fail provenance verification"
     );
   });
+
+  test("R3 Dalga 1 (R3-005, R3-006): host write-requires-approval overrides mesh write-allowed and host child.agent overrides spoofed mesh/input agentName", async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-r3-005-006-"));
+    fs.writeFileSync(path.join(directory, "opencode-guardian.json"), JSON.stringify({
+      enabled: true,
+      preflight: { enabled: false },
+      secrets: { enabled: false },
+    }));
+    const origStateDir = process.env.OPENCODE_GUARDIAN_STATE_DIR;
+    process.env.OPENCODE_GUARDIAN_STATE_DIR = path.join(directory, "state");
+    const parentID = "parent-r3-005";
+    const childAskID = "child-r3-ask";
+    const childSpoofID = "child-r3-spoof";
+    t.after(() => {
+      forgetMeshSession(parentID);
+      forgetMeshSession(childAskID);
+      forgetMeshSession(childSpoofID);
+      clearAllAgentCapabilities();
+      if (origStateDir === undefined) delete process.env.OPENCODE_GUARDIAN_STATE_DIR;
+      else process.env.OPENCODE_GUARDIAN_STATE_DIR = origStateDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const unregisterRole = registerRoleProfileResolver({
+      owner: "permissive-peer",
+      directory,
+      resolve: (sid) => {
+        if (sid === childAskID) return { capability: "write-allowed", role: "coder", agentName: "ask-agent" };
+        // R3-006: mesh claims permissive agentName "coder-agent" even though host session.agent is "readonly-agent"
+        if (sid === childSpoofID) return { capability: "write-allowed", role: "coder", agentName: "coder-agent" };
+        return undefined;
+      },
+    });
+    t.after(() => unregisterRole());
+
+    let toolBeforeHook;
+    let toolAfterHook;
+    const synthetics = [];
+    const host = {
+      location: { directory },
+      event: {
+        subscribe({ signal }) {
+          return (async function* () {
+            await new Promise((r) => signal.addEventListener("abort", r, { once: true }));
+          })();
+        },
+      },
+      agent: {
+        async list() {
+          return [
+            {
+              id: "ask-agent",
+              name: "ask-agent",
+              permissions: [
+                { permission: "edit", pattern: "*", action: "ask" },
+                { permission: "shell", pattern: "*", action: "ask" },
+              ],
+            },
+            {
+              id: "readonly-agent",
+              name: "readonly-agent",
+              permissions: [
+                { permission: "edit", pattern: "*", action: "deny" },
+                { permission: "shell", pattern: "*", action: "deny" },
+                { permission: "bash", pattern: "*", action: "deny" },
+              ],
+            },
+            {
+              id: "coder-agent",
+              name: "coder-agent",
+              permissions: [{ permission: "edit", pattern: "*", action: "allow" }],
+            },
+          ];
+        },
+      },
+      tool: {
+        hook(kind, fn) {
+          if (kind === "execute.before") toolBeforeHook = fn;
+          if (kind === "execute.after") toolAfterHook = fn;
+          return { dispose() {} };
+        },
+      },
+      session: {
+        async get({ sessionID: sid }) {
+          if (sid === childAskID) return { id: sid, parentID, agent: "ask-agent", location: { directory } };
+          if (sid === childSpoofID) return { id: sid, parentID, agent: "readonly-agent", location: { directory } };
+          return { id: sid, location: { directory } };
+        },
+        async context() {
+          return [
+            { id: "u1", type: "user", text: "Check code" },
+            { id: "a1", type: "assistant", content: [{ type: "text", text: "This test failure is unrelated to my changes." }] },
+          ];
+        },
+        async synthetic(input) { synthetics.push(input); },
+        async wait() {},
+      },
+    };
+
+    const cleanup = await Guardian.setup(host);
+    try {
+      // R3-005: host ask-agent (write-requires-approval) must NOT be overridden by mesh write-allowed
+      await toolBeforeHook({ id: "c-ask", sessionID: parentID, tool: "subagent", input: { prompt: "Check", background: false } });
+      await toolAfterHook({
+        id: "c-ask",
+        sessionID: parentID,
+        tool: "subagent",
+        status: "completed",
+        input: { prompt: "Check", background: false },
+        result: { output: { sessionID: childAskID, status: "completed", output: "This test failure is unrelated to my changes." }, metadata: { sessionID: childAskID, status: "completed" } },
+      });
+      assert.equal(synthetics.length, 0, "R3-005: host write-requires-approval must prevent autonomous remediation despite mesh write-allowed");
+
+      // R3-006: host child.agent="readonly-agent" must override input.agent="coder-agent" AND meshProfile.agentName="coder-agent"
+      await toolBeforeHook({ id: "c-spoof", sessionID: parentID, tool: "subagent", input: { prompt: "Check", agent: "coder-agent", background: false } });
+      await toolAfterHook({
+        id: "c-spoof",
+        sessionID: parentID,
+        tool: "subagent",
+        status: "completed",
+        input: { prompt: "Check", agent: "coder-agent", background: false },
+        result: { output: { sessionID: childSpoofID, status: "completed", output: "This test failure is unrelated to my changes." }, metadata: { sessionID: childSpoofID, status: "completed" } },
+      });
+      assert.equal(synthetics.length, 0, "R3-006: host child.agent must take authority over input.agent and meshProfile.agentName");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  test("R3 Dalga 2 (R3-014, R3-015, R3-025, R3-026, R3-027, R3-028, R3-029): mesh tamper rejection, TTL cap, directory isolation, resolver precedence, RPC standby failover, and owner-scoped intervention clear", async (t) => {
+    const {
+      clearMeshIntervention,
+      hasMeshCapability,
+      registerMeshPeer,
+      registerMeshStateRpc,
+      resetMeshStateForTests,
+    } = await import("../dist/bridge.js");
+
+    // R3-014: tampered ledger token must NEVER pass isTrustedMeshMessage via isHostSynthetic fallback
+    const sid14 = "sess-r3-014-tamper";
+    t.after(() => forgetMeshSession(sid14));
+    const stamped = stampMeshMetadata(sid14, {
+      owner: "opencode-guardian",
+      kind: "remediation",
+      protected: true,
+      taskID: "real-task",
+    });
+    const tamperedSyntheticMsg = {
+      type: "synthetic",
+      synthetic: true,
+      metadata: {
+        ...stamped,
+        "opencode-mesh": { ...stamped["opencode-mesh"], taskID: "hijacked-task" },
+      },
+    };
+    assert.equal(
+      isTrustedMeshMessage(tamperedSyntheticMsg, sid14, "remediation"),
+      false,
+      "R3-014: tampered token present in ledger must never fall back to trusted via isHostSynthetic"
+    );
+
+    // R3-015 & R3-027: lease TTL must be capped (cannot lock session for 1e15 ms)
+    const sid15 = "sess-r3-015-ttl";
+    t.after(() => forgetMeshSession(sid15));
+    const releaseLong = acquireSessionLease({
+      sessionID: sid15,
+      owner: "remote-caller",
+      kind: "user_interaction",
+      ttlMs: 1e15,
+    });
+    const blocker = getBlockingSessionLease(sid15, "active_remediation", "opencode-guardian");
+    assert.ok(blocker, "lease should be active");
+    assert.ok(
+      blocker.expiresAt - blocker.acquiredAt <= 10 * 60_000,
+      `R3-015/R3-027: lease TTL must be capped at <= 10 minutes, got ${blocker.expiresAt - blocker.acquiredAt}ms`
+    );
+    releaseLong();
+
+    // R3-025: directory-scoped v2 peer must NOT leak capability into unrelated directory via legacy fallback
+    resetMeshStateForTests();
+    t.after(() => resetMeshStateForTests());
+    const dirA = "/tmp/r3-025-proj-a";
+    const dirB = "/tmp/r3-025-proj-b";
+    const unregA = registerMeshPeer({
+      id: "opencode-guardian",
+      version: "0.17.9",
+      directory: dirA,
+      capabilities: ["policy.gate"],
+    });
+    try {
+      assert.equal(hasMeshCapability("policy.gate", dirA), true);
+      assert.equal(
+        hasMeshCapability("policy.gate", dirB),
+        false,
+        "R3-025: policy.gate registered only for dirA must not leak into dirB via legacy registry"
+      );
+    } finally {
+      unregA();
+    }
+
+    // R3-026: exact directory resolver beats earlier wildcard "*" resolver, and sessionID mismatch is rejected
+    const targetDir = "/tmp/r3-026-exact";
+    const disposeWildcard = registerRoleProfileResolver({
+      owner: "global-peer",
+      directory: "*",
+      resolve: () => ({ capability: "read-only", role: "wildcard-role", managedBy: "global-peer" }),
+    });
+    const disposeExact = registerRoleProfileResolver({
+      owner: "local-peer",
+      directory: targetDir,
+      resolve: (sid) =>
+        sid === "sess-mismatch"
+          ? { sessionID: "different-session", capability: "write-allowed", role: "wrong-session", managedBy: "local-peer" }
+          : { sessionID: sid, capability: "write-allowed", role: "exact-role", managedBy: "local-peer" },
+    });
+    try {
+      const exactMatch = await resolveMeshAgentProfile("sess-ok", targetDir);
+      assert.equal(exactMatch?.role, "exact-role", "R3-026: exact directory resolver must take precedence over earlier wildcard");
+      const mismatched = await resolveMeshAgentProfile("sess-mismatch", targetDir);
+      assert.equal(mismatched?.role, "wildcard-role", "R3-026: mismatched profile.sessionID must be rejected");
+    } finally {
+      disposeExact();
+      disposeWildcard();
+    }
+
+    // R3-028: primary RPC register failure must promote queued standby with candidate's own directory
+    resetMeshStateForTests();
+    let rejectPrimary;
+    const primaryDone = registerMeshStateRpc({
+      owner: "primary-failing",
+      directory: "/tmp/r3-028-primary",
+      rpcRegister: () => new Promise((_res, rej) => { rejectPrimary = rej; }),
+    });
+    let standbyRegistered = false;
+    const disposeStandby = await registerMeshStateRpc({
+      owner: "standby-peer",
+      directory: "/tmp/r3-028-primary",
+      rpcRegister: async () => {
+        standbyRegistered = true;
+        return { dispose() {} };
+      },
+    });
+    rejectPrimary(new Error("primary rpc failed"));
+    await primaryDone;
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(standbyRegistered, true, "R3-028: queued standby must be promoted when primary rpcRegister fails");
+    await disposeStandby();
+
+    // R3-029: owner-scoped clearMeshIntervention must not delete sibling plugin's intervention
+    const sid29 = "sess-r3-029-owner";
+    t.after(() => forgetMeshSession(sid29));
+    recordMeshIntervention({
+      sessionID: sid29,
+      directory: "/tmp/r3-029",
+      owner: "opencode-hi",
+      kind: "post-warning",
+      ruleIds: ["hi/stall"],
+      deterministic: false,
+      active: true,
+      updatedAt: Date.now(),
+    });
+    clearMeshIntervention(sid29, "opencode-guardian");
+    assert.equal(
+      getLatestMeshIntervention(sid29)?.owner,
+      "opencode-hi",
+      "R3-029: Guardian owner-scoped clear must not wipe sibling plugin intervention"
+    );
+  });
 });

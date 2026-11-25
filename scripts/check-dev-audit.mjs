@@ -40,10 +40,31 @@ const knownUpstreamChain = new Set([
   "undici", "zod",
 ]);
 
+const knownUpstreamAdvisories = new Set([
+  1243609, // seroval (moderate, via @opencode/plugin -> @opentui/solid -> solid-js)
+  1243611, // seroval (moderate)
+  1244013, // glob (moderate, via @opencode/plugin -> npm/cacache)
+  1244623, // minimatch (moderate, via @opencode/plugin -> npm/glob)
+]);
+
 const issues = Object.entries(report.vulnerabilities);
 const unexpected = issues.filter(([name]) => !knownUpstreamChain.has(name));
+const unexpectedAdvisories = [];
+for (const [pkg, info] of issues) {
+  for (const via of info.via ?? []) {
+    if (via && typeof via === "object" && typeof via.source === "number") {
+      if (!knownUpstreamAdvisories.has(via.source)) {
+        unexpectedAdvisories.push(`${via.source} (${pkg}: ${via.severity})`);
+      }
+    }
+  }
+}
 const counts = report.metadata.vulnerabilities;
-const valid = unexpected.length === 0 && counts.critical === 0;
+const valid =
+  unexpected.length === 0 &&
+  unexpectedAdvisories.length === 0 &&
+  counts.critical === 0 &&
+  counts.high === 0;
 
 console.log(`Full development-dependency audit: ${issues.length} vulnerable packages (${counts.high} high, ${counts.moderate} moderate, ${counts.low} low, ${counts.critical} critical).`);
 if (issues.length) {
@@ -53,6 +74,8 @@ if (issues.length) {
 if (!valid) {
   console.error("New or unexpected audit vulnerabilities detected. Investigate before merging.");
   if (unexpected.length) console.error("Unexpected packages:", unexpected.map(([name]) => name).join(", "));
+  if (unexpectedAdvisories.length) console.error("Unexpected advisories:", unexpectedAdvisories.join(", "));
+  if (counts.high > 0) console.error("High vulnerabilities found:", counts.high);
   if (counts.critical > 0) console.error("Critical vulnerabilities found:", counts.critical);
   process.exit(1);
 }

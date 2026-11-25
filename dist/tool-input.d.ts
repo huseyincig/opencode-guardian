@@ -1,3 +1,9 @@
+/**
+ * Extracts the provider-agnostic action name from built-in, dotted/colon/slash-namespaced,
+ * or MCP-prefixed tool identifiers (e.g. `mcp__<provider>__<action>`, `mcp.<provider>.<action>`).
+ * Never hardcodes or depends on any third-party MCP provider name.
+ */
+export declare function extractToolAction(tool: string): string;
 /** Render process argv as literal words, never as additional shell source. */
 export declare function quoteProcessArgument(value: string): string;
 export interface FilePatch {

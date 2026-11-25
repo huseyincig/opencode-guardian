@@ -1,10 +1,11 @@
+export { extractToolAction } from "./tool-input.js";
 import type { PreflightMode } from "./types.js";
 export type PreflightFinding = "destructive-command" | "opaque-shell-execution" | "uninspectable-shell-input" | "hardcoded-secret-in-file-write" | "truncation-placeholder-in-file-write" | "uninspectable-file-input" | "high-risk-environment-dump" | "lazy-commit-message" | "hallucinated-or-malformed-package";
 export declare function isShellExecutionTool(tool: string, additionalTools?: readonly string[]): boolean;
 export declare function isFileMutationTool(tool: string): boolean;
 /** A process launcher requires inspection of both the executable and argv. */
 export declare function isProcessStartTool(tool: string): boolean;
-export declare function evaluateFileMutationPreflight(tool: string, input: unknown): PreflightFinding | undefined;
+export declare function evaluateFileMutationPreflight(tool: string, input: unknown, mode?: PreflightMode): PreflightFinding | undefined;
 export declare function extractGitCommitMessage(command: string): string | undefined;
 export declare function isLazyCommitMessage(command: string): boolean;
 export declare function isHallucinatedOrMalformedPackageInstall(command: string): boolean;

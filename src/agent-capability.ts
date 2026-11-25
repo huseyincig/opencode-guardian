@@ -1,4 +1,4 @@
-import { isFileMutationTool, isShellExecutionTool } from "./preflight.js";
+import { extractToolAction, isFileMutationTool, isShellExecutionTool } from "./preflight.js";
 import type { SessionMessage } from "./types.js";
 
 export type AgentMutationCapability =
@@ -34,8 +34,7 @@ export const KNOWN_READ_ONLY_TOOLS = new Set([
 
 export function isKnownReadOnlyTool(toolName: string): boolean {
   const normalized = toolName.toLowerCase().trim();
-  const mcpAction = /^mcp__[a-z0-9_]+__(.+)$/.exec(normalized)?.[1];
-  const last = mcpAction ?? normalized.split(/[.:/]/).at(-1) ?? "";
+  const last = extractToolAction(normalized);
   return KNOWN_READ_ONLY_TOOLS.has(normalized) || KNOWN_READ_ONLY_TOOLS.has(last);
 }
 

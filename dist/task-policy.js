@@ -20,12 +20,14 @@ export function evaluateTaskPolicy(contract, evidence) {
         const record = evidence.records
             .filter((candidate) => candidate.kind === kind && candidate.sequence > lastMutationSequence)
             .sort((left, right) => right.sequence - left.sequence)[0];
-        const status = record?.status === "success"
-            ? "passed"
-            : record?.status === "failure" || record?.outcomeReason === "no-tests" ||
-                record?.outcomeReason === "skipped-only" || record?.outcomeReason === "summary-conflict"
-                ? "failed"
-                : "unknown";
+        const status = record?.stateFingerprint === "unverified-state"
+            ? "unknown"
+            : record?.status === "success"
+                ? "passed"
+                : record?.status === "failure" || record?.outcomeReason === "no-tests" ||
+                    record?.outcomeReason === "skipped-only" || record?.outcomeReason === "summary-conflict"
+                    ? "failed"
+                    : "unknown";
         return { kind, status, ...(record ? { evidence: record } : {}) };
     });
     return {

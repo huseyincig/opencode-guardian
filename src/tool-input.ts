@@ -1,3 +1,22 @@
+/**
+ * Extracts the provider-agnostic action name from built-in, dotted/colon/slash-namespaced,
+ * or MCP-prefixed tool identifiers (e.g. `mcp__<provider>__<action>`, `mcp.<provider>.<action>`).
+ * Never hardcodes or depends on any third-party MCP provider name.
+ */
+export function extractToolAction(tool: string): string {
+  const normalized = tool.toLowerCase().trim();
+  if (!normalized) return "";
+  if (normalized.startsWith("mcp__")) {
+    const rest = normalized.slice(5);
+    const sep = rest.indexOf("__");
+    if (sep > 0 && sep + 2 < rest.length) {
+      const action = rest.slice(sep + 2);
+      return action.split(/[.:/]/).at(-1) ?? action;
+    }
+  }
+  return normalized.split(/[.:/]/).at(-1) ?? "";
+}
+
 /** Render process argv as literal words, never as additional shell source. */
 export function quoteProcessArgument(value: string): string {
   return /^[a-zA-Z0-9_./:@%+=,-]+$/.test(value)

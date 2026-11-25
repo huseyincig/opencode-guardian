@@ -6,7 +6,17 @@ import type { GuardianToastNotifier } from "./toast.js";
 
 type Part = { tail: string; length: number; checked: number; closed: boolean };
 type Verification = { deltas: number; directory: string; timer: ReturnType<typeof setTimeout> };
-type Response = { messageID: string; active: boolean; pending: boolean; stopped: boolean; warned: boolean; attempts: number; parts: Map<string, Part>; verify?: Verification };
+type Response = {
+  messageID: string;
+  active: boolean;
+  pending: boolean;
+  stopped: boolean;
+  warned: boolean;
+  attempts: number;
+  parts: Map<string, Part>;
+  verify?: Verification;
+  stopUnconfirmed?: { directory: string };
+};
 type Settings = { config: GuardConfig; directory: string };
 const TAIL = 2048;
 const DEFAULT_VERIFY_WINDOW_MS = 4000;
@@ -59,7 +69,12 @@ export class StreamLoopWatcher {
       if (this.options.signal.aborted || this.sessions.get(sessionID) !== state || !state.active) return;
       if (verify.deltas > 0) {
         state.stopped = false;
+        delete state.stopUnconfirmed;
         recordGuardianEvent({ kind: "stream-interrupt-ineffective", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, verify.directory);
+      } else {
+        // No terminal host event arrived during the verification window; if delayed
+        // deltas resume later for the same response, reopen loop detection.
+        state.stopUnconfirmed = { directory: verify.directory };
       }
     }, verifyWindowMs());
     (timer as { unref?: () => void }).unref?.();
@@ -109,6 +124,7 @@ export class StreamLoopWatcher {
           recordGuardianEvent({ kind: "stream-interrupt-verified", session: sessionFingerprint(sid), rules: ["runtime/circuit-breaker"] }, verify.directory);
         }
         this.endVerification(state);
+        delete state.stopUnconfirmed;
         state.active = false;
       }
       return;
@@ -131,6 +147,12 @@ export class StreamLoopWatcher {
       text = data.delta; delta = true;
     } else return;
     if (delta && state.verify) state.verify.deltas++;
+    if (delta && state.stopped && state.stopUnconfirmed && state.active) {
+      const unconfirmed = state.stopUnconfirmed;
+      delete state.stopUnconfirmed;
+      state.stopped = false;
+      recordGuardianEvent({ kind: "stream-interrupt-ineffective", session: sessionFingerprint(sessionID), rules: ["runtime/circuit-breaker"] }, unconfirmed.directory);
+    }
     if (!state.active || state.stopped || state.warned || state.attempts >= 3) return;
     let part = state.parts.get(key);
     if (!part) {

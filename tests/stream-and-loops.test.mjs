@@ -549,4 +549,18 @@ describe("Stream Interruption Verification", () => {
     assert.ok(!kinds.includes("stream-interrupt-ineffective"));
     assert.equal(readGuardianStatus(h.directory).streamStops, 1);
   });
+
+  test("R3 Dalga 3 (R3-043): delayed deltas arriving after verify window closes reopen detection and record stream-interrupt-ineffective", async (t) => {
+    const h = await harness(t);
+    await h.delta(loop);
+    assert.equal(h.calls, 1);
+    // Let the verification window expire with zero deltas
+    await h.sleep(300);
+    assert.ok(!h.kinds().includes("stream-interrupt-ineffective"));
+    // Delayed delta arrives after temporary stall without any terminal host event
+    await h.delta("still looping after stall");
+    assert.ok(h.kinds().includes("stream-interrupt-ineffective"), "R3-043: delayed delta after silent verify window must record stream-interrupt-ineffective");
+    await h.delta(loop);
+    assert.equal(h.calls, 2, "R3-043: delayed delta must re-enable loop detection for subsequent runaway generation");
+  });
 });

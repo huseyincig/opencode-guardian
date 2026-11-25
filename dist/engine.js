@@ -164,7 +164,11 @@ function validateConfig(value) {
             fail("telemetry.enabled");
         if (tel.level !== undefined && !["all", "violations", "off"].includes(tel.level))
             fail("telemetry.level");
-        if (tel.maxBytes !== undefined && (typeof tel.maxBytes !== "number" || !Number.isInteger(tel.maxBytes) || tel.maxBytes < 1)) {
+        if (tel.maxBytes !== undefined &&
+            (typeof tel.maxBytes !== "number" ||
+                !Number.isInteger(tel.maxBytes) ||
+                tel.maxBytes < 256 ||
+                tel.maxBytes > 2 * 1024 * 1024)) {
             fail("telemetry.maxBytes");
         }
     }
@@ -238,6 +242,14 @@ export function resolveEffectiveConfig(base, rawOptions) {
     };
     const severityRank = (sev) => sev === "error" ? 3 : sev === "warn" ? 2 : sev === "off" ? 1 : 0;
     const extractSeverity = (entry) => typeof entry === "string" ? entry : entry?.severity;
+    const TIGHTENING_RULE_BOOLEAN_KEYS = [
+        "blockUnverified",
+        "blockPythonGhostDeps",
+        "productionOnly",
+        "blockEmptyHandlers",
+        "blockSnapshotUpdates",
+        "blockStructuralTestChanges",
+    ];
     for (const [ruleID, next] of Object.entries(validated.rules ?? {})) {
         const previous = mergedRules[ruleID];
         const effectiveBaseRule = previous ?? (base.allowProjectOverrides === false ? DEFAULT_CONFIG.rules?.[ruleID] : undefined);
@@ -252,11 +264,23 @@ export function resolveEffectiveConfig(base, rawOptions) {
                 ...next,
             };
         }
+        else if (base.allowProjectOverrides === false &&
+            typeof next === "string" &&
+            previous &&
+            typeof previous === "object" &&
+            !Array.isArray(previous)) {
+            // Preserve global rule object options (customPhrases, tightening flags, exceptions)
+            // when a locked project overlay supplies a scalar severity.
+            mergedRules[ruleID] = {
+                ...previous,
+                severity: next,
+            };
+        }
         else {
             mergedRules[ruleID] = next;
         }
         if (base.allowProjectOverrides === false && effectiveBaseRule !== undefined) {
-            const baseSev = extractSeverity(effectiveBaseRule);
+            const baseSev = extractSeverity(effectiveBaseRule) ?? extractSeverity(DEFAULT_CONFIG.rules?.[ruleID]);
             const nextEntry = mergedRules[ruleID];
             const nextSev = extractSeverity(nextEntry);
             if (baseSev && severityRank(nextSev) < severityRank(baseSev)) {
@@ -282,6 +306,14 @@ export function resolveEffectiveConfig(base, rawOptions) {
                 if (baseObj?.customPhrases !== undefined) {
                     const combined = new Set([...baseObj.customPhrases, ...(lockedEntry.customPhrases ?? [])]);
                     sanitizedRule.customPhrases = [...combined];
+                }
+                // Tightening boolean options enabled globally must never be turned off by project overlays.
+                if (baseObj) {
+                    for (const boolKey of TIGHTENING_RULE_BOOLEAN_KEYS) {
+                        if (baseObj[boolKey] === true) {
+                            sanitizedRule[boolKey] = true;
+                        }
+                    }
                 }
                 mergedRules[ruleID] = sanitizedRule;
             }
@@ -782,13 +814,24 @@ export class GuardEngine {
                     : 3;
                 // A second prompt requires observable progress. A repeated final
                 // message without any new tool work cannot cause an infinite loop.
+                const iterativeAttempted = effectiveRemediationResponse ||
+                    persistedRemediationCount > 0 ||
+                    this.sessionState.getTurnContinuationCount(sessionID, turnKey) > 0;
                 if (this.sessionState.getTurnContinuationCount(sessionID, turnKey) === 0 &&
                     persistedRemediationCount >= budget) {
-                    return { decision: "pass", results };
+                    return {
+                        decision: "pass",
+                        results,
+                        ...(iterativeAttempted ? { remediationStatus: "failed" } : {}),
+                    };
                 }
                 const progressKey = `${latestMutationSequence(evidence)}:${evidence.records.length}`;
                 if (!this.sessionState.canContinue(sessionID, turnKey, progressKey, budget)) {
-                    return { decision: "pass", results };
+                    return {
+                        decision: "pass",
+                        results,
+                        ...(iterativeAttempted ? { remediationStatus: "failed" } : {}),
+                    };
                 }
                 this.sessionState.recordContinuation(sessionID, turnKey, progressKey);
                 const sequence = this.sessionState.nextHandoffSequence(sessionID, turnKey);
@@ -1016,15 +1059,18 @@ export class GuardEngine {
                     }
                 }
             }
+            const lastFreshMutationSequence = latestMutationSequence(freshEvidence);
+            const freshValidVerifications = successfulFresh.filter((record) => record.sequence > lastFreshMutationSequence &&
+                record.stateFingerprint !== "unverified-state");
             if (verified && pendingRules.some((rule) => ["integrity/no-unverified-claims", "integrity/no-silent-failure"].includes(rule)) &&
-                !successfulFresh.some((record) => ["test", "build", "typecheck", "lint", "audit"].includes(record.kind))) {
+                !freshValidVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit"].includes(record.kind))) {
                 verified = false;
             }
             if (verified && pendingRules.includes("task/completion-gate")) {
                 const required = contract?.requiredVerifications ?? [];
                 const hasRequired = required.length > 0
-                    ? required.every((kind) => successfulFresh.some((record) => record.kind === kind))
-                    : successfulFresh.some((record) => ["test", "build", "typecheck", "lint", "audit"].includes(record.kind));
+                    ? required.every((kind) => freshValidVerifications.some((record) => record.kind === kind))
+                    : freshValidVerifications.some((record) => ["test", "build", "typecheck", "lint", "audit"].includes(record.kind));
                 if (!hasRequired)
                     verified = false;
             }

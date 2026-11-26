@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.6 — 2026-11-26
+
+### Fixed
+- **Worker Session False-Positive Elimination & Actionable `task/completion-gate` Remediation (223 live worker sessions `opencode.db` audit):**
+  - **Verification Evidence (`src/evidence.ts`):**
+    - Extended clean `| tail -N` (`N >= 2`) / `tee` passthrough confirmation to **`lint`** (alongside `typecheck` and `build`) with fail-closed lint warning/error count detection (`Found N warnings/errors`, `✖ N problems`).
+    - Extended `parseExitStatusEchoStage` to accept multi-word quoted exit-status echo labels (`echo "lint exit=${PIPESTATUS[0]}"`, `echo "lint exit: ${PIPESTATUS[0]}"`, `echo "typecheck exit=${PIPESTATUS[0]}"`, `echo "build exit=${PIPESTATUS[0]}"`) so live exit echoes are recognized and never misclassified as output spoofing stages (still rejecting hardcoded `=0` literals and promoting non-zero `=1` captures to `"failure"`).
+    - Recognized `git stash` (`push`/`pop`/`apply`/`save`, excluding `git stash list`) as `"baseline"` evidence.
+  - **Actionable Completion Gate & Policy-Refusal Filtering (`src/rules/task-completion.ts`):**
+    - Included concrete unresolved `blocking` finding details (`pattern` + truncated snippet) inside `task/completion-gate` `remediationPrompt` so agents immediately see *which* execution failed instead of receiving an empty heading.
+    - Treated read-only `read`/`grep` range and glob errors (`invalid_range`, `startLine ... is past the end`, `startLine ... is after endLine`, `no lines selected`, `search path does not exist`, `invalid include/exclude glob`) as benign read-only probe failures.
+    - Filtered host/plugin policy refusals (`outside task <id> scope`, `outside the project boundary`, `write target is not inspectable`, `shell command rejected:`, `is not a known read-only tool`, `not in the read-only allowlist`, `is in planning phase; writes are disabled`), idempotent `newString is already present` edits, and retried `edit` JSON/line-range schema validation errors cleanly.
+  - **Shortcuts, Evasion, Silent Failure, Test Integrity & Secrets Precision (`src/rules/no-shortcuts.ts`, `src/rules/no-evasion.ts`, `src/rules/no-silent-failure.ts`, `src/rules/no-cheat.ts`, `src/rules/no-secrets.ts`):**
+    - Eliminated 76% of `quality/no-shortcuts` advisory noise across worker reports: exempted negated/clean-scan placeholder statements (`placeholder yok`/`yoktur`, `no placeholders`, `placeholder taraması temiz`, `placeholder/TODO/TBD scan clean`, `rather than ... placeholder`), technical sentinel/redaction placeholder terminology, past-tense `"temporary git stash was used"` / `"my first version failed"` references, and `"hard-coded"` golden test-fixture comments inside test files (while keeping active shortcuts blocked).
+    - Supported `git stash` baseline reproductions in `discipline/no-evasion` for pre-existing failure claims (still blocking unproven claims).
+    - Skipped Markdown/text documentation files (`*.md`/`*.txt`) and intentionally commented rollback/best-effort cleanup catches (`catch { // rollback ... } throw error`, `catch { // Best effort ... }`) in `integrity/no-silent-failure`.
+    - Exempted `typeof` type-narrowing guards paired with unconditional sibling assertions from advisory `"conditional assertion"` warnings in `testing/no-cheat`.
+    - Skipped rejected/errored tool calls (`part.state.status === "error"`) that never wrote to disk in `security/no-secrets`.
+- **Verification:**
+  - Added TDD regression suite `tests/live-2026-11-26-fp-closure.test.mjs`: **980 / 980** tests passing across 24 test files (`81` suites), **0** Oxlint warnings/errors across 76 files, strict TypeScript clean, **21 / 21** sandbox scenarios, **10 / 10** live OpenCode `v2.4.1` + Bun `1.4.4` acceptance checks, and full-day live replay across **223 real V2 worker sessions (`351` turns)** in `opencode.db`.
+
 ## 0.18.5 — 2026-11-26
 
 ### Fixed

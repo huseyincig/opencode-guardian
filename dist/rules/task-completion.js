@@ -161,7 +161,7 @@ export const taskCompletionRule = {
                 const toolLower = failure.toolName.toLowerCase();
                 const isReadTool = /^(?:read|read_file|view_file|file_read|read_text_file|glob|find|grep|search|list|ls|stat)$/.test(toolLower);
                 if (isReadTool &&
-                    /(?:enoent|no such file|file not found|does not exist|cannot find)/i.test(errOut)) {
+                    /(?:enoent|no such file|file not found|does not exist|cannot find|invalid_range|startline\s+\d+\s+is\s+(?:past the end|after endline)|no lines selected|search path does not exist|invalid include\/exclude glob)/i.test(errOut)) {
                     return true;
                 }
                 return false;
@@ -226,8 +226,9 @@ export const taskCompletionRule = {
                         (commandIdentity(failure.command) === commandIdentity(later.command) ||
                             isBroaderOrSameVerificationCommand(failure.command, later.command, failure.kind)));
                 }
-                // Non-shell structured tool retry (e.g. `subagent`, `todowrite`, `hi_task`, `aft_callers` failed
-                // schema/validation/ambiguity check and then succeeded on a subsequent call with fixed arguments).
+                // Non-shell structured tool retry (e.g. `subagent`, `todowrite`, `hi_task`, `aft_callers`, `edit` schema error
+                // failed schema/validation/ambiguity check and then succeeded on a subsequent call with fixed arguments).
+                const failureText = `${failure.error ?? ""}\n${failure.output ?? ""}`;
                 if (!failure.command && !later.command && failure.toolName && later.toolName === failure.toolName) {
                     if (failure.filePath && later.filePath) {
                         return failure.filePath === later.filePath;
@@ -235,10 +236,12 @@ export const taskCompletionRule = {
                     if (!failure.filePath) {
                         return true;
                     }
+                    if (/(?:must contain valid json|top-level 'startline' and 'endline' are invalid|invalid arguments for tool)/i.test(failureText)) {
+                        return true;
+                    }
                 }
                 // Shell parameter-validation rejection before command execution (e.g. invalid `timeoutMs` or missing tool arg)
                 // resolved when a subsequent call to the same shell tool succeeds.
-                const failureText = `${failure.error ?? ""}\n${failure.output ?? ""}`;
                 if (failure.kind === "generic" &&
                     later.toolName === failure.toolName &&
                     /(?:invalid arguments for tool|timeoutms must be between|missing required (?:key|field|parameter|argument))/i.test(failureText)) {
@@ -257,8 +260,9 @@ export const taskCompletionRule = {
                         /(?:grep|glob|search|read|find|callers|outline|symbol|zoom|aft)/i.test(later.toolName))) {
                     return true;
                 }
-                // Host/plugin scope or coordinator write refusal (cannot be fixed by retrying the forbidden write).
-                if (/(?:coordinator and cannot write|cannot write [^\n]* directly;\s*delegate|path not in task scope|outside (?:task|write) scope|edit denied[^\n]*scope)/i.test(errOut)) {
+                // Host/plugin scope, project-boundary, inspectability, read-only allowlist, planning-phase, or coordinator refusal
+                // (cannot be fixed by retrying the forbidden action) or idempotent already-present edit.
+                if (/(?:coordinator and cannot write|cannot write [^\n]* directly;\s*delegate|path not in task scope|outside (?:task(?:\s+\S+)?|write) scope|outside the project boundary|write target is not inspectable|edit denied[^\n]*scope|newstring is already present|shell command rejected:|is not a known read-only tool|not in the read-only allowlist|is in planning phase;\s*writes are disabled)/i.test(errOut)) {
                     return true;
                 }
                 return false;
@@ -288,18 +292,25 @@ export const taskCompletionRule = {
                 }
             }
         }
+        const blockingSummary = blocking
+            .slice(0, 6)
+            .map((f) => {
+            const detail = (f.messageSnippet || f.description || "").replace(/\s+/g, " ").trim().slice(0, 180);
+            return detail ? `  - ${f.pattern}: ${detail}` : `  - ${f.pattern}`;
+        })
+            .join("\n");
         return {
             ruleId: this.id,
             decision: blocking.length ? "block" : "pass",
             findings,
             ...(blocking.length ? {
                 remediationPrompt: contract?.requiresExplicitCompletion
-                    ? "Unfinished task review detected:\n\n" +
+                    ? `Unfinished task review detected:\n${blockingSummary}\n\n` +
                         "ACTION REQUIRED:\n" +
                         "1. The current user explicitly requested continued work.\n" +
                         "2. Perform another substantive review after the latest change, and run any explicitly requested checks before claiming completion.\n" +
                         "3. If blocked, explain the concrete blocker and remaining work instead of repeating a failing command."
-                    : "Unresolved command failure detected:\n\n" +
+                    : `Unresolved command failure detected:\n${blockingSummary}\n\n` +
                         "ACTION REQUIRED:\n" +
                         "1. A concrete execution failed and remains unresolved.\n" +
                         "2. Investigate the failure and correct it before stopping.\n" +

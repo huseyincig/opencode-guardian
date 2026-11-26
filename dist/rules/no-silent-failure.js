@@ -164,12 +164,31 @@ export const noSilentFailureRule = {
         const checkCode = (code, source, filePath) => {
             if (!code)
                 return;
+            // Documentation / Markdown files quoting code examples are not executable source code.
+            if (filePath && /\.(?:md|mdx|txt|rst|adoc)$/i.test(filePath))
+                return;
             const executable = maskCodeLiterals(code, false, filePath);
             for (const pattern of EMPTY_HANDLER_PATTERNS) {
                 pattern.regex.lastIndex = 0;
                 const match = pattern.regex.exec(executable);
                 if (!match)
                     continue;
+                // Exempt intentionally commented rollback/cleanup/best-effort catches
+                // (e.g. `try { db.exec("ROLLBACK"); } catch { // rollback failure leaves original error } throw error;`
+                // or `try { await reconcile(); } catch { // Best effort; ... }`).
+                if (pattern.name === "empty JavaScript/TypeScript catch") {
+                    const rawCatchBody = code.slice(match.index, match.index + match[0].length);
+                    const hasExplanatoryComment = /\/\/|\/\*/.test(rawCatchBody);
+                    const afterCatch = executable.slice(match.index + match[0].length, match.index + match[0].length + 140);
+                    const beforeCatch = code.slice(Math.max(0, match.index - 120), match.index);
+                    const isCommentedRollbackBeforeRethrow = hasExplanatoryComment &&
+                        /\bthrow\b/.test(afterCatch) &&
+                        /\b(?:rollback|close|dispose|cleanup|unlink)\b/i.test(`${beforeCatch}\n${rawCatchBody}`);
+                    const isCommentedBestEffortCatch = hasExplanatoryComment &&
+                        /\b(?:best[- ]effort|non-fatal|harmless|intentionally\s+ignored?)\b/i.test(rawCatchBody);
+                    if (isCommentedRollbackBeforeRethrow || isCommentedBestEffortCatch)
+                        continue;
+                }
                 const finding = {
                     ruleId: "integrity/no-silent-failure",
                     pattern: pattern.name,

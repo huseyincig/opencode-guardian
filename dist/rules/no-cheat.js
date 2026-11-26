@@ -400,10 +400,16 @@ export const noCheatRule = {
                     }
                     return false;
                 };
-                const conditionalRe = /\bif\s*\([^\n{};]{1,300}\)\s*\{?\s*(?:expect\s*\(|assert(?:\.|\s*\())/g;
+                const conditionalRe = /\bif\s*\(([^\n{};]{1,300})\)\s*\{?\s*(?:expect\s*\(|assert(?:\.|\s*\())/g;
                 let conditional = conditionalRe.exec(executable);
                 while (conditional) {
-                    if (!hasAssertingElseBranch(executable, conditional.index)) {
+                    const condExpr = (conditional[1] ?? "").trim();
+                    const isTypeofGuard = /^typeof\s+[A-Za-z_$][\w$.?[\]]*\s*===?\s*["'`]?(?:string|number|boolean|object|function|symbol|bigint|undefined)["'`]?$/i.test(condExpr) || /^typeof\s+/.test(condExpr);
+                    const hasSiblingUnconditionalAssertion = isTypeofGuard &&
+                        /(?:expect\s*\(|assert(?:\.|\s*\())/.test(executable.slice(Math.max(0, conditional.index - 260), conditional.index) +
+                            "\n" +
+                            executable.slice(conditional.index + conditional[0].length + 1, conditional.index + conditional[0].length + 260));
+                    if (!hasAssertingElseBranch(executable, conditional.index) && !hasSiblingUnconditionalAssertion) {
                         addFinding({ ruleId: "testing/no-cheat", pattern: "conditional assertion",
                             messageSnippet: extractSnippet(code, conditional.index, conditional[0].length),
                             description: "An assertion executes only conditionally; review that the test still fails when the behavior is broken.",

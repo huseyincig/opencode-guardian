@@ -88,10 +88,21 @@ function claimPaths(text) {
             return KNOWN_FILE_EXTENSIONS.has(extMatch[1].toLowerCase());
         }))].slice(0, 20);
 }
-function baselineCovers(record, path) {
-    if (record.kind !== "baseline" || record.status !== "success")
+function baselineCovers(record, path, allRecords = []) {
+    if (record.kind !== "baseline")
         return false;
     const command = record.command ?? "";
+    // `git stash` (push/pop/save, never bare `git stash list`) reproduces a failure on clean HEAD;
+    // when combined with a test run targeting `path`, the command itself legitimately exits non-zero
+    // because the pre-existing failure reproduces on baseline.
+    if (/\bgit\s+stash(?:\s+(?:push|pop|apply|save)\b|\s*$)/i.test(command)) {
+        if (command.includes(path))
+            return true;
+        return allRecords.some((r) => r.kind === "test" &&
+            Boolean(r.command?.includes(path) || r.output?.includes(path)));
+    }
+    if (record.status !== "success")
+        return false;
     // Literal file scopes, or observed diff headers. Merely mentioning a file
     // in output prose is not a comparison of it.
     const show = /\bgit\s+show\s+[^\s;&|]+:([^\s;&|]+)/.exec(command);
@@ -188,9 +199,11 @@ export const noEvasionRule = {
                         const sentenceStart = Math.max(cleanText.lastIndexOf(". ", matchIdx), cleanText.lastIndexOf("! ", matchIdx), cleanText.lastIndexOf("? ", matchIdx));
                         const sentenceEnd = cleanText.indexOf(". ", matchIdx);
                         const paths = claimPaths(cleanText.slice(sentenceStart < 0 ? 0 : sentenceStart + 2, sentenceEnd < 0 ? undefined : sentenceEnd));
+                        const allRecords = context.evidence?.records ?? [];
                         const supported = paths.length > 0
-                            ? paths.every((path) => context.evidence?.records.some((record) => baselineCovers(record, path)))
-                            : hasSuccessfulEvidence(context.evidence, "baseline");
+                            ? paths.every((path) => allRecords.some((record) => baselineCovers(record, path, allRecords)))
+                            : hasSuccessfulEvidence(context.evidence, "baseline") ||
+                                allRecords.some((record) => record.kind === "baseline" && /\bgit\s+stash(?:\s+(?:push|pop|apply|save)\b|\s*$)/i.test(record.command ?? ""));
                         if (canBeSupportedByBaseline(pattern) && supported) {
                             searchFrom = matchIdx + lowerPattern.length;
                             continue;

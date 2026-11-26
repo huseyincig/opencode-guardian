@@ -425,7 +425,32 @@ export const noShortcutsRule: GuardRule = {
             const matchedSentence = text.slice(sentLeft + 1, sentRight + 1).trim();
             if (
               lowerPattern === "temporary" &&
-              /\b(?:since\s+removed|already\s+removed|was\s+removed|removed|cleaned\s+up|deleted|reverted)\b|(?<!\p{L})(?:kaldırıldı|silindi|temizlendi|geri\s+alındı)(?!\p{L})/iu.test(
+              /\b(?:since\s+removed|already\s+removed|was\s+removed|removed|cleaned\s+up|deleted|reverted|was\s+used|were\s+used|temporarily\s+used|temporary\s+git\s+stash)\b|(?<!\p{L})(?:kaldırıldı|silindi|temizlendi|geri\s+alındı)(?!\p{L})/iu.test(
+                matchedSentence
+              )
+            ) {
+              searchFrom = idx + 1;
+              continue;
+            }
+            if (
+              (lowerPattern === "hard-coded" || lowerPattern === "hardcoded") &&
+              (
+                (typeof targetFile === "string" &&
+                  /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[a-z0-9]+$/i.test(targetFile.replace(/\\/g, "/")) &&
+                  /\b(?:golden|fixture|expected|digest|snapshot|vector|constant|test\s+case)\b/i.test(matchedSentence)) ||
+                (source === "assistant response" &&
+                  /(?:\b(?:instead\s+of(?:\s+the)?|replac(?:ed|ing)(?:\s+the)?|remov(?:ed|ing)(?:\s+the)?|eliminat(?:ed|ing)(?:\s+the)?|no\s+longer)\s+hard-?coded\b|\|\s*HI-[A-Z0-9-]+\s*\|)/i.test(
+                    matchedSentence
+                  ))
+              )
+            ) {
+              searchFrom = idx + 1;
+              continue;
+            }
+            if (
+              lowerPattern === "first version" &&
+              source === "assistant response" &&
+              /(?:\bmy\s+first\s+version(?:\s+of\s+[\w\s-]{1,40})?\s+(?:failed|had|used|contained)\b|\bwas\s+in\s+my\s+first\s+version\b)/i.test(
                 matchedSentence
               )
             ) {
@@ -434,10 +459,16 @@ export const noShortcutsRule: GuardRule = {
             }
             if (
               lowerPattern === "placeholder" &&
-              source === "assistant response" &&
-              (/\b(?:pruned|omitted|all\s+i\s+can\s+see|can\s+only\s+see|only\s+the\s+placeholder|placeholder\s+survived|never\s+received|starting\s+with|i\s+can\s+fix|to\s+fix\s+in-scope|(?:neutral|anonymiz(?:ed|ing)|sanitiz(?:ed|ing)|redacted)\s+placeholder)\b|(?<!\p{L})nötr\s+placeholder/iu.test(
-                matchedSentence
-              )) &&
+              (
+                // Explicitly negated / zero-placeholder reporting or clean placeholder scan reports
+                /(?:\b(?:no|zero|0|without|free\s+of|rather\s+than(?:\s+a|\s+an)?(?:\s+[\w-]+){0,3}|instead\s+of(?:\s+a|\s+an)?(?:\s+[\w-]+){0,3})\s+placeholders?\b|\bplaceholders?\s*[:=]\s*0\b|\bno\s+[\w-]+\s+placeholder\b|\bplaceholder(?:\/[\w-]+)*\s+scan\s+clean\b|\bchecking\s+the\s+placeholder\s+match\b|placeholder[\w-]*\s*=\s*0\b)|(?<!\p{L})(?:placeholder(?:\/[\p{L}\d_-]+)*(?:\s+[\p{L}\d_-]+){0,2}\s+(?:yok(?:tur)?|bulunmuyor|bırakılmadı|içermiyor|sıfır|0)|(?:sıfır|hiç|0)\s+placeholder|yer-tutucu\s*\([^)]*placeholder[^)]*\)\s*yok(?:tur)?|placeholder\s+(?:taraması(?:\s*,?\s*hepsi)?\s*(?:temiz|pass)|isabetleri))(?!\p{L})/iu.test(
+                  matchedSentence
+                ) ||
+                // Technical sentinel / escaping / sanitizer marker / context-pruned / neutral fixture placeholder
+                /\b(?:pruned|omitted|all\s+i\s+can\s+see|can\s+only\s+see|only\s+the\s+placeholder|placeholder\s+survived|never\s+received|starting\s+with|i\s+can\s+fix|to\s+fix\s+in-scope|(?:neutral|anonymiz(?:ed|ing)|sanitiz(?:ed|ing)|redacted|literal|sentinel|private-use|unicode|character|char|regex|regexp|escape[d]?|delimiter|marker|redaction|replacement|pre-masked)\s+placeholder|(?:sanitize|redaction|regex|escape)\/placeholder|placeholder\s+(?:character|char|token|marker|sentinel|that\s+matches\s+only))\b|(?<!\p{L})(?:nötr\s+placeholder|placeholder\s+ile\s+(?:bölündü|ayrıldı|maskelendi|değiştirildi))(?!\p{L})/iu.test(
+                  matchedSentence
+                )
+              ) &&
               !/\b(?:i\s+(?:left|used|added|wrote|put|kept)\s+(?:a|an|this)?\s*placeholder|placeholder\s+(?:for\s+now|implementation\s+for\s+now))\b/i.test(
                 matchedSentence
               )

@@ -277,6 +277,8 @@ export const noSecretsRule: GuardRule = {
       if (msg.info.role !== "assistant") continue;
       for (const part of msg.parts) {
         if (part.type !== "tool" || !part.state?.input) continue;
+        // Rejected/errored tool calls never executed or wrote to disk; do not block post-turn on unapplied payloads.
+        if (part.state.status === "error") continue;
         const input = part.state.input;
         const patchRaw = input.patchText ?? input.patch;
         const targetFile =

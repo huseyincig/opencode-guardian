@@ -295,10 +295,10 @@ const VERIFICATION_STAGE_PATTERNS = [
  */
 function parseExitStatusEchoStage(stage) {
     const trimmed = stage.trim();
-    const m = /^echo\s+(?:(?:"([A-Za-z_][A-Za-z0-9_-]{0,24})(?:[=:\s]+)(\$\?|\$\{PIPESTATUS\[0\]\})")|([A-Za-z_][A-Za-z0-9_-]{0,24})=(\$\?|\$\{PIPESTATUS\[0\]\})|([A-Za-z_][A-Za-z0-9_-]{0,24})\s+(\$\?|\$\{PIPESTATUS\[0\]\}))$/.exec(trimmed);
+    const m = /^echo\s+(?:(?:"([A-Za-z_][A-Za-z0-9_ -]{0,30}?)\s*(?:=|:|\s)\s*(\$\?|\$\{PIPESTATUS\[0\]\})")|([A-Za-z_][A-Za-z0-9_-]{0,24})=(\$\?|\$\{PIPESTATUS\[0\]\})|([A-Za-z_][A-Za-z0-9_-]{0,24})\s+(\$\?|\$\{PIPESTATUS\[0\]\}))$/.exec(trimmed);
     if (!m)
         return undefined;
-    const label = m[1] ?? m[3] ?? m[5] ?? "";
+    const label = (m[1] ?? m[3] ?? m[5] ?? "").trim();
     const varExpr = m[2] ?? m[4] ?? m[6] ?? "";
     if (!label || !varExpr)
         return undefined;
@@ -505,7 +505,8 @@ function classifyCommand(command, toolName) {
     }
     if (anyStage(/^git\s+(?:show|diff|blame|merge-base|rev-parse)\b[^\n;&|]*(?:main|master|origin\/|head\^|head~|[0-9a-f]{7,40})/i) ||
         anyStage(/^git\s+(?:checkout|switch)\s+(?:--detach\s+)?(?:main|master|origin\/[^\s]+)/i) ||
-        anyStage(/^git\s+worktree\b/i)) {
+        anyStage(/^git\s+worktree\b/i) ||
+        anyStage(/^git\s+stash(?:\s+(?:push|pop|apply|save)\b|\s*$)/i)) {
         kinds.add("baseline");
     }
     if (anyStage(/^(?:npm|pnpm|yarn|bun)\s+(?:install|add)\b/) ||
@@ -1394,19 +1395,19 @@ function inspectCompoundSegmentVerification(command, toolName, kind, outputText,
                 /^(?:echo|printf)\b/i.test(stripBenignCommandWrappers(normalizeCommand(s.text))) &&
                 new RegExp(`\\b${escapedLabel}\\b`).test(s.text));
             if (!otherMentionsLabel) {
-                const nonZeroRe = new RegExp(`^${escapedLabel}[=:\\s]+[1-9]\\d*$`, "m");
+                const nonZeroRe = new RegExp(`^${escapedLabel}\\s*(?:=|:|\\s)\\s*[1-9]\\d*$`, "m");
                 if (nonZeroRe.test(outputText)) {
                     return "failure";
                 }
-                const zeroRe = new RegExp(`^${escapedLabel}[=:\\s]+0$`, "m");
+                const zeroRe = new RegExp(`^${escapedLabel}\\s*(?:=|:|\\s)\\s*0$`, "m");
                 if (zeroRe.test(outputText) && (kind !== "test" || !testReason)) {
                     return "success";
                 }
             }
         }
     }
-    // 2. Clean tail (>= 5 lines) or tee passthrough for typecheck/build (which print errors at the tail on failure).
-    if ((kind === "typecheck" || kind === "build") && segPiped && !hasUpstreamPipelineFailureNote(outputText)) {
+    // 2. Clean tail (>= 2 lines) or tee passthrough for typecheck/build/lint (which print errors at the tail on failure).
+    if ((kind === "typecheck" || kind === "build" || kind === "lint") && segPiped && !hasUpstreamPipelineFailureNote(outputText)) {
         const pipeline = splitShellStages(seg.text)[0] ?? [];
         if (pipeline.length >= 2) {
             const filters = pipeline.slice(1).map((s) => stripBenignCommandWrappers(normalizeCommand(s)).toLowerCase());
@@ -1424,7 +1425,7 @@ function inspectCompoundSegmentVerification(command, toolName, kind, outputText,
                 const count = numMatch?.[1] ? Number(numMatch[1]) : 10;
                 return Number.isFinite(count) && count >= 2;
             });
-            const hasBuildOrTsError = /(?:^|\n)\s*(?:.*error TS\d+:|Found [1-9]\d* errors?\.|npm (?:ERR!|error)\b|Build failed|Compilation failed|Command failed|SyntaxError:|TypeError:|ReferenceError:|ERR_MODULE_NOT_FOUND|✖\s+failing tests)/i.test(outputText);
+            const hasBuildOrTsError = /(?:^|\n)\s*(?:.*error TS\d+:|Found [1-9]\d* errors?\.|Found [1-9]\d* warnings? and \d+ errors?\.|Found \d+ warnings? and [1-9]\d* errors?\.|✖\s+\d+\s+problems?|npm (?:ERR!|error)\b|Build failed|Compilation failed|Command failed|SyntaxError:|TypeError:|ReferenceError:|ERR_MODULE_NOT_FOUND|✖\s+failing tests)/i.test(outputText);
             if (safeTailOrTee && !hasBuildOrTsError && !hasOutputSpoofingStage(command, outputText)) {
                 return "success";
             }
